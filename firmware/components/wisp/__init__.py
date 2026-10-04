@@ -23,6 +23,10 @@ CONF_CSI_DROPPED = "csi_dropped"
 CONF_AP_MOTION_SCORE = "ap_motion_score"
 CONF_AP_MOTION = "ap_motion"
 CONF_MOTION_THRESHOLD = "motion_threshold"
+CONF_REPORT_INTERVAL = "report_interval"
+CONF_GRID_NODES = "grid_nodes"
+CONF_GRID_CHANNEL = "grid_channel"
+CONF_AP_MIN_RSSI = "ap_min_rssi"
 
 wisp_ns = cg.esphome_ns.namespace("wisp")
 WispComponent = wisp_ns.class_("WispComponent", cg.Component)
@@ -35,6 +39,18 @@ CONFIG_SCHEMA = cv.Schema(
             cv.Range(min=cv.TimePeriod(milliseconds=10)),
         ),
         cv.Optional(CONF_RAW_STREAM_PORT, default=47010): cv.port,
+        cv.Optional(CONF_REPORT_INTERVAL, default="200ms"): cv.All(
+            cv.positive_time_period_milliseconds,
+            cv.Range(min=cv.TimePeriod(milliseconds=50)),
+        ),
+        cv.Optional(CONF_GRID_CHANNEL, default=0): cv.int_range(min=0, max=14),
+        cv.Optional(CONF_AP_MIN_RSSI, default=-80): cv.int_range(min=-100, max=-30),
+        cv.Optional(CONF_GRID_NODES): sensor.sensor_schema(
+            icon="mdi:hexagon-multiple-outline",
+            accuracy_decimals=0,
+            state_class=STATE_CLASS_MEASUREMENT,
+            entity_category=ENTITY_CATEGORY_DIAGNOSTIC,
+        ),
         cv.Optional(CONF_MOTION_THRESHOLD, default=2.0): cv.float_range(min=1.0, min_included=False),
         cv.Optional(CONF_AP_MOTION_SCORE): sensor.sensor_schema(
             icon="mdi:motion-sensor",
@@ -69,6 +85,12 @@ async def to_code(config):
     cg.add(var.set_ap_ping_interval(config[CONF_AP_PING_INTERVAL]))
     cg.add(var.set_raw_stream_port(config[CONF_RAW_STREAM_PORT]))
     cg.add(var.set_motion_threshold(config[CONF_MOTION_THRESHOLD]))
+    cg.add(var.set_report_interval(config[CONF_REPORT_INTERVAL]))
+    cg.add(var.set_grid_channel(config[CONF_GRID_CHANNEL]))
+    cg.add(var.set_ap_min_rssi(config[CONF_AP_MIN_RSSI]))
+    if CONF_GRID_NODES in config:
+        sens = await sensor.new_sensor(config[CONF_GRID_NODES])
+        cg.add(var.set_grid_nodes_sensor(sens))
     if CONF_AP_MOTION_SCORE in config:
         sens = await sensor.new_sensor(config[CONF_AP_MOTION_SCORE])
         cg.add(var.set_ap_motion_score_sensor(sens))

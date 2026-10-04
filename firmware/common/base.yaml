@@ -22,7 +22,10 @@ external_components:
 wisp:
   id: wisp_node
   ap_ping_interval: 50ms # pings to the gateway: each reply from the AP carries CSI
-  raw_stream_port: 47010
+  raw_stream_port: 47010 # UDP: subscriptions in, raw CSI and link reports out
+  report_interval: 200ms # link reports to subscribers (Home Assistant)
+  grid_channel: 0 # 0 = automatic: channel of the lowest BSSID of this network heard at ap_min_rssi
+  ap_min_rssi: -80
   ap_csi_rate:
     name: AP CSI rate
   csi_dropped:
@@ -36,6 +39,8 @@ wisp:
           - throttle: 10s
   ap_motion:
     name: AP motion
+  grid_nodes:
+    name: Grid nodes
 
 logger:
 
@@ -45,6 +50,7 @@ api:
 
 wifi:
   power_save_mode: none # power save breaks CSI timing and ESP-NOW reception
+  post_connect_roaming: false # Wisp picks the access point itself: all nodes on one channel
   reboot_timeout: 0s
   ap: {} # fallback hotspot named after the node
 

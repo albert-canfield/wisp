@@ -23,29 +23,54 @@ bool UdpStream::open(uint16_t port) {
   return true;
 }
 
-bool UdpStream::poll(uint32_t now_ms) {
+uint8_t UdpStream::poll(uint32_t now_ms) {
   if (this->sock_ < 0)
-    return false;
+    return 0;
   uint8_t buf[16];
   sockaddr_in from = {};
   socklen_t from_len = sizeof(from);
   int n;
   while ((n = lwip_recvfrom(this->sock_, buf, sizeof(buf), 0, reinterpret_cast<sockaddr *>(&from), &from_len)) > 0) {
-    if (wisp_core::is_subscribe_request(buf, static_cast<size_t>(n))) {
-      this->peer_ = from;
-      this->has_peer_ = true;
-      this->lease_until_ms_ = now_ms + wisp_core::SUBSCRIBE_LEASE_MS;
-    }
     from_len = sizeof(from);
+    const uint8_t streams = wisp_core::parse_subscribe(buf, static_cast<size_t>(n));
+    if (streams == 0)
+      continue;
+    // Same address renews; otherwise a free entry; otherwise the one closest to expiry.
+    Subscriber *slot = nullptr;
+    for (auto &s : this->subs_) {
+      if (s.used && s.addr.sin_addr.s_addr == from.sin_addr.s_addr && s.addr.sin_port == from.sin_port) {
+        slot = &s;
+        break;
+      }
+    }
+    for (auto &s : this->subs_) {
+      if (slot == nullptr && !live_(s, now_ms))
+        slot = &s;
+    }
+    if (slot == nullptr) {
+      slot = &this->subs_[0];
+      for (auto &s : this->subs_) {
+        if (static_cast<int32_t>(s.lease_until_ms - slot->lease_until_ms) < 0)
+          slot = &s;
+      }
+    }
+    *slot = Subscriber{from, streams, now_ms + wisp_core::SUBSCRIBE_LEASE_MS, true};
   }
-  return this->has_peer_ && static_cast<int32_t>(this->lease_until_ms_ - now_ms) > 0;
+  uint8_t live = 0;
+  for (const auto &s : this->subs_) {
+    if (live_(s, now_ms))
+      live |= s.streams;
+  }
+  return live;
 }
 
-bool UdpStream::send(const uint8_t *data, size_t len) {
-  if (this->sock_ < 0 || !this->has_peer_)
-    return false;
-  return lwip_sendto(this->sock_, data, len, 0, reinterpret_cast<const sockaddr *>(&this->peer_),
-                     sizeof(this->peer_)) == static_cast<int>(len);
+void UdpStream::send(uint8_t stream, const uint8_t *data, size_t len, uint32_t now_ms) {
+  if (this->sock_ < 0)
+    return;
+  for (const auto &s : this->subs_) {
+    if (live_(s, now_ms) && (s.streams & stream))
+      lwip_sendto(this->sock_, data, len, 0, reinterpret_cast<const sockaddr *>(&s.addr), sizeof(s.addr));
+  }
 }
 
 }  // namespace wisp_platform

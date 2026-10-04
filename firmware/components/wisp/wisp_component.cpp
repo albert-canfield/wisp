@@ -1,9 +1,13 @@
 #include "wisp_component.h"
 
+#include <cmath>
+#include <cstdio>
+
 #include "esp_mac.h"
 #include "esp_netif.h"
 #include "esp_timer.h"
 #include "esp_wifi.h"
+#include "sdkconfig.h"
 
 #include "esphome/components/wifi/wifi_component.h"
 #include "esphome/core/hal.h"
@@ -15,46 +19,152 @@ namespace esphome::wisp {
 
 static const char *const TAG = "wisp";
 
-static constexpr UBaseType_t QUEUE_DEPTH = 12;
-static constexpr uint32_t CORE_TASK_STACK = 4096;
+static constexpr UBaseType_t CSI_QUEUE_DEPTH = 16;
+static constexpr UBaseType_t ESPNOW_QUEUE_DEPTH = 8;
+static constexpr uint32_t CORE_TASK_STACK = 6144;
 static constexpr UBaseType_t CORE_TASK_PRIORITY = 5;
 static constexpr uint32_t STATS_INTERVAL_MS = 10000;
 
+#if defined(CONFIG_IDF_TARGET_ESP32S3)
+static constexpr uint8_t CHIP = wisp_core::CHIP_ESP32S3;
+#elif defined(CONFIG_IDF_TARGET_ESP32C3)
+static constexpr uint8_t CHIP = wisp_core::CHIP_ESP32C3;
+#elif defined(CONFIG_IDF_TARGET_ESP32C6)
+static constexpr uint8_t CHIP = wisp_core::CHIP_ESP32C6;
+#elif defined(CONFIG_IDF_TARGET_ESP32)
+static constexpr uint8_t CHIP = wisp_core::CHIP_ESP32;
+#else
+static constexpr uint8_t CHIP = wisp_core::CHIP_OTHER;
+#endif
+
+static uint32_t core_now_ms() { return static_cast<uint32_t>(esp_timer_get_time() / 1000); }
+
+static void format_mac(const wisp_core::Mac &m, char *out) {
+  snprintf(out, 18, "%02x:%02x:%02x:%02x:%02x:%02x", m.b[0], m.b[1], m.b[2], m.b[3], m.b[4], m.b[5]);
+}
+
 void WispComponent::setup() {
-  esp_read_mac(this->node_mac_, ESP_MAC_WIFI_STA);
-  this->queue_ = xQueueCreate(QUEUE_DEPTH, sizeof(wisp_core::CsiRecord));
-  if (this->queue_ == nullptr) {
-    ESP_LOGE(TAG, "No memory for the CSI queue");
+  esp_read_mac(this->self_.b, ESP_MAC_WIFI_STA);
+  this->grid_ = wisp_core::Grid(this->self_);
+  this->links_.set_threshold(this->motion_threshold_);
+  this->csi_queue_ = xQueueCreate(CSI_QUEUE_DEPTH, sizeof(wisp_core::CsiRecord));
+  this->espnow_queue_ = xQueueCreate(ESPNOW_QUEUE_DEPTH, sizeof(wisp_platform::EspNowFrame));
+  if (this->csi_queue_ == nullptr || this->espnow_queue_ == nullptr) {
+    ESP_LOGE(TAG, "No memory for the core queues");
     this->mark_failed();
     return;
   }
-  this->stream_open_ = this->raw_stream_.open(this->raw_stream_port_);
+  this->stream_open_ = this->stream_.open(this->raw_stream_port_);
   if (!this->stream_open_)
-    ESP_LOGW(TAG, "Raw CSI stream: cannot open UDP port %u", this->raw_stream_port_);
+    ESP_LOGW(TAG, "Cannot open UDP port %u", this->raw_stream_port_);
   xTaskCreate(&WispComponent::core_task_, "wisp_core", CORE_TASK_STACK, this, CORE_TASK_PRIORITY, &this->task_);
   this->last_stats_ms_ = millis();
 }
 
 void WispComponent::loop() {
   const uint32_t now = millis();
+  this->watch_wifi_(now);
   if (now - this->last_check_ms_ < 1000)
     return;
   this->last_check_ms_ = now;
-  if (!this->csi_started_) {
-    this->csi_started_ = this->capture_.start(this->queue_);
-    if (this->csi_started_)
-      ESP_LOGI(TAG, "CSI capture started");
+  if (!this->csi_started_.load() && this->capture_.start(this->csi_queue_)) {
+    this->csi_started_.store(true);
+    ESP_LOGI(TAG, "CSI capture started");
   }
+  if (this->csi_started_.load() && !this->espnow_started_.load() && this->radio_.start(this->espnow_queue_) &&
+      this->scheduler_.start(&this->radio_)) {
+    this->espnow_started_.store(true);
+    ESP_LOGI(TAG, "ESP-NOW grid started");
+  }
+  const bool connected = wifi::global_wifi_component->is_connected();
+  if (connected && !this->was_connected_ && this->csi_started_.load()) {
+    // A (re)connection can reset the radio's CSI settings: arm them again.
+    if (this->capture_.start(this->csi_queue_))
+      ESP_LOGD(TAG, "CSI capture re-armed after connecting");
+  }
+  this->was_connected_ = connected;
+  if (connected && !this->steered_)
+    this->steer_wifi_();
   this->update_ap_();
   if (this->ap_motion_score_sensor_ != nullptr)
     this->ap_motion_score_sensor_->publish_state(this->ap_score_.load());
   if (this->ap_motion_binary_sensor_ != nullptr)
     this->ap_motion_binary_sensor_->publish_state(this->ap_active_.load());
+  if (this->grid_nodes_sensor_ != nullptr) {
+    const float nodes = static_cast<float>(this->grid_nodes_.load());
+    if (this->grid_nodes_sensor_->get_raw_state() != nodes)
+      this->grid_nodes_sensor_->publish_state(nodes);
+  }
   if (now - this->last_stats_ms_ >= STATS_INTERVAL_MS)
     this->publish_stats_(now);
 }
 
-// Follows the home access point: its BSSID filters the CSI, its gateway gets the pings.
+// While ESPHome is (re)connecting, remember the home network's APs from its scan results (it
+// frees them once connected). A pinned AP that stays unreachable is released after a minute,
+// so a node never gets stuck on a dead access point.
+void WispComponent::watch_wifi_(uint32_t now) {
+  auto *wifi = wifi::global_wifi_component;
+  if (wifi->is_connected()) {
+    this->disconnected_since_ = 0;
+    return;
+  }
+  this->steered_ = false;
+  if (this->disconnected_since_ == 0)
+    this->disconnected_since_ = now;
+  const auto &results = wifi->get_scan_result();
+  if (!results.empty()) {
+    const auto sta = wifi->get_sta();
+    for (const auto &r : results) {
+      if (r.get_ssid() == sta.get_ssid())
+        this->aps_seen_.add(wisp_core::Mac::from(r.get_bssid().data()), r.get_channel(), r.get_rssi());
+    }
+  }
+  if (this->pinned_ && now - this->disconnected_since_ > 60000) {
+    auto ap = wifi->get_sta();
+    ap.clear_bssid();
+    ap.set_channel(0);
+    wifi->set_sta(ap);
+    this->pinned_ = false;
+    ESP_LOGW(TAG, "Pinned access point unreachable for a minute, released");
+  }
+}
+
+// Moves this node to the grid channel: same rule on every node, see core_wifi_plan.h.
+void WispComponent::steer_wifi_() {
+  this->steered_ = true;  // once per connection
+  wifi_ap_record_t cur;
+  if (esp_wifi_sta_get_ap_info(&cur) != ESP_OK)
+    return;
+  this->aps_seen_.add(wisp_core::Mac::from(cur.bssid), cur.primary, cur.rssi);
+  const uint8_t channel = wisp_core::choose_grid_channel(this->aps_seen_.data(), this->aps_seen_.count(),
+                                                         this->ap_min_rssi_, this->grid_channel_cfg_);
+  if (channel == 0 || channel == cur.primary) {
+    this->grid_channel_.store(cur.primary);
+    ESP_LOGI(TAG, "On the grid channel %u (%d APs of this network seen)", cur.primary, this->aps_seen_.count());
+    return;
+  }
+  const int i = wisp_core::choose_home_ap(this->aps_seen_.data(), this->aps_seen_.count(), channel);
+  if (i < 0) {
+    ESP_LOGW(TAG, "Grid channel %u has no usable AP of this network", channel);
+    return;
+  }
+  const wisp_core::ApSeen &target = this->aps_seen_.data()[i];
+  auto *wifi = wifi::global_wifi_component;
+  auto ap = wifi->get_sta();
+  wifi::bssid_t bssid;
+  memcpy(bssid.data(), target.bssid.b, 6);
+  ap.set_bssid(bssid);
+  ap.set_channel(channel);
+  wifi->set_sta(ap);
+  wifi->start_connecting(ap);
+  this->pinned_ = true;
+  char mac[18];
+  format_mac(target.bssid, mac);
+  ESP_LOGI(TAG, "Moving from channel %u to the grid channel %u: access point %s (%d dBm)", cur.primary, channel, mac,
+           target.rssi);
+}
+
+// Follows the home access point: its BSSID names the AP link, its gateway gets the pings.
 void WispComponent::update_ap_() {
   if (!wifi::global_wifi_component->is_connected()) {
     if (this->pinger_.running()) {
@@ -64,9 +174,12 @@ void WispComponent::update_ap_() {
     return;
   }
   wifi_ap_record_t ap;
-  if (esp_wifi_sta_get_ap_info(&ap) == ESP_OK)
-    this->capture_.set_source(ap.bssid);
-
+  if (esp_wifi_sta_get_ap_info(&ap) == ESP_OK) {
+    portENTER_CRITICAL(&this->ap_lock_);
+    memcpy(this->bssid_.b, ap.bssid, 6);
+    this->has_bssid_ = true;
+    portEXIT_CRITICAL(&this->ap_lock_);
+  }
   esp_netif_t *sta = esp_netif_get_handle_from_ifkey("WIFI_STA_DEF");
   esp_netif_ip_info_t ip;
   if (sta == nullptr || esp_netif_get_ip_info(sta, &ip) != ESP_OK || ip.gw.addr == 0)
@@ -82,7 +195,7 @@ void WispComponent::update_ap_() {
 }
 
 void WispComponent::publish_stats_(uint32_t now) {
-  const uint32_t frames = this->frames_.exchange(0);
+  const uint32_t frames = this->ap_frames_.exchange(0);
   const float rate = frames * 1000.0f / static_cast<float>(now - this->last_stats_ms_);
   this->last_stats_ms_ = now;
   this->dropped_total_ += this->capture_.take_dropped();
@@ -92,48 +205,179 @@ void WispComponent::publish_stats_(uint32_t now) {
     this->csi_dropped_sensor_->publish_state(this->dropped_total_);
 }
 
-// The core task: drains the CSI queue, scores the AP link once a second and streams raw
-// frames to a subscriber.
+bool WispComponent::home_bssid_(wisp_core::Mac &out) {
+  portENTER_CRITICAL(&this->ap_lock_);
+  const bool has = this->has_bssid_;
+  out = this->bssid_;
+  portEXIT_CRITICAL(&this->ap_lock_);
+  return has;
+}
+
+// ---- Core task ----------------------------------------------------------------------------
+
 void WispComponent::core_task_(void *arg) {
   auto *self = static_cast<WispComponent *>(arg);
   wisp_core::CsiRecord rec;
+  wisp_platform::EspNowFrame frame;
   uint8_t packet[wisp_core::RAW_PACKET_MAX];
-  uint32_t seq = 0;
-  uint32_t last_tick = 0;
+  uint32_t last_round = 0, last_second = 0, last_report = 0;
+  bool grid_started = false;
   for (;;) {
-    const bool got = xQueueReceive(self->queue_, &rec, pdMS_TO_TICKS(100)) == pdTRUE;
-    const uint32_t now = static_cast<uint32_t>(esp_timer_get_time() / 1000);
-    if (now - last_tick >= 1000) {
-      last_tick = now;
-      const float score = self->ap_motion_.tick();
-      self->ap_score_.store(score);
-      self->ap_active_.store(self->detector_.update(score));
+    const bool got = xQueueReceive(self->csi_queue_, &rec, pdMS_TO_TICKS(10)) == pdTRUE;
+    const uint32_t now = core_now_ms();
+    if (!grid_started && self->espnow_started_.load()) {
+      self->grid_.start(now);
+      grid_started = true;
     }
-    const bool streaming = self->stream_open_ && self->raw_stream_enabled_.load() && self->raw_stream_.poll(now);
-    if (!got)
-      continue;
-    self->frames_.fetch_add(1);
-    self->ap_motion_.add_frame(rec);
-    if (streaming) {
-      const size_t n = wisp_core::encode_raw_csi(rec, self->node_mac_, seq++, packet, sizeof(packet));
-      if (n > 0)
-        self->raw_stream_.send(packet, n);
+    while (xQueueReceive(self->espnow_queue_, &frame, 0) == pdTRUE)
+      self->handle_beacon_(frame, now);
+    self->live_streams_ = self->stream_open_ ? self->stream_.poll(now) : 0;
+    if (got)
+      self->handle_csi_(rec, now, packet);
+    if (now - last_round >= wisp_core::ROUND_US / 1000) {
+      last_round = now;
+      self->core_round_(now);
+    }
+    if (now - last_report >= self->report_interval_ms_) {
+      last_report = now;
+      self->send_report_(now);
+    }
+    if (now - last_second >= 1000) {
+      last_second = now;
+      self->core_second_(now);
     }
   }
 }
 
+void WispComponent::handle_csi_(const wisp_core::CsiRecord &rec, uint32_t now, uint8_t *packet) {
+  const wisp_core::Mac src = wisp_core::Mac::from(rec.source);
+  wisp_core::Mac bssid;
+  wisp_core::LinkKind kind;
+  if (this->home_bssid_(bssid) && src == bssid) {
+    kind = wisp_core::LinkKind::ACCESS_POINT;
+    this->ap_frames_.fetch_add(1);
+  } else if (this->grid_.is_member(src)) {
+    kind = wisp_core::LinkKind::NODE;
+  } else {
+    return;  // allowed a moment ago, but no longer a source
+  }
+  this->links_.add_frame(rec, kind, now);
+  if ((this->live_streams_ & wisp_core::STREAM_RAW_CSI) && this->raw_stream_enabled_.load()) {
+    const size_t n = wisp_core::encode_raw_csi(rec, this->self_.b, this->raw_seq_++, packet, wisp_core::RAW_PACKET_MAX);
+    if (n > 0)
+      this->stream_.send(wisp_core::STREAM_RAW_CSI, packet, n, now);
+  }
+}
+
+void WispComponent::handle_beacon_(const wisp_platform::EspNowFrame &f, uint32_t now) {
+  wisp_core::Beacon b;
+  if (!wisp_core::decode_beacon(f.data, f.len, b))
+    return;
+  const wisp_core::Mac from = wisp_core::Mac::from(f.src);
+  if (this->grid_.on_beacon(from, now, f.rssi, b.seq, b.chip, b.uptime_s)) {
+    char mac[18];
+    format_mac(from, mac);
+    ESP_LOGI(TAG, "Node %s joined the grid (%d active)", mac, this->grid_.active_count());
+  }
+}
+
+// Every round: lifecycle, this node's slot, and the beacon it sends in that slot.
+void WispComponent::core_round_(uint32_t now) {
+  const uint32_t version = this->grid_.version();
+  this->grid_.tick(now);
+  if (this->grid_.version() != version)
+    ESP_LOGI(TAG, "Grid changed: %d active nodes", this->grid_.active_count());
+  const int slot = this->grid_.self_slot(now);
+  this->scheduler_.set_slot(slot);
+
+  wisp_core::Beacon b{};
+  b.seq = this->beacon_seq_++;
+  b.flags = this->scheduler_.synced() ? wisp_core::BEACON_FLAG_SYNCED : 0;
+  b.slot = static_cast<int8_t>(slot);
+  b.uptime_s = static_cast<uint32_t>(esp_timer_get_time() / 1000000);
+  b.chip = CHIP;
+  b.active = static_cast<uint8_t>(this->grid_.active_count());
+  wisp_core::Mac bssid;
+  const bool has_bssid = this->home_bssid_(bssid);
+  b.clock_bssid = has_bssid ? bssid : wisp_core::Mac{};
+  auto add_row = [&b, this](const wisp_core::Mac &mac, float rssi) {
+    if (b.row_len >= wisp_core::MAX_ROW)
+      return;
+    const wisp_core::Link *l = this->links_.find(mac);
+    uint8_t score10 = wisp_core::SCORE_UNKNOWN;
+    if (l != nullptr && !std::isnan(l->score))
+      score10 = static_cast<uint8_t>(std::fmin(254.0f, std::fmax(0.0f, l->score * 10.0f)));
+    b.row[b.row_len++] = wisp_core::RowEntry{mac, static_cast<int8_t>(std::lround(rssi)), score10};
+  };
+  if (has_bssid) {
+    const wisp_core::Link *ap = this->links_.find(bssid);
+    if (ap != nullptr)
+      add_row(bssid, ap->rssi_avg);
+  }
+  for (int i = 0; i < this->grid_.count(); i++) {
+    const wisp_core::Member &m = this->grid_.member(i);
+    if (m.state != wisp_core::MemberState::MISSING)
+      add_row(m.mac, m.rssi);
+  }
+  uint8_t buf[wisp_core::BEACON_MAX_BYTES];
+  const size_t n = wisp_core::encode_beacon(b, buf, sizeof(buf));
+  if (n > 0)
+    this->scheduler_.set_beacon(buf, n);
+  this->update_sources_();
+}
+
+// CSI is captured only from the home access point and grid members.
+void WispComponent::update_sources_() {
+  wisp_core::Mac bssid;
+  const bool has_bssid = this->home_bssid_(bssid);
+  if (this->grid_.version() == this->sources_version_ && (!has_bssid || bssid == this->sources_bssid_))
+    return;
+  uint8_t macs[wisp_platform::CsiCapture::MAX_SOURCES][6];
+  int n = 0;
+  if (has_bssid)
+    memcpy(macs[n++], bssid.b, 6);
+  for (int i = 0; i < this->grid_.count() && n < wisp_platform::CsiCapture::MAX_SOURCES; i++)
+    memcpy(macs[n++], this->grid_.member(i).mac.b, 6);
+  this->capture_.set_sources(macs, n);
+  this->sources_version_ = this->grid_.version();
+  this->sources_bssid_ = bssid;
+}
+
+void WispComponent::send_report_(uint32_t now) {
+  uint8_t buf[wisp_core::LINK_REPORT_MAX];
+  const uint32_t uptime = static_cast<uint32_t>(esp_timer_get_time() / 1000000);
+  // Always encode, so every report covers exactly one interval even after a quiet spell.
+  const size_t n = this->links_.encode_report(this->self_, this->report_seq_++, uptime, buf, sizeof(buf));
+  if (n > 0 && (this->live_streams_ & wisp_core::STREAM_LINKS))
+    this->stream_.send(wisp_core::STREAM_LINKS, buf, n, now);
+}
+
+void WispComponent::core_second_(uint32_t now) {
+  this->links_.tick_second(now);
+  wisp_core::Mac bssid;
+  const wisp_core::Link *ap = this->home_bssid_(bssid) ? this->links_.find(bssid) : nullptr;
+  this->ap_score_.store(ap != nullptr ? ap->score : NAN);
+  this->ap_active_.store(ap != nullptr && ap->active);
+  this->grid_nodes_.store(this->grid_.active_count());
+}
+
 void WispComponent::dump_config() {
+  char mac[18];
+  format_mac(this->self_, mac);
   ESP_LOGCONFIG(TAG,
                 "Wisp core:\n"
+                "  Node: %s\n"
                 "  AP ping interval: %" PRIu32 " ms\n"
-                "  Raw CSI stream port: %u%s\n"
+                "  UDP port: %u%s\n"
+                "  Link report interval: %" PRIu32 " ms\n"
                 "  Motion threshold: %.2f",
-                this->ap_ping_interval_ms_, this->raw_stream_port_, this->stream_open_ ? "" : " (not open)",
-                this->motion_threshold_);
+                mac, this->ap_ping_interval_ms_, this->raw_stream_port_, this->stream_open_ ? "" : " (not open)",
+                this->report_interval_ms_, this->motion_threshold_);
   LOG_SENSOR("  ", "AP CSI rate", this->ap_csi_rate_sensor_);
   LOG_SENSOR("  ", "CSI dropped", this->csi_dropped_sensor_);
   LOG_SENSOR("  ", "AP motion score", this->ap_motion_score_sensor_);
   LOG_BINARY_SENSOR("  ", "AP motion", this->ap_motion_binary_sensor_);
+  LOG_SENSOR("  ", "Grid nodes", this->grid_nodes_sensor_);
 }
 
 }  // namespace esphome::wisp

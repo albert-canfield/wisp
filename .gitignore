@@ -19,3 +19,9 @@ node_modules/
 .DS_Store
 .vscode/
 *.zip
+
+# Recorded CSI (large)
+data/
+
+# Local agent worktrees
+.claude/

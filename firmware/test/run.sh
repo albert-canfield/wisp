@@ -7,5 +7,7 @@ if grep -nE '#include "(esphome|esp_|freertos|lwip)|#include <(esp_|freertos|lwi
   exit 1
 fi
 mkdir -p test/build
-${CXX:-c++} -std=c++17 -O1 -Wall -Wextra -Werror -Icomponents/wisp test/test_core.cpp -o test/build/test_core
-test/build/test_core
+for t in test_core test_grid; do
+  ${CXX:-c++} -std=c++17 -O1 -Wall -Wextra -Werror -Icomponents/wisp test/$t.cpp -o test/build/$t
+  test/build/$t
+done

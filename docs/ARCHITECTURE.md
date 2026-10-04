@@ -139,6 +139,8 @@ Many homes have more than one access point under the same WiFi name: a mesh syst
 - **Roaming.** Mesh systems push clients to "better" APs. Nodes ignore steering requests and keep their lock. If an AP keeps disconnecting a node, the hive gives the node another home AP on the grid channel.
 - **APs come and go too.** An AP rebooting, added or removed goes through the same lifecycle as a node: new, missing, forgotten.
 
+**Grid channel (built).** Every node applies one rule to the APs of its own network that it heard while connecting: the grid channel is the channel of the lowest BSSID heard at -80 dBm or better, and the node joins the strongest AP on that channel (pinned in memory only; released if unreachable for a minute). ESPHome's own roaming is off. `grid_channel` in the YAML can force a channel. In the owner's home (APs on 1, 6 and 11) both test nodes moved to channel 1 and formed a grid.
+
 **Same channel or not.** Best results come when every AP's 2.4 GHz radio uses the same channel: then all of them are live sensing points. If they use different channels, nodes stay on the grid channel; APs on other channels only contribute signal strength from a quick scan every few minutes, which helps placement but not live sensing. The setup flow shows which case a home is in and what moving the APs to one channel would gain.
 
 **Access point settings that help.** None are required; each one makes sensing better. Example names are from TP-Link Omada.
@@ -294,7 +296,7 @@ The core compiles on a computer too, so it has host unit tests and a simulator t
 | M0 (done) | Plain ESPHome node: API, OTA, web server, fallback hotspot, Improv, restart, safe mode and factory reset buttons, status LED. Adopted in Home Assistant. | 1 node |
 | M1 (done) | CSI from the AP: ping the router about 20 times a second, stream raw CSI to a computer, record and plot it while walking around. | 1 node |
 | M2 (done) | First disturbance score on the node, as a slow ESPHome sensor. | 1 node |
-| M3 | ESP-NOW beacons, membership, slots, node-to-node CSI. | 3 nodes |
+| M3 (done) | ESP-NOW beacons, membership, slots, node-to-node CSI. | 3 nodes |
 | M4 | Hive rows, node lifecycle and self-healing, proven in the simulator first. | Simulator, then 3 nodes |
 | M5 | UDP link stream and the Wisp integration skeleton with one sensor per link. | 3 nodes |
 | M6 | Several access points: BSSID grouping, overhearing, CSI from beacons. | 3 nodes |

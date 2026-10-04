@@ -12,12 +12,15 @@
 
 namespace wisp_platform {
 
-// Captures CSI from frames sent by one transmitter (the home AP for now) into a queue.
+// Captures CSI from frames sent by known transmitters (access points and grid members) into a
+// queue. Everything else is ignored in the radio callback.
 class CsiCapture {
  public:
+  static constexpr int MAX_SOURCES = 24;
+
   // Enables CSI. Returns false while WiFi is not started yet; call again later.
   bool start(QueueHandle_t queue);
-  void set_source(const uint8_t mac[6]);
+  void set_sources(const uint8_t (*macs)[6], int count);
   uint32_t take_dropped() { return this->dropped_.exchange(0); }
 
  protected:
@@ -25,8 +28,8 @@ class CsiCapture {
 
   QueueHandle_t queue_{nullptr};
   portMUX_TYPE lock_ = portMUX_INITIALIZER_UNLOCKED;
-  uint8_t source_[6]{};
-  bool has_source_{false};
+  uint8_t sources_[MAX_SOURCES][6]{};
+  int source_count_{0};
   std::atomic<uint32_t> dropped_{0};
   wisp_core::CsiRecord scratch_{};  // the WiFi task calls back one frame at a time
 };

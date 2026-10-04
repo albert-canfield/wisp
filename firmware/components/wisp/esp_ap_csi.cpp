@@ -23,10 +23,12 @@ bool CsiCapture::start(QueueHandle_t queue) {
   return esp_wifi_set_csi(true) == ESP_OK;
 }
 
-void CsiCapture::set_source(const uint8_t mac[6]) {
+void CsiCapture::set_sources(const uint8_t (*macs)[6], int count) {
+  if (count > MAX_SOURCES)
+    count = MAX_SOURCES;
   portENTER_CRITICAL(&this->lock_);
-  memcpy(this->source_, mac, 6);
-  this->has_source_ = true;
+  memcpy(this->sources_, macs, 6 * static_cast<size_t>(count));
+  this->source_count_ = count;
   portEXIT_CRITICAL(&this->lock_);
 }
 
@@ -34,8 +36,10 @@ void CsiCapture::on_csi_(void *ctx, wifi_csi_info_t *info) {
   auto *self = static_cast<CsiCapture *>(ctx);
   if (info == nullptr || info->buf == nullptr || self->queue_ == nullptr)
     return;
+  bool match = false;
   portENTER_CRITICAL(&self->lock_);
-  const bool match = self->has_source_ && memcmp(info->mac, self->source_, 6) == 0;
+  for (int i = 0; i < self->source_count_ && !match; i++)
+    match = memcmp(info->mac, self->sources_[i], 6) == 0;
   portEXIT_CRITICAL(&self->lock_);
   if (!match)
     return;

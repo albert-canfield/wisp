@@ -57,10 +57,12 @@ static void test_raw_packet() {
   CHECK(encode_raw_csi(r, node, 0, out, RAW_HEADER_BYTES + 3) == 0);  // too small: refused
 
   const uint8_t sub[] = {'W', 'S', 'U', 'B', PROTOCOL_VERSION};
+  const uint8_t links[] = {'W', 'S', 'U', 'B', PROTOCOL_VERSION, STREAM_LINKS};
   const uint8_t old[] = {'W', 'S', 'U', 'B', 0};
-  CHECK(is_subscribe_request(sub, sizeof(sub)));
-  CHECK(!is_subscribe_request(old, sizeof(old)));
-  CHECK(!is_subscribe_request(sub, 4));
+  CHECK(parse_subscribe(sub, sizeof(sub)) == STREAM_RAW_CSI);
+  CHECK(parse_subscribe(links, sizeof(links)) == STREAM_LINKS);
+  CHECK(parse_subscribe(old, sizeof(old)) == 0);
+  CHECK(parse_subscribe(sub, 4) == 0);
 }
 
 static void test_shape_ignores_gain() {

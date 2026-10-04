@@ -8,7 +8,7 @@
 //  8  4  sequence number       30  1  channel           35  1  flags
 // 12  6  node MAC                                       36  2  CSI length, then CSI bytes
 //
-// A computer asks for the stream by sending "WSUB" + protocol version to the node's raw port;
+// A computer asks for streams by sending "WSUB" + protocol version + stream mask to port 47010;
 // the node streams to that address for a short lease, renewed by each request.
 
 #include <cstddef>
@@ -62,8 +62,15 @@ inline size_t encode_raw_csi(const CsiRecord &r, const uint8_t node_mac[6], uint
   return len;
 }
 
-inline bool is_subscribe_request(const uint8_t *p, size_t len) {
-  return len >= 5 && memcmp(p, "WSUB", 4) == 0 && p[4] == PROTOCOL_VERSION;
+constexpr uint8_t STREAM_RAW_CSI = 0x01;
+constexpr uint8_t STREAM_LINKS = 0x02;
+
+// The streams a subscription asks for (bit mask), or 0 if p is not a subscription.
+// A 5 byte request (version 1 recorders) means raw CSI only.
+inline uint8_t parse_subscribe(const uint8_t *p, size_t len) {
+  if (len < 5 || memcmp(p, "WSUB", 4) != 0 || p[4] != PROTOCOL_VERSION)
+    return 0;
+  return len >= 6 ? p[5] : STREAM_RAW_CSI;
 }
 
 }  // namespace wisp_core
