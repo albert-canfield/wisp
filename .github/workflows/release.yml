@@ -1,0 +1,109 @@
+name: Release
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch: # dry run: builds and generates the manifest, deploys nothing
+
+permissions:
+  contents: read
+
+jobs:
+  version:
+    name: Version matches tag
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.check.outputs.version }}
+    steps:
+      - uses: actions/checkout@v7
+      - name: Compare tag, firmware and integration versions
+        id: check
+        env:
+          TAG: ${{ github.event.release.tag_name }}
+        run: |
+          FIRMWARE=$(python3 -c "import re;print(re.search(r'^\s*project_version:\s*\"?([^\"\s#]+)', open('firmware/common/base.yaml').read(), re.M).group(1))")
+          echo "firmware=$FIRMWARE"
+          [[ "$FIRMWARE" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "::error::project_version $FIRMWARE is not X.Y.Z"; exit 1; }
+          if [ -f custom_components/wisp/manifest.json ]; then
+            INTEGRATION=$(python3 -c "import json;print(json.load(open('custom_components/wisp/manifest.json'))['version'])")
+            echo "integration=$INTEGRATION"
+            [ "$INTEGRATION" = "$FIRMWARE" ] || { echo "::error::integration $INTEGRATION and firmware $FIRMWARE differ"; exit 1; }
+          fi
+          if [ "$GITHUB_EVENT_NAME" = release ]; then
+            echo "tag=$TAG"
+            [ "$TAG" = "v$FIRMWARE" ] || { echo "::error::tag $TAG does not match v$FIRMWARE"; exit 1; }
+          fi
+          echo "version=$FIRMWARE" >> "$GITHUB_OUTPUT"
+
+  firmware:
+    name: Firmware
+    needs: version
+    uses: ./.github/workflows/firmware.yml
+
+  publish:
+    name: Manifest and release assets
+    needs: [version, firmware]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # attach assets to the release
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: firmware-*
+          path: images
+          merge-multiple: true
+
+      - name: Generate manifest
+        env:
+          VERSION: ${{ needs.version.outputs.version }}
+          RELEASE_URL: ${{ github.event.release.html_url || format('{0}/{1}/releases/tag/v{2}', github.server_url, github.repository, needs.version.outputs.version) }}
+          SUMMARY: ${{ github.event.release.name }}
+        run: |
+          python3 .github/scripts/make_manifest.py \
+            --template docs/flasher/manifest.json \
+            --images images \
+            --version "$VERSION" \
+            --release-url "$RELEASE_URL" \
+            --summary "$SUMMARY" \
+            --output images/manifest.json
+          { echo '```json'; cat images/manifest.json; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+
+      # Pages serves this folder at the site root: flasher page, manifest and images side by side.
+      - name: Assemble site
+        run: |
+          mkdir site
+          cp -R docs/flasher/. site/
+          cp images/*.factory.bin images/*.ota.bin images/manifest.json site/
+          ls -l site
+
+      - name: Attach to release
+        if: github.event_name == 'release'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.event.release.tag_name }}
+        run: gh release upload "$TAG" images/*.bin images/*.elf images/manifest.json --repo "$GITHUB_REPOSITORY" --clobber
+
+      - uses: actions/upload-pages-artifact@v5
+        with:
+          path: site
+
+  deploy:
+    name: GitHub Pages
+    # Pre-releases get their assets but leave the flasher and the update manifest alone.
+    if: github.event_name == 'release' && !github.event.release.prerelease
+    needs: publish
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    concurrency:
+      group: pages
+      cancel-in-progress: false
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v5

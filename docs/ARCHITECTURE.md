@@ -329,7 +329,7 @@ Both ship inside the integration and register themselves, so one HACS install br
 2. After flashing, the page asks for WiFi credentials over Improv Serial.
 3. The node joins WiFi, announces itself over mDNS and Home Assistant discovers it.
 
-The manifest points at one factory image per chip (bootloader, partition table and app) at offset 0, plus an `ota` block (OTA image, md5, release notes) that ESPHome's update entity reads, so the same file drives first installs and updates. A GitHub Actions workflow, triggered by a version tag, builds the firmware with ESPHome (`esphome/build-action`), writes the version and OTA details into `manifest.json`, publishes `docs/flasher` to GitHub Pages and attaches the images to the release.
+The manifest points at one factory image per chip (bootloader, partition table and app) at offset 0, plus an `ota` block (OTA image, md5, release notes) that ESPHome's update entity reads, so the same file drives first installs and updates. A GitHub Actions workflow, triggered by publishing a GitHub release `vX.Y.Z`, builds the firmware with ESPHome (`esphome/build-action`), writes the version and OTA details into `manifest.json`, publishes `docs/flasher` to GitHub Pages and attaches the images to the release.
 
 ## Transport
 

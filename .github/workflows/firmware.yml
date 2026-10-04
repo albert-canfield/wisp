@@ -1,0 +1,72 @@
+name: Firmware
+
+on:
+  push:
+    branches: ["**"] # tags are built by the release workflow
+    paths:
+      - "firmware/**"
+      - ".github/workflows/firmware.yml"
+  pull_request:
+    paths:
+      - "firmware/**"
+      - ".github/workflows/firmware.yml"
+  workflow_call: # the release workflow builds through this file
+
+permissions:
+  contents: read
+
+env:
+  ESPHOME_VERSION: "2026.9.1"
+
+jobs:
+  core:
+    name: Core tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - run: firmware/test/run.sh
+        env:
+          CXX: g++
+
+  build:
+    name: Build ${{ matrix.chip }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        chip: [esp32s3, esp32c3]
+    steps:
+      - uses: actions/checkout@v7
+
+      # ESP-IDF, its toolchains and the ccache land in ~/.cache/esphome. All are pinned by the
+      # ESPHome version and the chip, so the cache is saved once per version and chip.
+      # Build folders are never cached, so every build starts clean.
+      - name: Cache ESP-IDF and toolchains
+        uses: actions/cache@v6
+        with:
+          path: ~/.cache/esphome
+          key: esphome-${{ env.ESPHOME_VERSION }}-${{ matrix.chip }}-${{ runner.os }}-${{ runner.arch }}
+
+      - name: Build
+        id: build
+        uses: esphome/build-action@ae5408cdbc4f70692bf8e345c4982bca05a93667 # v8.1.0
+        with:
+          yaml-file: firmware/wisp-node-${{ matrix.chip }}.yaml
+          version: ${{ env.ESPHOME_VERSION }}
+
+      - name: Name images
+        env:
+          NAME: ${{ steps.build.outputs.name }} # wisp-<chip>, the folder build-action wrote
+          CHIP: ${{ matrix.chip }}
+        run: |
+          mkdir images
+          cp "$NAME/$NAME.factory.bin" "images/wisp-node-$CHIP.factory.bin"
+          cp "$NAME/$NAME.ota.bin" "images/wisp-node-$CHIP.ota.bin"
+          cp "$NAME/$NAME.elf" "images/wisp-node-$CHIP.elf"
+          ls -l images
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: firmware-${{ matrix.chip }}
+          path: images/
+          if-no-files-found: error
