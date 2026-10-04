@@ -362,9 +362,10 @@ wisp/
     common/base.yaml         ESPHome base shared by every chip
     wisp-node-esp32c3.yaml   ESPHome config per chip
     wisp-node-esp32s3.yaml
-    components/wisp/         ESPHome external component
-      core/                  wisp-core: portable C++, no ESPHome or ESP-IDF includes
-      platform/              ESP-IDF adapter: CSI, ESP-NOW, clock, NVS, UDP
+    components/wisp/         ESPHome external component, one flat folder (ESPHome copies no subfolders)
+      core_*                 wisp-core: portable C++, never includes ESPHome or ESP-IDF
+      esp_*                  ESP-IDF adapter: CSI, ESP-NOW, clock, NVS, UDP
+      wisp_component.*       ESPHome wrapper
     test/                    host unit tests and the grid simulator
     tools/                   CSI recorder and plotter (Python)
   custom_components/wisp/

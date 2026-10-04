@@ -9,8 +9,6 @@ esp32:
   flash_size: 4MB
   framework:
     type: esp-idf
-    sdkconfig_options:
-      CONFIG_ESP_WIFI_CSI_ENABLED: y
 
 dashboard_import:
   package_import_url: github://albert-canfield/wisp/firmware/wisp-node-esp32c3.yaml@main

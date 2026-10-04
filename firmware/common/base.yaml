@@ -1,5 +1,4 @@
-# Wisp node: ESPHome base shared by every chip.
-# Wisp's core (grid, hive, CSI) arrives as the `wisp` external component from M1 on.
+# Wisp node: ESPHome base shared by every chip. Wisp's core is the `wisp` external component.
 
 substitutions:
   name: wisp
@@ -14,6 +13,20 @@ esphome:
   project:
     name: albert-canfield.wisp-node
     version: ${project_version}
+
+external_components:
+  - source:
+      type: local
+      path: components
+
+wisp:
+  id: wisp_node
+  ap_ping_interval: 50ms # pings to the gateway: each reply from the AP carries CSI
+  raw_stream_port: 47010
+  ap_csi_rate:
+    name: AP CSI rate
+  csi_dropped:
+    name: CSI dropped
 
 logger:
 
@@ -49,6 +62,18 @@ update:
 
 debug:
   update_interval: 60s
+
+switch:
+  - platform: template
+    name: Raw CSI stream
+    icon: mdi:waveform
+    entity_category: config
+    optimistic: true
+    restore_mode: RESTORE_DEFAULT_OFF
+    on_turn_on:
+      - lambda: id(wisp_node).set_raw_stream_enabled(true);
+    on_turn_off:
+      - lambda: id(wisp_node).set_raw_stream_enabled(false);
 
 button:
   - platform: restart
