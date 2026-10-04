@@ -1,0 +1,83 @@
+# Wisp node: ESPHome base shared by every chip.
+# Wisp's core (grid, hive, CSI) arrives as the `wisp` external component from M1 on.
+
+substitutions:
+  name: wisp
+  friendly_name: Wisp
+  project_version: "0.1.0"
+
+esphome:
+  name: ${name}
+  friendly_name: ${friendly_name}
+  name_add_mac_suffix: true
+  min_version: 2026.9.0
+  project:
+    name: albert-canfield.wisp-node
+    version: ${project_version}
+
+logger:
+
+# Nodes keep sensing without Home Assistant or WiFi, so never reboot for a missing connection.
+api:
+  reboot_timeout: 0s
+
+wifi:
+  power_save_mode: none # power save breaks CSI timing and ESP-NOW reception
+  reboot_timeout: 0s
+  ap: {} # fallback hotspot named after the node
+
+captive_portal:
+
+improv_serial:
+
+web_server:
+  version: 3
+
+safe_mode:
+
+ota:
+  - platform: esphome
+  - platform: http_request
+
+http_request:
+
+update:
+  - platform: http_request
+    name: Firmware
+    source: https://albert-canfield.github.io/wisp/manifest.json
+    update_interval: 6h
+
+debug:
+  update_interval: 60s
+
+button:
+  - platform: restart
+    name: Restart
+  - platform: safe_mode
+    name: Safe mode
+  - platform: factory_reset
+    name: Factory reset
+
+sensor:
+  - platform: uptime
+    name: Uptime
+  - platform: wifi_signal
+    name: WiFi signal
+    update_interval: 60s
+  - platform: debug
+    free:
+      name: Free memory
+
+text_sensor:
+  - platform: wifi_info
+    ip_address:
+      name: IP address
+    ssid:
+      name: WiFi network
+    bssid:
+      name: Access point
+    mac_address:
+      name: MAC address
+  - platform: debug
+    reset_reason:
+      name: Reset reason

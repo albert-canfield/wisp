@@ -5,11 +5,12 @@ __pycache__/
 .ruff_cache/
 .venv/
 
-# ESP-IDF (commit sdkconfig.defaults, not sdkconfig)
-firmware/build/
-firmware/managed_components/
-firmware/sdkconfig
-firmware/sdkconfig.old
+# ESPHome
+.esphome/
+secrets.yaml
+
+# Host builds (tests, simulator)
+firmware/test/build/
 
 # Node
 node_modules/

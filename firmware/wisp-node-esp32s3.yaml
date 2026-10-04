@@ -1,0 +1,19 @@
+# Wisp node for ESP32-S3 boards. Tested on an ESP32-S3 N16R8 DevKitC board.
+# Generic build: 4 MB layout and no PSRAM, so it runs on every S3 board.
+
+packages:
+  base: !include common/base.yaml
+  status_led: !include common/status_led_rgb.yaml
+
+esp32:
+  board: esp32-s3-devkitc-1
+  variant: esp32s3
+  flash_size: 4MB
+  framework:
+    type: esp-idf
+    sdkconfig_options:
+      CONFIG_ESP_WIFI_CSI_ENABLED: y
+
+dashboard_import:
+  package_import_url: github://albert-canfield/wisp/firmware/wisp-node-esp32s3.yaml@main
+  import_full_config: false
