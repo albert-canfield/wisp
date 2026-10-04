@@ -1,0 +1,22 @@
+{
+  "name": "Wisp Node",
+  "version": "0.0.0",
+  "home_assistant_domain": "wisp",
+  "new_install_prompt_erase": true,
+  "builds": [
+    {
+      "chipFamily": "ESP32-C3",
+      "improv": true,
+      "parts": [
+        { "path": "wisp-node-esp32c3.factory.bin", "offset": 0 }
+      ]
+    },
+    {
+      "chipFamily": "ESP32-S3",
+      "improv": true,
+      "parts": [
+        { "path": "wisp-node-esp32s3.factory.bin", "offset": 0 }
+      ]
+    }
+  ]
+}

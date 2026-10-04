@@ -1,0 +1,120 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Wisp Node Flasher</title>
+  <meta name="description" content="Install the Wisp node firmware on an ESP32 from your browser.">
+  <link rel="icon" href="icon.svg" type="image/svg+xml">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Libre+Baskerville:ital,wght@0,400;0,700;1,700&display=swap" rel="stylesheet">
+  <script type="module" src="https://unpkg.com/esp-web-tools@10.4.0/dist/web/install-button.js?module"></script>
+  <style>
+    :root {
+      --ink: #4b2e16;
+      --ink-soft: #6b4a2c;
+      --paper: #f3e6c4;
+      --paper-deep: #e6cf98;
+      --card: #fbf3dc;
+      --line: #d2b47a;
+      --accent: #8a4b1c;
+      --accent-text: #fbf3dc;
+    }
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --ink: #f1e2b8;
+        --ink-soft: #cdb98f;
+        --paper: #1c140c;
+        --paper-deep: #120c07;
+        --card: #2a1e12;
+        --line: #4a3520;
+        --accent: #e0b56a;
+        --accent-text: #1c140c;
+      }
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      min-height: 100vh;
+      background: radial-gradient(ellipse at 50% 30%, var(--paper), var(--paper-deep));
+      color: var(--ink);
+      font: 17px/1.6 "Libre Baskerville", Baskerville, Georgia, serif;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      padding: 48px 16px 32px;
+    }
+    main { width: 100%; max-width: 560px; }
+    header { text-align: center; margin-bottom: 28px; }
+    header img { width: 112px; height: 112px; filter: drop-shadow(0 6px 14px rgb(75 46 22 / 0.25)); }
+    h1 { font-style: italic; font-size: 2.6rem; margin: 12px 0 0; line-height: 1.1; }
+    .subtitle { margin: 6px 0 0; color: var(--ink-soft); letter-spacing: 0.04em; font-size: 0.95rem; }
+    .card {
+      background: var(--card);
+      border: 1px solid var(--line);
+      border-radius: 16px;
+      padding: 24px 24px 28px;
+      box-shadow: 0 10px 30px rgb(75 46 22 / 0.12);
+    }
+    ol { margin: 0 0 24px; padding-left: 1.3em; }
+    li { margin: 0 0 10px; }
+    li::marker { font-weight: 700; color: var(--accent); }
+    .install { text-align: center; }
+    .install button {
+      font: inherit;
+      font-weight: 700;
+      background: var(--accent);
+      color: var(--accent-text);
+      border: 0;
+      border-radius: 999px;
+      padding: 12px 34px;
+      cursor: pointer;
+    }
+    .install button:hover { filter: brightness(1.08); }
+    .install button:focus-visible { outline: 3px solid var(--line); outline-offset: 3px; }
+    .notice { display: block; color: var(--ink-soft); font-size: 0.95rem; }
+    .version { margin: 14px 0 0; text-align: center; color: var(--ink-soft); font-size: 0.85rem; }
+    footer { margin-top: 28px; font-size: 0.85rem; color: var(--ink-soft); text-align: center; }
+    a { color: var(--accent); }
+  </style>
+</head>
+<body>
+  <main>
+    <header>
+      <img src="icon.svg" alt="">
+      <h1>Wisp Node</h1>
+      <p class="subtitle">WiFi Spatial Presence for Home Assistant</p>
+    </header>
+
+    <section class="card">
+      <ol>
+        <li>Plug an ESP32-C3 or ESP32-S3 board into this computer by USB.</li>
+        <li>Click <b>Install</b> and pick the board's serial port.</li>
+        <li>When flashing ends, enter your WiFi name and password.</li>
+        <li>Home Assistant discovers the node. Set its floor and place it on your floor plan in the Wisp integration.</li>
+      </ol>
+
+      <div class="install">
+        <esp-web-install-button manifest="manifest.json">
+          <button slot="activate">Install</button>
+          <span slot="unsupported" class="notice">This browser cannot flash boards. Use Chrome or Edge on a computer.</span>
+          <span slot="not-allowed" class="notice">Flashing needs a secure (https) page.</span>
+        </esp-web-install-button>
+      </div>
+      <p class="version" id="version"></p>
+    </section>
+
+    <footer>
+      <a href="https://github.com/albert-canfield/wisp">Wisp on GitHub</a> · MIT License
+    </footer>
+  </main>
+
+  <script>
+    fetch("manifest.json")
+      .then((r) => r.json())
+      .then((m) => { document.getElementById("version").textContent = "Firmware " + m.version; })
+      .catch(() => {});
+  </script>
+</body>
+</html>

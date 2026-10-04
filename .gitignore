@@ -1,0 +1,20 @@
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.venv/
+
+# ESP-IDF (commit sdkconfig.defaults, not sdkconfig)
+firmware/build/
+firmware/managed_components/
+firmware/sdkconfig
+firmware/sdkconfig.old
+
+# Node
+node_modules/
+
+# OS and editor
+.DS_Store
+.vscode/
+*.zip
