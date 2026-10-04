@@ -46,6 +46,10 @@ void WispComponent::loop() {
       ESP_LOGI(TAG, "CSI capture started");
   }
   this->update_ap_();
+  if (this->ap_motion_score_sensor_ != nullptr)
+    this->ap_motion_score_sensor_->publish_state(this->ap_score_.load());
+  if (this->ap_motion_binary_sensor_ != nullptr)
+    this->ap_motion_binary_sensor_->publish_state(this->ap_active_.load());
   if (now - this->last_stats_ms_ >= STATS_INTERVAL_MS)
     this->publish_stats_(now);
 }
@@ -88,19 +92,28 @@ void WispComponent::publish_stats_(uint32_t now) {
     this->csi_dropped_sensor_->publish_state(this->dropped_total_);
 }
 
-// The core task: drains the CSI queue and streams raw frames to a subscriber.
+// The core task: drains the CSI queue, scores the AP link once a second and streams raw
+// frames to a subscriber.
 void WispComponent::core_task_(void *arg) {
   auto *self = static_cast<WispComponent *>(arg);
   wisp_core::CsiRecord rec;
   uint8_t packet[wisp_core::RAW_PACKET_MAX];
   uint32_t seq = 0;
+  uint32_t last_tick = 0;
   for (;;) {
     const bool got = xQueueReceive(self->queue_, &rec, pdMS_TO_TICKS(100)) == pdTRUE;
     const uint32_t now = static_cast<uint32_t>(esp_timer_get_time() / 1000);
+    if (now - last_tick >= 1000) {
+      last_tick = now;
+      const float score = self->ap_motion_.tick();
+      self->ap_score_.store(score);
+      self->ap_active_.store(self->detector_.update(score));
+    }
     const bool streaming = self->stream_open_ && self->raw_stream_enabled_.load() && self->raw_stream_.poll(now);
     if (!got)
       continue;
     self->frames_.fetch_add(1);
+    self->ap_motion_.add_frame(rec);
     if (streaming) {
       const size_t n = wisp_core::encode_raw_csi(rec, self->node_mac_, seq++, packet, sizeof(packet));
       if (n > 0)
@@ -113,10 +126,14 @@ void WispComponent::dump_config() {
   ESP_LOGCONFIG(TAG,
                 "Wisp core:\n"
                 "  AP ping interval: %" PRIu32 " ms\n"
-                "  Raw CSI stream port: %u%s",
-                this->ap_ping_interval_ms_, this->raw_stream_port_, this->stream_open_ ? "" : " (not open)");
+                "  Raw CSI stream port: %u%s\n"
+                "  Motion threshold: %.2f",
+                this->ap_ping_interval_ms_, this->raw_stream_port_, this->stream_open_ ? "" : " (not open)",
+                this->motion_threshold_);
   LOG_SENSOR("  ", "AP CSI rate", this->ap_csi_rate_sensor_);
   LOG_SENSOR("  ", "CSI dropped", this->csi_dropped_sensor_);
+  LOG_SENSOR("  ", "AP motion score", this->ap_motion_score_sensor_);
+  LOG_BINARY_SENSOR("  ", "AP motion", this->ap_motion_binary_sensor_);
 }
 
 }  // namespace esphome::wisp

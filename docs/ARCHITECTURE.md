@@ -291,9 +291,9 @@ The core compiles on a computer too, so it has host unit tests and a simulator t
 
 | Step | What | Hardware |
 |---|---|---|
-| M0 | Plain ESPHome node: API, OTA, web server, fallback hotspot, Improv, restart, safe mode and factory reset buttons, status LED. Adopted in Home Assistant. | 1 node |
-| M1 | CSI from the AP: ping the router about 20 times a second, stream raw CSI to a computer, record and plot it while walking around. | 1 node |
-| M2 | First disturbance score on the node, as a slow ESPHome sensor. | 1 node |
+| M0 (done) | Plain ESPHome node: API, OTA, web server, fallback hotspot, Improv, restart, safe mode and factory reset buttons, status LED. Adopted in Home Assistant. | 1 node |
+| M1 (done) | CSI from the AP: ping the router about 20 times a second, stream raw CSI to a computer, record and plot it while walking around. | 1 node |
+| M2 (done) | First disturbance score on the node, as a slow ESPHome sensor. | 1 node |
 | M3 | ESP-NOW beacons, membership, slots, node-to-node CSI. | 3 nodes |
 | M4 | Hive rows, node lifecycle and self-healing, proven in the simulator first. | Simulator, then 3 nodes |
 | M5 | UDP link stream and the Wisp integration skeleton with one sensor per link. | 3 nodes |

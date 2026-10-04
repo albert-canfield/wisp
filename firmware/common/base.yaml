@@ -27,6 +27,15 @@ wisp:
     name: AP CSI rate
   csi_dropped:
     name: CSI dropped
+  motion_threshold: 2.0 # score at which AP motion turns on (1 = as quiet as usual)
+  ap_motion_score:
+    name: AP motion score
+    filters:
+      - or: # report big changes at once, otherwise every 10 s
+          - delta: 0.3
+          - throttle: 10s
+  ap_motion:
+    name: AP motion
 
 logger:
 

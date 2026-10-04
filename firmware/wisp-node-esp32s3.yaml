@@ -3,6 +3,9 @@
 # Boards with two USB ports: logs and Improv use the native port (often labelled USB).
 # The COM/UART port can flash the board but stays silent afterwards.
 
+esphome:
+  build_path: .esphome/build/wisp-esp32s3 # one build folder per chip
+
 packages:
   base: !include common/base.yaml
   status_led: !include common/status_led_rgb.yaml

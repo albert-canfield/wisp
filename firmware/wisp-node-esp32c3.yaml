@@ -1,5 +1,8 @@
 # Wisp node for ESP32-C3 boards. No status LED: its pin differs between boards.
 
+esphome:
+  build_path: .esphome/build/wisp-esp32c3 # one build folder per chip
+
 packages:
   base: !include common/base.yaml
 
