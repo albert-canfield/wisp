@@ -302,7 +302,7 @@ The core compiles on a computer too, so it has host unit tests and a simulator t
 
 Use the same board model for every node: mixed boards make links harder to compare. Boards with a decent printed or external antenna give steadier CSI than the tiniest ceramic-antenna boards.
 
-**First test node: ESP32-S3 N16R8.** GPIO 33 to 37 belong to its octal PSRAM. The RGB LED is on GPIO 48 (GPIO 38 on some board revisions). Either USB-C port can flash it. The generic S3 build does not use the PSRAM and uses a 4 MB layout, so it runs on every S3 board.
+**First test node: ESP32-S3 N16R8.** GPIO 33 to 37 belong to its octal PSRAM. The RGB LED is on GPIO 48 (GPIO 38 on some board revisions). Either USB-C port can flash it, but logs and Improv use the native USB port; the COM port (a CH343 serial chip) stays silent after boot. The generic S3 build does not use the PSRAM and uses a 4 MB layout, so it runs on every S3 board.
 
 ## Engine (`custom_components/wisp/engine/`)
 

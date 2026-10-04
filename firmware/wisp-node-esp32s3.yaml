@@ -1,5 +1,7 @@
 # Wisp node for ESP32-S3 boards. Tested on an ESP32-S3 N16R8 DevKitC board.
 # Generic build: 4 MB layout and no PSRAM, so it runs on every S3 board.
+# Boards with two USB ports: logs and Improv use the native port (often labelled USB).
+# The COM/UART port can flash the board but stays silent afterwards.
 
 packages:
   base: !include common/base.yaml

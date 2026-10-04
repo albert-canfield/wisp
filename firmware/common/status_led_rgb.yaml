@@ -1,5 +1,5 @@
 # Single WS2812 RGB LED: off when all is well, amber without WiFi,
-# blue without Home Assistant, white strobe while identifying.
+# blue without Home Assistant, white strobe while identifying (10 s, press again to stop).
 
 substitutions:
   status_led_pin: GPIO48
@@ -39,12 +39,23 @@ button:
     name: Identify
     icon: mdi:led-on
     on_press:
-      - lambda: |-
-          id(identify_until) = millis() + 10000;
-          id(led_mode) = -1;
-      - light.turn_on:
-          id: status_rgb
-          effect: Identify
+      # First press strobes for 10 s; a second press stops it early.
+      - if:
+          condition:
+            lambda: "return millis() < id(identify_until);"
+          then:
+            - lambda: |-
+                id(identify_until) = 0;
+                id(led_mode) = -1;
+                ESP_LOGI("status_led", "Identify stopped");
+          else:
+            - lambda: |-
+                id(identify_until) = millis() + 10000;
+                id(led_mode) = -1;
+                ESP_LOGI("status_led", "Identify started (10 s)");
+            - light.turn_on:
+                id: status_rgb
+                effect: Identify
 
 interval:
   - interval: 500ms
@@ -56,9 +67,13 @@ interval:
           else if (!api::global_api_server->is_connected()) mode = 2;
           if (mode == id(led_mode)) return;
           id(led_mode) = mode;
+          static const char *const NAMES[] = {"off (all good)", "amber (no WiFi)", "blue (no Home Assistant)"};
+          ESP_LOGI("status_led", "Status LED: %s", NAMES[mode]);
           auto call = mode == 0 ? id(status_rgb).turn_off() : id(status_rgb).turn_on();
           if (mode == 1) call.set_rgb(1.0f, 0.45f, 0.0f);
           if (mode == 2) call.set_rgb(0.0f, 0.2f, 1.0f);
-          if (mode != 0) call.set_brightness(0.3f);
-          call.set_effect("None");
+          if (mode != 0) {
+            call.set_brightness(0.3f);
+            call.set_effect("None");
+          }
           call.perform();
