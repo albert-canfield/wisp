@@ -13,9 +13,9 @@ See who is where in your home, room by room and as footprints moving across your
 
 ## How it works
 
-People absorb and reflect WiFi. Wisp places three or four cheap ESP32 nodes around each floor. They find each other and form a grid on their own, take turns sending short pings to each other, and every node measures how the signal on each link changes (its channel state information, or CSI). When someone walks between two nodes, that link reacts.
+People absorb and reflect WiFi. Wisp places three or four cheap ESP32 nodes around each floor. They find each other and form a grid on their own, take turns sending short pings to each other and to your WiFi access point, and every node measures how the signal on each link changes (its channel state information, or CSI). The access point is a fixed point on your floor plan, so it adds links and precision. When someone walks between two nodes, that link reacts.
 
-- **Nodes** (`wisp-node` firmware) are the core: a lean, self-healing ESP-NOW grid that measures every link and sends a small disturbance score per link to Home Assistant over UDP several times a second. Nodes can be added or removed at any time.
+- **Nodes** (`wisp-node` firmware, built on ESPHome) are the core: a lean, self-healing ESP-NOW grid that measures every link and sends a small disturbance score per link to Home Assistant over UDP several times a second. Nodes can be added or removed at any time; the grid adapts on its own.
 - **The Wisp integration** is the brain. It combines every link on a floor, learns your rooms from a short calibration walk, and turns it all into presence per room and a position on the floor.
 - **The map card** (`wisp-map-card`) shows the footprints moving across your own floor plan.
 
@@ -32,8 +32,8 @@ Everything stays on your local network.
 
 ## Hardware
 
-- 3 to 4 cheap ESP32 boards per floor, powered by USB. ESP32-C3 and ESP32-S3 first.
-- Your existing WiFi router or access point.
+- At least 3 cheap ESP32 boards per floor, powered by USB. More boards give better precision. ESP32-C3 and ESP32-S3 first.
+- Your existing WiFi router or access point, which also takes part in the sensing.
 - Home Assistant 2026.3 or newer.
 
 ## Web flasher
