@@ -8,14 +8,30 @@
       "chipFamily": "ESP32-C3",
       "improv": true,
       "parts": [
-        { "path": "wisp-node-esp32c3.factory.bin", "offset": 0 }
+        {
+          "path": "wisp-node-esp32c3.factory.bin",
+          "offset": 0
+        }
       ]
     },
     {
       "chipFamily": "ESP32-S3",
       "improv": true,
       "parts": [
-        { "path": "wisp-node-esp32s3.factory.bin", "offset": 0 }
+        {
+          "path": "wisp-node-esp32s3.factory.bin",
+          "offset": 0
+        }
+      ]
+    },
+    {
+      "chipFamily": "ESP32",
+      "improv": true,
+      "parts": [
+        {
+          "path": "wisp-node-esp32.factory.bin",
+          "offset": 0
+        }
       ]
     }
   ]

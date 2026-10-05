@@ -72,7 +72,7 @@ Built on [ESPHome](https://esphome.io) with the ESP-IDF framework. ESPHome handl
 | Web server, Improv Serial (and Improv over Bluetooth) | Per-link scores and baseline |
 | Safe mode, status LED, logger, mDNS | UDP link stream to the Wisp integration |
 
-- Any cheap ESP32 with WiFi CSI. ESP32-C3 and ESP32-S3 first; others may follow. First test node: an ESP32-S3 N16R8 (16 MB flash, 8 MB PSRAM).
+- Any cheap ESP32 with WiFi CSI. Builds for ESP32-S3, ESP32-C3 and the original ESP32; others may follow. First test nodes: two ESP32-S3 N16R8 (16 MB flash, 8 MB PSRAM).
 - CSI from the other nodes (ESP-NOW) and from the access points (ping replies and beacons), each AP told apart by its BSSID.
 - BSSID lock to its home access point.
 
@@ -362,8 +362,7 @@ What Wisp adds: a self-forming grid of many nodes with shared knowledge, access 
 wisp/
   firmware/                  wisp-node (the core)
     common/base.yaml         ESPHome base shared by every chip
-    wisp-node-esp32c3.yaml   ESPHome config per chip
-    wisp-node-esp32s3.yaml
+    wisp-node-esp32*.yaml    ESPHome config per chip (S3, C3, original ESP32)
     components/wisp/         ESPHome external component, one flat folder (ESPHome copies no subfolders)
       core_*                 wisp-core: portable C++, never includes ESPHome or ESP-IDF
       esp_*                  ESP-IDF adapter: CSI, ESP-NOW, clock, NVS, UDP

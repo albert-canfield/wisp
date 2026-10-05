@@ -43,7 +43,7 @@ Until the first release puts the web flasher online, nodes are built with ESPHom
 
 ```bash
 python3.13 -m venv .venv && .venv/bin/pip install esphome
-.venv/bin/esphome run firmware/wisp-node-esp32s3.yaml   # or wisp-node-esp32c3.yaml
+.venv/bin/esphome run firmware/wisp-node-esp32s3.yaml   # or wisp-node-esp32c3.yaml, wisp-node-esp32.yaml
 ```
 
 1. Join the node's hotspot `wisp-xxxxxx` from a phone and pick your WiFi.
@@ -54,7 +54,7 @@ Tools for looking at the raw signal are in [firmware/tools](firmware/tools): a l
 
 ## Hardware
 
-- At least 3 cheap ESP32 boards per floor, powered by USB. More boards give better precision. ESP32-C3 and ESP32-S3 first.
+- At least 3 cheap ESP32 boards per floor, powered by USB. More boards give better precision. ESP32-S3, ESP32-C3 and the original ESP32 are supported; the original ESP32 cannot range with Wi-Fi FTM.
 - Your existing WiFi router or access point, which also takes part in the sensing.
 - Home Assistant 2026.3 or newer.
 

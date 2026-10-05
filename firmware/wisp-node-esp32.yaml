@@ -1,0 +1,19 @@
+# Wisp node for original ESP32 boards (ESP32-WROOM, DevKit V1 and similar). No status LED:
+# its pin differs between boards. These chips have CSI but no Wi-Fi FTM ranging.
+
+esphome:
+  build_path: build/wisp-esp32 # one build folder per chip
+
+packages:
+  base: !include common/base.yaml
+
+esp32:
+  board: esp32dev
+  variant: esp32
+  flash_size: 4MB
+  framework:
+    type: esp-idf
+
+dashboard_import:
+  package_import_url: github://albert-canfield/wisp/firmware/wisp-node-esp32.yaml@main
+  import_full_config: false
