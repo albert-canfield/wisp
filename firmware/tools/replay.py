@@ -86,14 +86,22 @@ class LinkMotion:
 
 
 class Detector:
-    def __init__(self, threshold: float) -> None:
+    """The firmware's hysteresis, plus an optional persistence: motion only after `persist`
+    seconds in a row at or above the threshold (1 = the firmware today)."""
+
+    def __init__(self, threshold: float, persist: int = 1) -> None:
         self.threshold = threshold
+        self.persist = persist
+        self.above = 0
         self.active = False
 
     def update(self, score: float) -> bool:
         if math.isnan(score):
-            return self.active
-        if not self.active and score >= self.threshold:
+            self.above = 0
+            self.active = False  # a silent link reports no motion (firmware does the same)
+            return False
+        self.above = self.above + 1 if score >= self.threshold else 0
+        if not self.active and self.above >= self.persist:
             self.active = True
         elif self.active and score < 0.75 * self.threshold:
             self.active = False
@@ -112,18 +120,26 @@ def main() -> int:
     ap.add_argument("files", nargs="+", help=".wcsi files from csi_logger.py, any order")
     ap.add_argument("--threshold", type=float, default=2.0)
     ap.add_argument("--csv", help="write per-second scores here")
+    ap.add_argument("--persist", type=int, default=1, help="seconds above the threshold before motion")
+    ap.add_argument("--sweep", action="store_true", help="motion seconds per link for several thresholds and persistences")
+    ap.add_argument("--since", help="only packets from this local time on, HH:MM")
     args = ap.parse_args()
 
     packets = []
     for path in args.files:
         packets.extend(read_wcsi(path))
     packets.sort(key=lambda p: p[0])
+    if args.since and packets:
+        day = time.localtime(packets[-1][0])
+        hh, mm = (int(v) for v in args.since.split(":"))
+        start = time.mktime((day.tm_year, day.tm_mon, day.tm_mday, hh, mm, 0, 0, 0, -1))
+        packets = [p for p in packets if p[0] >= start]
     if not packets:
         print("no packets")
         return 1
 
     links: dict[tuple, LinkMotion] = defaultdict(LinkMotion)
-    detectors: dict[tuple, Detector] = defaultdict(lambda: Detector(args.threshold))
+    detectors: dict[tuple, Detector] = defaultdict(lambda: Detector(args.threshold, args.persist))
     scores: dict[tuple, list[tuple[float, float, bool]]] = defaultdict(list)
     next_tick = packets[0][0] + 1.0
     for t, pkt in packets:
@@ -139,6 +155,18 @@ def main() -> int:
             continue
         node, src, header_len, n = f[5].hex(":"), f[6].hex(":"), f[3], f[16]
         links[(node, src)].add_frame(pkt[header_len:header_len + n])
+
+    if args.sweep:
+        grid = [(th, pe) for th in (1.5, 2.0, 2.5, 3.0) for pe in (1, 2, 3)]
+        print(f"motion seconds per link ({(packets[-1][0] - packets[0][0]) / 3600:.1f} h); columns: threshold/persist")
+        print(f"{'link':42s}" + "".join(f"{th:>5.1f}/{pe}" for th, pe in grid))
+        for key, rows in sorted(scores.items()):
+            cells = []
+            for th, pe in grid:
+                d = Detector(th, pe)
+                cells.append(f"{sum(d.update(s) for _, s, _ in rows):7d}")
+            print(f"{key[0][-8:]} <- {key[1]:17s}{'':15s}" + "".join(cells))
+        return 0
 
     out = csv.writer(open(args.csv, "w", newline="")) if args.csv else None
     if out:
