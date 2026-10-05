@@ -142,7 +142,10 @@ async def test_link_entities_appear_on_first_report(hass: HomeAssistant, feed: F
     device = dr.async_get(hass).async_get(reg.device_id)
     assert (CONNECTION_NETWORK_MAC, NODE_A) in device.connections
     assert (device.name, device.manufacturer, device.model) == ("Hall", "albert-canfield", "wisp-node")
-    assert device.config_entries_subentries[entry.entry_id] == {sub_a}
+    if PER_ENTRY_DEVICES:  # Home Assistant 2026.9+: one entry per device
+        assert (device.config_entry_id, device.config_subentry_id) == (entry.entry_id, sub_a)
+    else:
+        assert device.config_entries_subentries[entry.entry_id] == {sub_a}
 
 
 async def test_state_writes_are_rate_limited(hass: HomeAssistant, feed: Feed) -> None:
