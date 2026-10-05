@@ -308,7 +308,13 @@ Use the same board model for every node: mixed boards make links harder to compa
 
 ## Engine (`custom_components/wisp/engine/`)
 
-Pure Python, unit tested, no HA dependency: link geometry, node layout, tomographic imaging matrix, calibration, tracking filter, room snapping.
+Pure Python, unit tested, no HA dependency.
+
+- `protocol.py`, `links.py`, `hive.py`: the UDP protocol, the latest state per link, the best recent hive report.
+- `imaging.py`: where on a floor. `Locator` finds one moving person by best fit: for every 25 cm pixel it predicts how much each link would be disturbed by someone there (falling off with the distance to the link's line) and keeps the pixel that fits the observed links best, quiet links included. On synthetic floors it reaches a median error of about 0.3 m, against 1.2 m for classic radio tomographic imaging (`Imager`, kept for heat maps; both run in plain Python by solving only links-by-links systems).
+- `tracking.py`: access points placed from how strongly the nodes hear them, and a Kalman track with a gate against wild fixes.
+- `floor.py`: one floor from hive layout and link scores to a smoothed position with a quality.
+- Rooms (calibration and room classification) follow in phase 2.
 
 ## Home Assistant integration (`custom_components/wisp/`)
 
