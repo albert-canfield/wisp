@@ -39,6 +39,7 @@ class WispComponent : public Component {
   void set_ap_motion_score_sensor(sensor::Sensor *s) { this->ap_motion_score_sensor_ = s; }
   void set_ap_motion_binary_sensor(binary_sensor::BinarySensor *s) { this->ap_motion_binary_sensor_ = s; }
   void set_grid_nodes_sensor(sensor::Sensor *s) { this->grid_nodes_sensor_ = s; }
+  void set_channel_sensor(sensor::Sensor *s) { this->channel_sensor_ = s; }
   void set_hive_sync_binary_sensor(binary_sensor::BinarySensor *s) { this->hive_sync_binary_sensor_ = s; }
   void set_raw_stream_enabled(bool enabled) { this->raw_stream_enabled_.store(enabled); }
   void set_grid_channel(uint8_t channel) { this->grid_channel_cfg_ = channel; }
@@ -73,6 +74,7 @@ class WispComponent : public Component {
   sensor::Sensor *ap_motion_score_sensor_{nullptr};
   binary_sensor::BinarySensor *ap_motion_binary_sensor_{nullptr};
   sensor::Sensor *grid_nodes_sensor_{nullptr};
+  sensor::Sensor *channel_sensor_{nullptr};
   binary_sensor::BinarySensor *hive_sync_binary_sensor_{nullptr};
 
   wisp_platform::CsiCapture capture_;

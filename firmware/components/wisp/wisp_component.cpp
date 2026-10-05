@@ -5,6 +5,7 @@
 
 #include "esp_mac.h"
 #include "esp_netif.h"
+#include "esp_task_wdt.h"
 #include "esp_timer.h"
 #include "esp_wifi.h"
 #include "sdkconfig.h"
@@ -109,6 +110,11 @@ void WispComponent::loop() {
     this->ap_motion_score_sensor_->publish_state(this->ap_score_.load());
   if (this->ap_motion_binary_sensor_ != nullptr)
     this->ap_motion_binary_sensor_->publish_state(this->ap_active_.load());
+  if (this->channel_sensor_ != nullptr) {
+    const float channel = static_cast<float>(this->grid_channel_.load());
+    if (channel > 0 && this->channel_sensor_->get_raw_state() != channel)
+      this->channel_sensor_->publish_state(channel);
+  }
   if (this->hive_sync_binary_sensor_ != nullptr)
     this->hive_sync_binary_sensor_->publish_state(this->hive_in_sync_.load());
   if (this->grid_nodes_sensor_ != nullptr) {
@@ -259,7 +265,10 @@ void WispComponent::core_task_(void *arg) {
   uint8_t packet[wisp_core::RAW_PACKET_MAX];
   uint32_t last_round = 0, last_second = 0, last_report = 0;
   bool grid_started = false;
+  // Under the task watchdog: if this loop ever hangs, the node reboots instead of going quiet.
+  esp_task_wdt_add(nullptr);
   for (;;) {
+    esp_task_wdt_reset();
     const bool got = xQueueReceive(self->csi_queue_, &rec, pdMS_TO_TICKS(10)) == pdTRUE;
     const uint32_t now = core_now_ms();
     if (!grid_started && self->espnow_started_.load()) {
@@ -479,6 +488,7 @@ void WispComponent::dump_config() {
   LOG_SENSOR("  ", "AP motion score", this->ap_motion_score_sensor_);
   LOG_BINARY_SENSOR("  ", "AP motion", this->ap_motion_binary_sensor_);
   LOG_SENSOR("  ", "Grid nodes", this->grid_nodes_sensor_);
+  LOG_SENSOR("  ", "Grid channel", this->channel_sensor_);
   LOG_BINARY_SENSOR("  ", "Hive in sync", this->hive_sync_binary_sensor_);
 }
 

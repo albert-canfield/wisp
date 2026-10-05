@@ -28,6 +28,7 @@ CONF_GRID_NODES = "grid_nodes"
 CONF_GRID_CHANNEL = "grid_channel"
 CONF_AP_MIN_RSSI = "ap_min_rssi"
 CONF_HIVE_IN_SYNC = "hive_in_sync"
+CONF_CHANNEL = "channel"
 
 wisp_ns = cg.esphome_ns.namespace("wisp")
 WispComponent = wisp_ns.class_("WispComponent", cg.Component)
@@ -48,6 +49,11 @@ CONFIG_SCHEMA = cv.Schema(
         cv.Optional(CONF_AP_MIN_RSSI, default=-80): cv.int_range(min=-100, max=-30),
         cv.Optional(CONF_HIVE_IN_SYNC): binary_sensor.binary_sensor_schema(
             icon="mdi:hexagon-multiple",
+            entity_category=ENTITY_CATEGORY_DIAGNOSTIC,
+        ),
+        cv.Optional(CONF_CHANNEL): sensor.sensor_schema(
+            icon="mdi:wifi-cog",
+            accuracy_decimals=0,
             entity_category=ENTITY_CATEGORY_DIAGNOSTIC,
         ),
         cv.Optional(CONF_GRID_NODES): sensor.sensor_schema(
@@ -96,6 +102,9 @@ async def to_code(config):
     if CONF_HIVE_IN_SYNC in config:
         bs = await binary_sensor.new_binary_sensor(config[CONF_HIVE_IN_SYNC])
         cg.add(var.set_hive_sync_binary_sensor(bs))
+    if CONF_CHANNEL in config:
+        sens = await sensor.new_sensor(config[CONF_CHANNEL])
+        cg.add(var.set_channel_sensor(sens))
     if CONF_GRID_NODES in config:
         sens = await sensor.new_sensor(config[CONF_GRID_NODES])
         cg.add(var.set_grid_nodes_sensor(sens))
