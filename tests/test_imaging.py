@@ -5,7 +5,7 @@ from __future__ import annotations
 import math
 import random
 
-from custom_components.wisp.engine.imaging import Imager, Locator, _solve_inverse, line_distance
+from custom_components.wisp.engine.imaging import Imager, Locator, _solve_inverse, excess_path, line_distance
 
 # Four nodes in the corners of a 6 x 4.5 m room and an access point on one wall.
 NODES = {"A": (0.0, 0.0), "B": (6.0, 0.0), "C": (6.0, 4.5), "D": (0.0, 4.5), "AP": (3.0, 5.0)}
@@ -68,7 +68,9 @@ def test_grid_covers_the_nodes() -> None:
 
 
 def test_locator_beats_imaging_on_random_positions() -> None:
-    """Gains vary by +-40%, readings are noisy and real people are wider than the model."""
+    """Gains vary by +-40%, readings are noisy, and the truth is not the Locator's own model: a
+    Gaussian across each link's segment, wider than the Fresnel zone. Median 0.38 m, 90th
+    percentile 1.2 m (imaging: 1.0 and 2.4 m)."""
     locator = Locator(NODES, LINKS)
     imager = Imager(NODES, LINKS)
     rng = random.Random(2)
@@ -94,6 +96,27 @@ def test_locator_quiet_and_quality() -> None:
     spot = locator.locate({k: disturbance(person, *k) for k in LINKS})
     assert spot is not None and math.hypot(spot.x - 3.0, spot.y - 2.2) < 0.4
     assert spot.contrast > 0.9  # a clean pattern is explained almost fully
+
+
+def test_someone_by_a_node_is_placed_by_it() -> None:
+    """Someone by a node disturbs every link of that node, as real recordings show (a node's links
+    busy together, the others quiet). They are placed by it, in front of it: not further out along
+    one of its links, and not behind it, out of the room, where the line model the Fresnel zones
+    replaced, round around each link's ends, put them in 49 of these 80 trials."""
+    locator = Locator(NODES, LINKS)
+    rng = random.Random(3)
+    for node in "ABCD":
+        for _ in range(20):
+            values = {k: (rng.uniform(0.6, 1.4) if node in k else 0.0) + abs(rng.gauss(0, 0.05)) for k in LINKS}
+            spot = locator.locate(values, 0.0)
+            assert spot is not None and 0 <= spot.x <= 6 and 0 <= spot.y <= 4.5, (node, spot)
+            assert math.dist((spot.x, spot.y), NODES[node]) < 0.5, (node, spot)
+
+
+def test_excess_path() -> None:
+    assert excess_path((1, 0), (0, 0), (2, 0)) == 0  # on the link
+    assert excess_path((3, 0), (0, 0), (2, 0)) == 2  # past its end: there and back
+    assert abs(excess_path((1, 1), (0, 0), (2, 0)) - (2 * math.sqrt(2) - 2)) < 1e-12
 
 
 def test_line_distance() -> None:

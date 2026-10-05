@@ -1,11 +1,12 @@
 """Where on a floor the disturbance is, from the links that see it.
 
 Two tools. Locator finds one moving person: for every pixel it predicts how much each link would
-be disturbed by someone standing there (falling off with the distance to the link's line), and
-picks the pixel whose prediction fits the observed links best, with the best scale. Links that
-did not react count as much as links that did, so it is not fooled by a single long link. On
-synthetic floors it is several times more accurate than imaging (median about 0.3 m against
-1.2 m, see tests/test_imaging.py).
+be disturbed by someone standing there (falling off with how much longer the link's path is when
+it bounces off them: the link's Fresnel zones, as in bistatic radar), and picks the pixel whose
+prediction fits the observed links best, with the best scale. Links that did not react count as
+much as links that did, so it is not fooled by a single long link. On synthetic floors it is
+several times more accurate than imaging (median about 0.4 m against 1.0 m, see
+tests/test_imaging.py).
 
 Imager is classic radio tomographic imaging, kept for heat maps:
 
@@ -172,11 +173,37 @@ def line_distance(p: Point, a: Point, b: Point) -> float:
     return math.hypot(p[0] - (a[0] + t * dx), p[1] - (a[1] + t * dy))
 
 
-# A spot further than this many link widths from every link's line is no candidate: someone
-# there disturbs no link. The fit has a free scale, so tiny predictions far from all links, in
-# the right proportions, would otherwise fit as well as a spot on the busy link.
-REACH = 1.5
-SCALE_PRIOR = 0.5  # weight of the expected scale, against a spot's sum of squared predictions (1 on one line)
+def excess_path(p: Point, a: Point, b: Point) -> float:
+    """How much longer the path from a to b is when it bounces off p: 0 on the segment, the same
+    on each ellipse with foci a and b (the link's Fresnel zones)."""
+    return math.dist(p, a) + math.dist(p, b) - math.dist(a, b)
+
+
+# The link model, from bistatic radar: someone who lengthens a link's path by D (excess_path)
+# disturbs it as exp(-D / ZONE). Across the middle of a link of length L, D is about 2 h^2 / L at
+# h from its line, so there it is a Gaussian of width sqrt(L ZONE) / 2: 0.4 m (the line model's
+# width) on a 4.3 m link, 0.34 m on a 3 m link, 0.58 m on a 9 m one. Towards the nodes the zone
+# narrows to nothing, so someone by a node disturbs every link of that node and is placed in front
+# of it, never behind it. 0.15 m is the edge of the 2.4th Fresnel zone (each adds half a
+# wavelength, 6 cm at 2.4 GHz). Chosen on the owner's labelled evening (firmware/tools/
+# locator_study.py: every second with motion, whole floor, no room presence) against the line
+# model it replaces (a Gaussian across each link's segment, 0.4 m, round around its ends): about
+# the same share of fits in the office (33% against 35%; the misses land at the play room's node
+# for both, its links being the busiest), all 19 seconds with motion on the empty floor fitted by
+# both, and 1 of 899 fits outside the house against 88 (behind a node). Zones of 0.05 to 0.15 m
+# scored the same there, 0.2 m and up fewer in the office; on synthetic floors 0.15 m matches the
+# line model (median 0.38 against 0.35 m) where 0.1 m had 0.66 m.
+ZONE = 0.15
+# A spot whose path is more than REACH zones longer than every link's is no candidate: someone
+# there disturbs no link. The fit has a free scale, so tiny predictions far from all links, in the
+# right proportions, would otherwise fit as well as a spot on a busy link. Across a link's middle
+# D / ZONE is h^2 / (2 w^2) for the width w above, so 1.125 zones (a predicted 0.32) is the line
+# model's 1.5 widths, on every link.
+REACH = 1.125
+# Weight of the expected scale, against a spot's sum of squared predictions: 1 on one link's line,
+# up to the node's link count right by a node, where the links themselves pin the scale. From 0.5
+# to 2 it placed the same share of office fits in the office on real data, 0 three points fewer.
+SCALE_PRIOR = 0.5
 
 
 @dataclass
@@ -187,12 +214,18 @@ class Locator:
     links: Sequence[LinkKey]
     pixel: float = 0.25
     margin: float = 0.5
-    width: float = 0.4  # how far from a link's line a person still disturbs it (metres, 1 sigma)
+    zone: float = ZONE  # metres of excess path at which a link's predicted disturbance falls to 1/e
+    reach: float = REACH  # in zones, see REACH
+    scale_prior: float = SCALE_PRIOR
     xs: list[float] = field(init=False)
     ys: list[float] = field(init=False)
     _pred: list[list[float]] = field(init=False)  # per pixel: predicted disturbance per link
     _norm: list[float] = field(init=False)
-    _near: list[bool] = field(init=False)  # per pixel: close enough to a link's line to disturb it
+    _near: list[bool] = field(init=False)  # per pixel: close enough to a link to disturb it
+
+    def predict(self, p: Point, a: Point, b: Point) -> float:
+        """Disturbance of the link a-b by someone at p, 1 on the link."""
+        return math.exp(-excess_path(p, a, b) / self.zone)
 
     def __post_init__(self) -> None:
         used = [k for k in self.links if k[0] in self.positions and k[1] in self.positions]
@@ -204,15 +237,14 @@ class Locator:
         ny = max(1, round((max(p[1] for p in pts) + self.margin - y0) / self.pixel))
         self.xs = [x0 + (i + 0.5) * self.pixel for i in range(nx)]
         self.ys = [y0 + (j + 0.5) * self.pixel for j in range(ny)]
-        two_s2 = 2 * self.width * self.width
         ends = [(self.positions[t], self.positions[r]) for t, r in used]
         self._pred = []
         self._norm = []
         self._near = []
-        reach = math.exp(-REACH * REACH / 2)
+        reach = math.exp(-self.reach)
         for y in self.ys:
             for x in self.xs:
-                row = [math.exp(-(line_distance((x, y), a, b) ** 2) / two_s2) for a, b in ends]
+                row = [self.predict((x, y), a, b) for a, b in ends]
                 self._pred.append(row)
                 self._norm.append(sum(v * v for v in row))
                 self._near.append(max(row, default=0.0) >= reach)
@@ -237,7 +269,7 @@ class Locator:
         # Someone on a link's line disturbs it about as much as the busiest link shows: the scale
         # leans towards that, so a spot on the busy line beats one at its fringe, where only a
         # larger scale fits (with a free scale both fit the pattern equally well).
-        s0, mu = max(y), SCALE_PRIOR
+        s0, mu = max(y), self.scale_prior
         best = None
         nx = len(self.xs)
         for i, row in enumerate(self._pred):

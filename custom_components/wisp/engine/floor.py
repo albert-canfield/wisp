@@ -41,7 +41,7 @@ import math
 
 from .anchor import Similarity, anchor_layout
 from .hive import HiveState
-from .imaging import Locator
+from .imaging import ZONE, Locator
 from .tracking import Track, keep_side, place_access_point
 
 Point = tuple[float, float]
@@ -78,7 +78,7 @@ class FloorFix:
 
 @dataclass
 class FloorModel:
-    width: float = 0.4  # metres a person reaches from a link's line, see Locator
+    zone: float = ZONE  # metres of excess path over which a person's disturbance of a link fades, see Locator
     min_disturbance: float = 0.3  # sum of log scores below which nobody is moving
     min_quality: float = 0.35  # a fit explaining less of the link pattern is too unsure to show
     min_streak: int = 2  # seconds in a row with a fit before someone appears walking
@@ -162,7 +162,7 @@ class FloorModel:
         key = (tuple(usable), tuple(sorted((m, round(p[0], 1), round(p[1], 1)) for m, p in self.positions.items())))
         if key != self._key:
             self._key = key
-            self._locator = Locator(self.positions, usable, width=self.width) if len(usable) >= 2 else None
+            self._locator = Locator(self.positions, usable, zone=self.zone) if len(usable) >= 2 else None
         if self._locator is None:
             return self._read(None, now, room, walking)
         if moving is not None:
@@ -239,12 +239,15 @@ class FloorModel:
                 spot = (rx + rw / 2, ry + rh / 2)
             return FloorFix(spot[0], spot[1], spot[0], spot[1], 0.0, walking=False)
         weight = sum(f[3] for f in window)
-        cx = sum(f[1] * f[3] for f in window) / weight
-        cy = sum(f[2] * f[3] for f in window) / weight
+        last = window[-1]
+        # Offsets from the newest fit: fits on one pixel give exactly that pixel. Plain weighted
+        # sums came out a hair off it, and a pixel centre such as 0.375 m then flickered between
+        # 0.37 and 0.38 on the map from one second to the next.
+        cx = last[1] + sum((f[1] - last[1]) * f[3] for f in window) / weight
+        cy = last[2] + sum((f[2] - last[2]) * f[3] for f in window) / weight
         x, y = self._keep_in(cx, cy, room)
         if rects:
             self.spots[room or ""] = (x, y)
-        last = window[-1]
         return FloorFix(x, y, last[1], last[2], weight / len(window), walking=False)
 
 
