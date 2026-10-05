@@ -9,6 +9,7 @@ from custom_components.wisp.engine.tracking import (
     PATH_LOSS_EXPONENT,
     RSSI_AT_1M,
     Track,
+    keep_side,
     place_access_point,
     rssi_to_metres,
 )
@@ -42,6 +43,20 @@ def test_readings_the_geometry_cannot_meet_stay_near() -> None:
         assert got is not None and all(map(math.isfinite, got))
         assert math.dist(got, near) <= 2 * d + 1e-9, (strong, weak, got)
         assert math.dist(got, near) < math.dist(got, b if near == a else a)  # beyond the node hearing it best
+
+
+def test_access_point_keeps_its_side_of_a_line_of_nodes() -> None:
+    """Nodes on a line cannot tell which side the access point is on: it stays where it was."""
+    line = [(0.0, 0.0), (4.0, 0.0), (8.0, 0.1)]
+    heard = {p: rssi_at(math.dist(p, (5.0, 3.0))) for p in line}
+    spot = place_access_point(heard)
+    assert spot is not None and abs(abs(spot[1]) - 3.0) < 1.0
+    below = keep_side(spot, line, previous=(5.0, -2.5))
+    above = keep_side(spot, line, previous=(5.0, 2.5))
+    assert below[1] < 0 < above[1] and abs(below[0] - above[0]) < 0.2
+    assert keep_side(spot, line, previous=None) == spot
+    triangle = [(0.0, 0.0), (8.0, 0.0), (4.0, 5.0)]  # not a line: the fit decides, nothing mirrors
+    assert keep_side((5.0, 3.0), triangle, previous=(5.0, -3.0)) == (5.0, 3.0)
 
 
 def test_track_smooths_and_follows() -> None:

@@ -73,6 +73,24 @@ def place_access_point(heard: Mapping[Point, float], iterations: int = 30) -> Po
     return (x, y)
 
 
+def keep_side(spot: Point, nodes: list[Point], previous: Point | None, straight: float = 0.3) -> Point:
+    """Nodes on a line (within straight metres of it) hear an access point the same on both sides:
+    of the two mirror images, the one nearer where it was before, so it does not flip."""
+    if previous is None or len(nodes) < 2:
+        return spot
+    a, b = max(((p, q) for p in nodes for q in nodes), key=lambda pq: math.dist(*pq))
+    length = math.dist(a, b)
+    if length < 1e-6:
+        return spot
+    ux, uy = (b[0] - a[0]) / length, (b[1] - a[1]) / length
+    if any(abs((p[0] - a[0]) * uy - (p[1] - a[1]) * ux) > straight for p in nodes):
+        return spot  # not a line: the fit tells the sides apart
+    dx, dy = spot[0] - a[0], spot[1] - a[1]
+    along = dx * ux + dy * uy
+    mirror = (a[0] + 2 * along * ux - dx, a[1] + 2 * along * uy - dy)
+    return mirror if math.dist(mirror, previous) < math.dist(spot, previous) else spot
+
+
 @dataclass
 class Track:
     """Smoothed position and velocity of one person, from noisy fixes once a second or so."""

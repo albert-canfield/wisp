@@ -20,7 +20,7 @@ import math
 from .anchor import Similarity, anchor_layout
 from .hive import HiveState
 from .imaging import Locator
-from .tracking import Track, place_access_point
+from .tracking import Track, keep_side, place_access_point
 
 Point = tuple[float, float]
 LinkKey = tuple[str, str]  # (transmitter, receiver)
@@ -49,6 +49,7 @@ class FloorModel:
     _locator: Locator | None = field(default=None, init=False)
     _key: tuple = field(default=(), init=False)
     _plan: tuple[float, float] | None = field(default=None, init=False)
+    _aps: dict[str, Point] = field(default_factory=dict, init=False)  # last placed, to keep their side
 
     def set_layout(
         self,
@@ -72,6 +73,7 @@ class FloorModel:
         if plan != self._plan:  # other coordinates: the track starts over
             self._plan = plan
             self.track = Track()
+            self._aps = {}
         if hive:
             heard_by: dict[str, dict[Point, float]] = {}
             for origin, row in hive.rows.items():
@@ -82,7 +84,7 @@ class FloorModel:
                         heard_by.setdefault(entry.neighbour, {})[positions[origin]] = entry.rssi
             for ap, heard in heard_by.items():
                 if ap not in positions and (spot := place_access_point(heard)) is not None:
-                    positions[ap] = spot
+                    positions[ap] = self._aps[ap] = keep_side(spot, list(heard), self._aps.get(ap))
         self.positions = positions
 
     def update(
