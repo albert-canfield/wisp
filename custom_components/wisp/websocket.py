@@ -1,30 +1,42 @@
-"""Websocket API for the map card and the panel: a snapshot at once, then changes at most once a second."""
+"""Websocket API for the map card and the panel: a snapshot at once, then changes at most once a
+second. The panel sets floor plans and places nodes and access points on them (admins only)."""
 from __future__ import annotations
 
 from collections.abc import Callable
 from datetime import datetime
+import math
+import re
 from typing import Any
+from urllib.parse import urlsplit
 
 import voluptuous as vol
 
 from homeassistant.components import websocket_api
 from homeassistant.core import HomeAssistant, callback
+from homeassistant.helpers import config_validation as cv
+from homeassistant.helpers.device_registry import format_mac
 from homeassistant.helpers.event import async_track_time_interval
 
-from .const import DOMAIN, MAP_INTERVAL
+from .const import DOMAIN, MAP_INTERVAL, NO_FLOOR
 from .engine.rooms import MIN_SAMPLES
 from .hub import WispHub
+from .presence import RoomPresence
 
 EMPTY_MAP: dict[str, Any] = {"nodes": [], "access_points": [], "links": [], "hive": None}
 EMPTY_PANEL: dict[str, Any] = {
     "loaded": False, "nodes": [], "floors": [], "elsewhere": [], "min_samples": MIN_SAMPLES, "hive": None
 }
+MAX_URL = 2048
+MAX_PLACED = 64  # positions in one message
 
 
 @callback
 def async_register(hass: HomeAssistant) -> None:
     websocket_api.async_register_command(hass, ws_subscribe_map)
     websocket_api.async_register_command(hass, ws_subscribe_panel)
+    websocket_api.async_register_command(hass, ws_set_plan)
+    websocket_api.async_register_command(hass, ws_place)
+    websocket_api.async_register_command(hass, ws_clear_plan)
 
 
 def _hub(hass: HomeAssistant) -> WispHub | None:
@@ -90,3 +102,136 @@ def ws_subscribe_panel(
 ) -> None:
     """The panel is for admins: node addresses and the calibration controls."""
     _async_send_changes(hass, connection, msg, panel_snapshot, "wisp panel")
+
+
+# Floor plans
+
+def _image_url(value: Any) -> str:
+    """A path on Home Assistant, such as /local/wisp/ground.png, or an http or https address."""
+    url = cv.string(value).strip()
+    parts = urlsplit(url)
+    if (
+        len(url) > MAX_URL
+        or any(c.isspace() or not c.isprintable() for c in url)
+        or not ((url.startswith("/") and not parts.scheme) or (parts.scheme in ("http", "https") and parts.netloc))
+    ):
+        raise vol.Invalid("expected a path such as /local/wisp/ground.png, or an http or https address")
+    return url
+
+
+def _mac(value: Any) -> str:
+    mac = format_mac(cv.string(value))
+    if not re.fullmatch(r"([0-9a-f]{2}:){5}[0-9a-f]{2}", mac):
+        raise vol.Invalid(f"not a MAC address: {value}")
+    return mac
+
+
+def _point(value: Any) -> tuple[float, float]:
+    """[x, y] in metres."""
+    if not isinstance(value, (list, tuple)) or len(value) != 2:
+        raise vol.Invalid("expected [x, y] in metres")
+    x, y = (vol.Coerce(float)(v) for v in value)
+    if not (math.isfinite(x) and math.isfinite(y)):
+        raise vol.Invalid("expected [x, y] in metres")
+    return x, y
+
+
+FLOOR = vol.Any(None, cv.string)  # a Home Assistant floor id; None or "" for the hub's own floor
+SIZE = vol.All(vol.Coerce(float), vol.Range(min=1, max=500))  # metres
+PLACEMENTS = vol.All(vol.Schema({_mac: vol.Any(None, _point)}), vol.Length(max=MAX_PLACED))
+
+
+def _presence(
+    hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict[str, Any]
+) -> RoomPresence | None:
+    hub = _hub(hass)
+    if hub is None:
+        connection.send_error(msg["id"], websocket_api.ERR_NOT_FOUND, "Wisp is not loaded.")
+        return None
+    return hub.presence
+
+
+def _no_floor(connection: websocket_api.ActiveConnection, msg: dict[str, Any], floor: str) -> None:
+    where = f"on the floor {floor}" if floor else "without a floor"
+    connection.send_error(msg["id"], websocket_api.ERR_NOT_FOUND, f"No Wisp node is {where}.")
+
+
+@websocket_api.websocket_command({
+    vol.Required("type"): "wisp/floor/set_plan",
+    vol.Optional("floor"): FLOOR,
+    vol.Required("url"): _image_url,
+    vol.Required("width"): SIZE,
+    vol.Required("height"): SIZE,
+})
+@websocket_api.require_admin
+@websocket_api.async_response
+async def ws_set_plan(
+    hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict[str, Any]
+) -> None:
+    """A floor's plan: its image and size in metres. A new image or size keeps the placed positions."""
+    if (presence := _presence(hass, connection, msg)) is None:
+        return
+    floor = msg.get("floor") or NO_FLOOR
+    if floor not in presence.floors:
+        _no_floor(connection, msg, floor)
+        return
+    presence.plans.set_plan(floor, msg["url"], msg["width"], msg["height"])
+    await presence.plans.async_save()
+    presence.async_plans_changed(floor)
+    connection.send_result(msg["id"], presence.plan_view(floor))
+
+
+@websocket_api.websocket_command({
+    vol.Required("type"): "wisp/floor/place",
+    vol.Optional("floor"): FLOOR,
+    vol.Optional("nodes", default={}): PLACEMENTS,
+    vol.Optional("access_points", default={}): PLACEMENTS,
+})
+@websocket_api.require_admin
+@websocket_api.async_response
+async def ws_place(
+    hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict[str, Any]
+) -> None:
+    """Nodes (by MAC) and access points (by BSSID) on a floor's plan, in metres from its top left
+    corner with y down; None lets Wisp place one again. Others keep their positions."""
+    if (presence := _presence(hass, connection, msg)) is None:
+        return
+    floor = msg.get("floor") or NO_FLOOR
+    if floor not in presence.floors:
+        _no_floor(connection, msg, floor)
+        return
+    if (plan := presence.plans.floors.get(floor)) is None:
+        connection.send_error(msg["id"], websocket_api.ERR_NOT_FOUND, "This floor has no plan yet.")
+        return
+    nodes = presence.floors[floor].nodes
+    for mac, point in msg["nodes"].items():
+        if point is not None and mac not in nodes:
+            connection.send_error(msg["id"], websocket_api.ERR_INVALID_FORMAT, f"The node {mac} is not on this floor.")
+            return
+    for point in (*msg["nodes"].values(), *msg["access_points"].values()):
+        if point is not None and not (0 <= point[0] <= plan.width and 0 <= point[1] <= plan.height):
+            connection.send_error(
+                msg["id"], websocket_api.ERR_INVALID_FORMAT,
+                f"{point[0]:g}, {point[1]:g} is off the plan, which is {plan.width:g} by {plan.height:g} m.",
+            )
+            return
+    presence.plans.place(floor, msg["nodes"], msg["access_points"])
+    await presence.plans.async_save()
+    presence.async_plans_changed(floor)
+    connection.send_result(msg["id"], presence.plan_view(floor))
+
+
+@websocket_api.websocket_command({vol.Required("type"): "wisp/floor/clear", vol.Optional("floor"): FLOOR})
+@websocket_api.require_admin
+@websocket_api.async_response
+async def ws_clear_plan(
+    hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict[str, Any]
+) -> None:
+    """Removes a floor's plan and the positions placed on it: the floor is back on the hive's layout."""
+    if (presence := _presence(hass, connection, msg)) is None:
+        return
+    floor = msg.get("floor") or NO_FLOOR
+    if presence.plans.remove(floor):
+        await presence.plans.async_save()
+        presence.async_plans_changed(floor)
+    connection.send_result(msg["id"])

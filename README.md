@@ -87,11 +87,15 @@ The integration brings its own dashboard card and loads it by itself. Add it fro
 ```yaml
 type: custom:wisp-map-card
 title: Wisp     # optional
-rotate: 0       # optional, degrees clockwise
-flip: false     # optional, mirror left to right
+floor: Upstairs # optional, floor id or name; the first floor with nodes by default
+rotate: 0       # optional, degrees clockwise (not on a floor plan)
+flip: false     # optional, mirror left to right (not on a floor plan)
+plan_photo: false # optional, the floor plan is a photo: dimmed, not inverted, in dark mode
 ```
 
-Nodes sit where the grid's own layout puts them, access points beside the nodes that hear them best, and footprints walk along a link while it sees motion. Where someone moves, a pair of footprints stands at the best guess of the spot (it needs three or more nodes to be meaningful). The layout is relative, so turn and mirror it to match your home until floor plans arrive.
+Nodes sit where the grid's own layout puts them, access points beside the nodes that hear them best, and footprints walk along a link while it sees motion. Where someone moves, a pair of footprints stands at the best guess of the spot (it needs three or more nodes to be meaningful). With several floors, a card shows one floor; add a card per floor.
+
+Without a floor plan the layout is relative, so turn and mirror it to match your home. With one (set in the Wisp panel, below), the card draws the plan's image inked onto the parchment, at its size in metres, with a scale bar, and the nodes, access points, links and footprints where they are on it. Nodes you have not placed follow the placed ones and are drawn dashed.
 
 ## Room presence (first version)
 
@@ -107,12 +111,15 @@ Each floor then gets a room sensor (the room someone moves in, `none` while nobo
 
 The integration adds a Wisp page to the sidebar for administrators, so calibration needs no Developer tools. It shows, live:
 
-- **The map**, the same as the card, with buttons to turn and mirror it (remembered per browser).
+- **The map**, the same as the card, a button per floor when there are several, and without a floor plan buttons to turn and mirror it (remembered per browser).
 - **Rooms per floor:** every area with a node or a calibration, its samples and whether it is occupied, and the room someone moves in now. Calibrate starts `wisp.calibrate_room` (60 seconds by default) and counts down with what to do; Calibrate empty floor gives 30 seconds to leave the floor before it records (`wisp.calibrate_empty` with `delay`); Clear asks first. Areas on a floor without a node can be picked and calibrated too.
-- **Nodes:** name, area, floor, online, whether the hive has placed it, and a link to its ESPHome device.
+- **A floor plan per floor:** Add floor plan takes an image address and the floor's width in metres (the height follows the image's proportions, or give it). Place nodes then shows the plan: drag each node, and the access points you know, to where it stands (by touch too, or with the arrow keys), then Save. Nodes you leave are fitted to the placed ones: from two placed nodes Wisp turns, scales and if needed mirrors its own layout to match, and a third one away from the line between the first two settles the mirror. Change sets another image or size and keeps the positions; Remove asks first.
+- **Nodes:** name, area, floor, online, whether the hive has placed it, whether it is placed on its floor's plan, and a link to its ESPHome device.
 - **The hive:** hash, in sync, nodes and when it was last heard.
 
 It works on a phone: take it along on the calibration walk, the screen stays on while a recording counts down. Nodes without a floor share one named after the hub, and `wisp.calibrate_empty` takes that name as its floor.
+
+Floor plan images are best kept in Home Assistant's `www` folder: `config/www/wisp/ground.png` is `/local/wisp/ground.png`. A plain drawing with a white background looks best: white turns to parchment, and in dark mode the drawing is inverted. Once a floor has a plan, every position on it, including where someone moves, is in the plan's metres from its top left corner.
 
 ## Roadmap
 

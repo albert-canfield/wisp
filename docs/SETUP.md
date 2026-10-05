@@ -38,6 +38,12 @@ Wisp sees people who cross the straight lines between nodes, and between nodes a
 - **Not in a cluster.** Two nodes side by side see almost nothing between them.
 - **Keep them still.** A node that moves needs its place updated (the hive notices big changes).
 
+Then mark them on a floor plan, so the map and positions match your home:
+
+1. Put an image of each floor seen from above in Home Assistant's `www` folder, for example `config/www/wisp/ground.png` (it is then `/local/wisp/ground.png`). Any web address works too. A plain drawing on white looks best.
+2. In the Wisp panel, under the floor, tap Add floor plan, give the address and the floor's width in metres (measure one wall; the height follows the image).
+3. Drag each node to where it stands, and the access points you know, then Save. Two placed nodes are enough for the rest to follow; a third one, away from the line between the first two, tells Wisp which way round its layout goes.
+
 ## 5. Access points
 
 Wisp works with any access point, and uses it as an extra fixed point. Homes with several access points work too: nodes agree on one channel by themselves and join the best access point on it.

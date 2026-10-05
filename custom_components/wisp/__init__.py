@@ -16,8 +16,9 @@ from homeassistant.helpers.storage import Store
 from homeassistant.helpers.typing import ConfigType
 
 from . import services, websocket
-from .const import DOMAIN, PLATFORMS, STORE_VERSION, TITLE, VERSION
+from .const import DOMAIN, PLANS_STORE_VERSION, PLATFORMS, STORE_VERSION, TITLE, VERSION
 from .hub import WispConfigEntry, WispHub
+from .plans import plans_store_key
 from .presence import store_key
 
 _LOGGER = logging.getLogger(__name__)
@@ -88,8 +89,10 @@ async def async_unload_entry(hass: HomeAssistant, entry: WispConfigEntry) -> boo
 
 
 async def async_remove_entry(hass: HomeAssistant, entry: WispConfigEntry) -> None:
-    """Deleting the hub deletes the room calibration too, so a new setup starts clean, and the panel."""
+    """Deleting the hub deletes the room calibration and the floor plans too, so a new setup starts
+    clean, and the panel."""
     await Store(hass, STORE_VERSION, store_key(entry.entry_id)).async_remove()
+    await Store(hass, PLANS_STORE_VERSION, plans_store_key(entry.entry_id)).async_remove()
     frontend.async_remove_panel(hass, PANEL_PATH, warn_if_unknown=False)
 
 

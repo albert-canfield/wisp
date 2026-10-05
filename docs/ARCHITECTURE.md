@@ -274,6 +274,7 @@ Nodes can estimate where they are, but not precisely enough to skip the user. Au
 2. **Distances.** Each pair of nodes measures its range. Wi-Fi FTM (round trip time) where the chip supports it (ESP32-C2, C3, S2, S3, and C6 from chip revision 0.2): about 1 to 3 m indoors after an offset calibration. Signal strength with a fitted path loss model as the fallback (original ESP32), much rougher.
 3. **Layout.** Every node solves the layout from the shared matrix (see the hive below): classical MDS, then a few SMACOF steps. The result is a relative layout, right up to rotation, mirror and shift.
 4. **Anchor.** The user marks the access points on the floor plan. With three APs on the floor nothing else is needed. With one AP, the user also drags one node (two if the AP is on another floor) plus one tap to flip the mirror if needed. The rest snap into place and can be nudged. Positions the user sets always win, and Home Assistant shares the anchor back into the hive so every node knows real coordinates.
+   **Built, first version (in Home Assistant):** per floor (Home Assistant floors, plus the hub's own floor) an image URL and its size in metres, and the positions the user dragged nodes (by MAC) and access points (by BSSID) to in the panel, in metres from the image's top left corner with y down; kept in `.storage` per hub (`plans.py`), removed with the hub or the floor. Placed positions win. The hive's layout of the floor's nodes is fitted onto the placed nodes with the least squares similarity (rotation, mirror, uniform scale, shift; Umeyama's closed form, `engine/anchor.py`); unplaced nodes follow it. The mirror goes to the lower error; two placed nodes, or placed nodes on one line, cannot tell, so the layout keeps the handedness the map showed until a third node off the line is placed. With one placed node the layout is only shifted onto it, with none it is centred on the plan, at the hive's own scale. Unplaced access points are placed from how strongly the placed nodes hear them, now in plan metres. Placed access points stay put but do not anchor the fit yet, and the anchor is not shared back into the hive yet.
 5. **Watch.** Ranges are re-measured now and then; a large change raises a "node moved?" warning.
 6. **Later.** Refine from people walking: the order in which links react as someone crosses them constrains the geometry.
 
@@ -313,7 +314,8 @@ Pure Python, unit tested, no HA dependency.
 - `protocol.py`, `links.py`, `hive.py`: the UDP protocol, the latest state per link, the best recent hive report.
 - `imaging.py`: where on a floor. `Locator` finds one moving person by best fit: for every 25 cm pixel it predicts how much each link would be disturbed by someone there (falling off with the distance to the link's line) and keeps the pixel that fits the observed links best, quiet links included. On synthetic floors it reaches a median error of about 0.3 m, against 1.2 m for classic radio tomographic imaging (`Imager`, kept for heat maps; both run in plain Python by solving only links-by-links systems).
 - `tracking.py`: access points placed from how strongly the nodes hear them, and a Kalman track with a gate against wild fixes.
-- `floor.py`: one floor from hive layout and link scores to a smoothed position with a quality.
+- `floor.py`: one floor from hive layout and link scores to a smoothed position with a quality; on a floor plan, in the plan's metres.
+- `anchor.py`: the similarity (rotation, mirror, scale, shift) that fits the hive's layout onto the nodes placed on a floor plan, see Node placement.
 - `rooms.py`: room presence from calibrated motion fingerprints, see below.
 
 ### Room presence (built, v1: motion fingerprints)
@@ -332,8 +334,10 @@ Finds nodes among the ESPHome devices by their project name, config flow, UDP li
 
 ## Frontend
 
-- `wisp-map-card`: live footprints on an SVG floor plan.
+- `wisp-map-card`: live footprints on an SVG floor plan. One floor per card (`floor` option); with a plan, its image under the drawing at its size in metres.
 - Calibration panel: place nodes on the floor plan, run the calibration walk.
+
+The map feed (`wisp/map/subscribe`) adds `floors` (each floor's nodes, and with a plan its `plan` and `positions` in plan metres) when there are several floors or a plan; the panel feed adds `plan`, `positions`, `access_points` and `fit` to a floor with a plan. Plans are set with the admin commands `wisp/floor/set_plan` (floor, url, width, height), `wisp/floor/place` (floor, nodes and access_points as id to `[x, y]`, or null to let Wisp place one again) and `wisp/floor/clear` (floor).
 
 Both ship inside the integration and register themselves, so one HACS install brings everything.
 

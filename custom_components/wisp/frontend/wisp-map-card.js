@@ -2,12 +2,15 @@
  * Wisp map card: the grid drawn in ink on parchment, live from the Wisp integration.
  * Nodes sit where the hive's layout puts them, access points beside the nodes that hear them
  * best, links darken and thicken with their motion score, and footprints walk along a link while
- * it sees motion. Shipped and registered by the integration, no build step.
+ * it sees motion. On a floor with a plan (set in the Wisp panel) everything is drawn on the plan,
+ * in its metres. Shipped and registered by the integration, no build step.
  *
  *   type: custom:wisp-map-card
  *   title: Wisp     # optional
- *   rotate: 0       # optional, degrees clockwise, to match your home
- *   flip: false     # optional, mirror left to right
+ *   floor: Upstairs # optional, floor id or name; the first floor with nodes by default
+ *   rotate: 0       # optional, degrees clockwise, to match your home (not on a floor plan)
+ *   flip: false     # optional, mirror left to right (not on a floor plan)
+ *   plan_photo: false # optional, the floor plan is a photo: dimmed, not inverted, in dark mode
  */
 
 const W = 360; // viewBox width; the height follows the drawing
@@ -15,6 +18,9 @@ const PAD_X = 52; // room for labels around the drawing
 const PAD_Y = 36;
 const MIN_H = 220;
 const MAX_H = 400;
+const PLAN_PAD = 24; // around a floor plan; labels may overlap it
+const PLAN_MAX_H = 560;
+const SCALES = [0.5, 1, 2, 5, 10, 20, 50, 100]; // metres a scale bar may show
 const STEP_S = 0.42; // seconds per footprint
 // The logo's footprint, toes up
 const SOLE = "M0-13c4.6 0 6.4 4.4 6.4 8.6 0 4.6-2.2 7.9-6.4 7.9s-6.4-3.3-6.4-7.9C-6.4-8.6-4.6-13 0-13Z";
@@ -85,6 +91,59 @@ function place(map) {
   // Someone moving, per floor, on the same layout
   for (const p of map.people ?? []) pos.set(`person:${p.floor ?? ""}`, { x: p.x, y: p.y });
   return pos;
+}
+
+/* The floor to draw, by id or name, else the first, with only its nodes, access points, people
+   and rooms. A feed without floors (one floor, no plan) is drawn whole. */
+function pickFloor(map, wanted) {
+  const floors = map.floors ?? [];
+  if (!floors.length) return { map, floor: null };
+  const key = String(wanted ?? "").trim().toLowerCase();
+  const floor = !key
+    ? floors[0]
+    : floors.find((f) => (f.floor ?? "").toLowerCase() === key) ?? floors.find((f) => f.name.toLowerCase() === key);
+  if (!floor) return { missing: String(wanted).trim(), floors };
+  const macs = new Set(floor.nodes);
+  const here = (x) => (x.floor ?? null) === (floor.floor ?? null);
+  const known = new Map(map.access_points.map((ap) => [ap.bssid, ap]));
+  // On a plan the access points are the ones with a place on it, heard now or not
+  const aps = floor.plan
+    ? Object.keys(floor.positions ?? {}).filter((id) => !macs.has(id)).map((id) => known.get(id) ?? { bssid: id, label: `AP ${id.slice(-5)}`, heard_by: [] })
+    : map.access_points.filter((ap) => ap.heard_by.some((h) => macs.has(h.node)));
+  return {
+    floor,
+    map: {
+      ...map,
+      nodes: map.nodes.filter((n) => macs.has(n.mac)),
+      access_points: aps,
+      people: (map.people ?? []).filter(here),
+      rooms: (map.rooms ?? []).filter(here),
+    },
+  };
+}
+
+/* Plan metres (y down) to the viewBox: the plan scaled to fit, nodes without a place in a row below. */
+function projectPlan(map, floor) {
+  const plan = floor.plan, positions = floor.positions ?? {};
+  const inner = W - 2 * PLAN_PAD;
+  const s = Math.min(inner / plan.width, (PLAN_MAX_H - 2 * PLAN_PAD) / plan.height);
+  const frame = { x: (W - plan.width * s) / 2, y: PLAN_PAD, w: plan.width * s, h: plan.height * s, s };
+  const pts = new Map();
+  const at = (p) => ({ x: frame.x + p.x * s, y: frame.y + p.y * s });
+  for (const [id, p] of Object.entries(positions)) pts.set(id, at(p));
+  for (const p of map.people ?? []) pts.set(`person:${p.floor ?? ""}`, at(p));
+  const loose = map.nodes.filter((n) => !pts.has(n.mac));
+  const gap = Math.min(80, inner / Math.max(loose.length, 1));
+  loose.forEach((n, i) => pts.set(n.mac, { x: W / 2 + (i - (loose.length - 1) / 2) * gap, y: frame.y + frame.h + 26 }));
+  return { pts, frame, h: Math.round(frame.y + frame.h + PLAN_PAD + (loose.length ? 30 : 0)) };
+}
+
+/* The plan's edge and a scale bar of a round number of metres. The image itself lies under the
+   drawing as an img that stays across redraws, so it does not load again each second. */
+function planLayer(f) {
+  const m = SCALES.find((v) => v * f.s >= 36) ?? SCALES[SCALES.length - 1];
+  const x = f.x + 10, y = f.y + f.h - 10, len = m * f.s;
+  return `<rect class="edge" x="${n1(f.x)}" y="${n1(f.y)}" width="${n1(f.w)}" height="${n1(f.h)}"/><g class="scale" aria-hidden="true"><path d="M${n1(x)} ${n1(y - 4)}V${n1(y)}H${n1(x + len)}V${n1(y - 4)}"/><text x="${n1(x + len / 2)}" y="${n1(y - 6)}">${m} m</text></g>`;
 }
 
 /* Metres to the viewBox: turn, mirror, then scale to fit. */
@@ -159,12 +218,14 @@ function label(p, c, text, cls, below, above) {
   return `<text class="${cls}" x="${n1(p.x)}" y="${n1(y)}">${esc(short(text))}</text>`;
 }
 
-function draw(map, config) {
-  const pos = place(map);
-  const { pts, h } = project(pos, Number(config.rotate) || 0, !!config.flip);
+function draw(map, config, floor) {
+  const plan = floor?.plan;
+  const { pts, h, frame } = plan ? projectPlan(map, floor) : project(place(map), Number(config.rotate) || 0, !!config.flip);
   const names = new Map(map.nodes.map((n) => [n.mac, n.name]));
-  const centre = bounds([...pts.values()]);
+  const centre = frame ? { cx: frame.x + frame.w / 2, cy: frame.y + frame.h / 2 } : bounds([...pts.values()]);
   const c = { x: centre.cx, y: centre.cy };
+  // On a plan, placed means placed by the user; the rest is fitted to them, or waits below it
+  const placed = (id) => (plan ? !!floor.positions?.[id]?.placed : true);
   let lines = "", steps = "", marks = "", labels = "";
   const moving = [];
   for (const g of pairs(map.links, pts)) {
@@ -182,13 +243,18 @@ function draw(map, config) {
   }
   for (const ap of map.access_points) {
     const p = pts.get(ap.bssid);
-    marks += `<g class="ap" transform="translate(${n1(p.x)} ${n1(p.y)})"><title>Access point ${esc(ap.bssid)}</title><path class="waves" d="M-7.1-7.1A10 10 0 0 1 7.1-7.1M-9.9-9.9A14 14 0 0 1 9.9-9.9"/><rect class="ring" x="-4.6" y="-4.6" width="9.2" height="9.2" transform="rotate(45)"/><circle class="dot" r="1.8"/></g>`;
+    const where = placed(ap.bssid) ? "" : ", placed from the signal";
+    marks += `<g class="ap" transform="translate(${n1(p.x)} ${n1(p.y)})"><title>Access point ${esc(ap.bssid)}${where}</title><path class="waves" d="M-7.1-7.1A10 10 0 0 1 7.1-7.1M-9.9-9.9A14 14 0 0 1 9.9-9.9"/><rect class="ring" x="-4.6" y="-4.6" width="9.2" height="9.2" transform="rotate(45)"/><circle class="dot" r="1.8"/></g>`;
     labels += label(p, c, ap.label, "ap-label", 8, 18);
   }
+  let unplaced = 0;
   for (const n of map.nodes) {
     const p = pts.get(n.mac);
-    const placed = n.x != null && n.y != null;
-    marks += `<g class="node${n.online ? "" : " off"}${placed ? "" : " loose"}" transform="translate(${n1(p.x)} ${n1(p.y)})"><title>${esc(n.name)}: ${n.online ? "online" : "offline"}${placed ? "" : ", not placed yet"}</title><circle class="ring" r="6.5"/><circle class="dot" r="2.2"/></g>`;
+    const known = plan ? !!floor.positions?.[n.mac] : n.x != null && n.y != null;
+    const fixed = known && placed(n.mac);
+    if (!fixed) unplaced += 1;
+    const where = fixed ? "" : !known ? ", not placed yet" : ", not placed on the plan: fitted to the placed nodes";
+    marks += `<g class="node${n.online ? "" : " off"}${fixed ? "" : " loose"}" transform="translate(${n1(p.x)} ${n1(p.y)})"><title>${esc(n.name)}: ${n.online ? "online" : "offline"}${where}</title><circle class="ring" r="6.5"/><circle class="dot" r="2.2"/></g>`;
     labels += label(p, c, n.name, `node-label${n.online ? "" : " off"}`, 10, 12);
   }
   for (const person of map.people ?? []) {
@@ -196,16 +262,18 @@ function draw(map, config) {
     const sure = clamp(person.quality ?? 0, 0, 1);
     marks += `<g class="person" transform="translate(${n1(p.x)} ${n1(p.y)})" style="opacity:${n1(0.5 + 0.5 * sure)}"><title>Someone moving here, ${Math.round(sure * 100)}% sure</title><circle class="halo" r="15"/><g transform="translate(-5 2) rotate(-10) scale(.55)"><path d="${SOLE}"/><path d="${HEEL}"/></g><g transform="translate(5 -2) rotate(8) scale(.55)"><path d="${SOLE}"/><path d="${HEEL}"/></g></g>`;
   }
-  const loose = map.nodes.filter((n) => n.x == null || n.y == null).length;
-  const summary = `${plural(map.nodes.length, "node", "nodes")}${loose ? ` (${loose} not placed yet)` : ""}, ${plural(map.access_points.length, "access point", "access points")}`;
+  const pending = unplaced ? ` (${unplaced} not placed ${plan ? "on the plan" : "yet"})` : "";
+  const summary = `${floor ? `${floor.name}: ` : ""}${plural(map.nodes.length, "node", "nodes")}${pending}, ${plural(map.access_points.length, "access point", "access points")}`;
   // The room someone moves in, per calibrated floor
   const rooms = (map.rooms ?? []).filter((f) => f.area).map((f) => f.room);
   const where = rooms.length ? `${rooms.length > 1 ? "Rooms" : "Room"}: ${rooms.join(", ")}. ` : "";
   const motion = where + (moving.length ? `Motion: ${moving.join(", ")}` : "All quiet");
   return {
-    svg: `<svg viewBox="0 0 ${W} ${h}" role="img" aria-label="${esc(`Map of ${summary}. ${motion}.`)}"><g class="lines">${lines}</g><g class="steps">${steps}</g><g class="marks">${marks}</g><g class="labels">${labels}</g></svg>`,
+    svg: `<svg viewBox="0 0 ${W} ${h}" role="img" aria-label="${esc(`Map of ${summary}. ${motion}.`)}">${plan ? planLayer(frame) : ""}<g class="lines">${lines}</g><g class="steps">${steps}</g><g class="marks">${marks}</g><g class="labels">${labels}</g></svg>`,
     summary,
     motion,
+    // Where the plan's image goes, in shares of the drawing
+    plan: plan && { url: plan.url, left: frame.x / W, top: frame.y / h, width: frame.w / W, height: frame.h / h },
   };
 }
 
@@ -220,13 +288,17 @@ class WispMapCard extends HTMLElement {
     return {
       schema: [
         { name: "title", selector: { text: {} } },
+        { name: "floor", selector: { text: {} } },
         { name: "rotate", selector: { number: { min: 0, max: 359, step: 1, mode: "slider", unit_of_measurement: "°" } } },
         { name: "flip", selector: { boolean: {} } },
+        { name: "plan_photo", selector: { boolean: {} } },
       ],
-      computeLabel: (s) => ({ title: "Title", rotate: "Rotate", flip: "Mirror" })[s.name],
+      computeLabel: (s) => ({ title: "Title", floor: "Floor", rotate: "Rotate", flip: "Mirror", plan_photo: "Photo floor plan" })[s.name],
       computeHelper: (s) => ({
-        rotate: "Degrees clockwise, to match the drawing to your home",
-        flip: "Mirror left to right",
+        floor: "Name or id of the floor to show, in a home with several. Empty: the first floor with nodes",
+        rotate: "Degrees clockwise, to match the drawing to your home. Not used on a floor plan",
+        flip: "Mirror left to right. Not used on a floor plan",
+        plan_photo: "The floor plan is a photo: dim it in dark mode instead of inverting it",
       })[s.name],
     };
   }
@@ -294,10 +366,15 @@ class WispMapCard extends HTMLElement {
   _render() {
     if (!this._config) return;
     if (!this.shadowRoot) {
-      this.attachShadow({ mode: "open" }).innerHTML = `<style>${STYLE}</style><ha-card><div class="head"><h2></h2><span class="note"></span></div><div class="map"></div><div class="foot"><span class="sum"></span><span class="mot"></span></div></ha-card>`;
+      this.attachShadow({ mode: "open" }).innerHTML = `<style>${STYLE}</style><ha-card><div class="head"><h2></h2><span class="note"></span></div><div class="map"><img class="plan" alt="" hidden><div class="draw"></div></div><div class="foot"><span class="sum"></span><span class="mot"></span></div></ha-card>`;
+      this.shadowRoot.querySelector("img.plan").addEventListener("error", (e) => {
+        this._badPlan = e.target.getAttribute("src");
+        this._render();
+      });
     }
     const root = this.shadowRoot;
     root.querySelector("ha-card").classList.toggle("dark", !!this._dark);
+    root.querySelector("ha-card").classList.toggle("photo", !!this._config.plan_photo);
     const title = root.querySelector("h2");
     title.textContent = this._config.title ?? "";
     title.hidden = !title.textContent;
@@ -308,20 +385,31 @@ class WispMapCard extends HTMLElement {
     noteEl.title = note.tip;
     const map = this._map;
     const foot = root.querySelector(".foot");
-    if (!map || map.nodes.length < 2) {
+    const img = root.querySelector("img.plan");
+    const pick = map && !this._error ? pickFloor(map, this._config.floor) : {};
+    img.hidden = true;
+    if (!map || map.nodes.length < 2 || pick.missing != null) {
       const [lead, text] = this._error
         ? ["Wisp is not available", this._error]
         : !map
           ? ["Reading the grid", ""]
-          : ["Nothing to draw yet", "The map needs two or more Wisp nodes. Add them under Settings, Devices and services, Wisp."];
-      root.querySelector(".map").innerHTML = `<div class="empty">${EMPTY_FEET}<p class="lead">${esc(lead)}</p>${text ? `<p>${esc(text)}</p>` : ""}</div>`;
+          : pick.missing != null
+            ? ["No such floor", `Wisp has no floor “${pick.missing}” with nodes. Its floors: ${pick.floors.map((f) => f.name).join(", ")}.`]
+            : ["Nothing to draw yet", "The map needs two or more Wisp nodes. Add them under Settings, Devices and services, Wisp."];
+      root.querySelector(".draw").innerHTML = `<div class="empty">${EMPTY_FEET}<p class="lead">${esc(lead)}</p>${text ? `<p>${esc(text)}</p>` : ""}</div>`;
       foot.hidden = true;
       return;
     }
-    const { svg, summary, motion } = draw(map, this._config);
-    root.querySelector(".map").innerHTML = svg;
+    const { svg, summary, motion, plan } = draw(pick.map, this._config, pick.floor);
+    root.querySelector(".draw").innerHTML = svg;
+    if (plan) {
+      if (img.getAttribute("src") !== plan.url) img.setAttribute("src", plan.url);
+      const pct = (v) => `${(100 * v).toFixed(3)}%`;
+      Object.assign(img.style, { left: pct(plan.left), top: pct(plan.top), width: pct(plan.width), height: pct(plan.height) });
+      img.hidden = false;
+    }
     foot.hidden = false;
-    foot.querySelector(".sum").textContent = summary;
+    foot.querySelector(".sum").textContent = summary + (plan && this._badPlan === plan.url ? ". The floor plan image could not be loaded" : "");
     foot.querySelector(".mot").textContent = motion;
   }
 }
@@ -355,9 +443,18 @@ const STYLE = `
   .note:empty::before { display: none; }
   .note.sync::before { background: currentColor; }
   .note.wait::before { animation: wisp-blink 1.6s ease-in-out infinite; }
-  .map { margin: 4px 14px 0; border: 1.5px solid color-mix(in srgb, var(--wisp-ink) 55%, transparent);
+  .map { position: relative; margin: 4px 14px 0; border: 1.5px solid color-mix(in srgb, var(--wisp-ink) 55%, transparent);
          outline: 1px solid color-mix(in srgb, var(--wisp-ink) 25%, transparent); outline-offset: 3px; }
   .map svg { display: block; width: 100%; height: auto; }
+  .draw { position: relative; }
+  /* The plan inked onto the parchment: white turns to paper; in the dark, light lines on it */
+  img.plan { position: absolute; display: block; object-fit: fill; pointer-events: none; mix-blend-mode: multiply; opacity: .9; }
+  img.plan[hidden] { display: none; }
+  ha-card.dark img.plan { filter: invert(1) hue-rotate(180deg); mix-blend-mode: screen; opacity: .7; }
+  ha-card.dark.photo img.plan { filter: brightness(.55) saturate(.8); mix-blend-mode: normal; opacity: .85; }
+  .edge { fill: none; stroke: var(--wisp-ink); stroke-width: 1; opacity: .35; }
+  .scale path { fill: none; stroke: var(--wisp-ink); stroke-width: 1.5; stroke-linecap: square; }
+  .scale text { font-size: 10px; font-style: italic; }
   .link { fill: none; stroke-linecap: round; }
   .link.ap { stroke-dasharray: 5 4; }
   .link.unknown { stroke-dasharray: 1 4; }

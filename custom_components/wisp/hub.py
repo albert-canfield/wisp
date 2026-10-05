@@ -311,8 +311,9 @@ class WispHub:
         return self.transport is not None and (fresh or self.hive.fresh(mac, now))
 
     def map_snapshot(self) -> dict[str, Any]:
-        """The live map: nodes at their layout positions, access points, fresh links and the hive,
-        and once a room or floor is calibrated, the room per floor."""
+        """The live map: nodes at their layout positions, access points, fresh links and the hive;
+        once a room or floor is calibrated, the room per floor; with several floors or a floor plan,
+        the nodes per floor and the positions on its plan."""
         now = self.clock()
         hive = self.hive.current(now)
         layout = hive.layout if hive else {}
@@ -357,6 +358,8 @@ class WispHub:
             snapshot["rooms"] = rooms
         if people := self.presence.people():
             snapshot["people"] = people
+        if floors := self.presence.map_floors():
+            snapshot["floors"] = floors
         return snapshot
 
     # Panel

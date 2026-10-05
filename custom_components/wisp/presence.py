@@ -1,6 +1,7 @@
 """Room presence in Home Assistant: floors from the area and floor registries, calibration runs kept
 in storage, and a decision per floor every second (the maths is in engine/rooms.py). The same tick
-also places one moving person per floor on the hive's layout (engine/floor.py), for the map.
+also places one moving person per floor on the hive's layout (engine/floor.py), for the map, or on
+the floor's plan once it has one (plans.py): then every position on that floor is in plan metres.
 
 Rooms are areas. A node's floor is the floor of its area; nodes and areas without a floor share one
 floor named after the hub. A link belongs to the floor of the node that receives it.
@@ -28,9 +29,10 @@ from .const import (
     ROOMS_INTERVAL,
     STORE_VERSION,
 )
-from .engine import Decision, LinkKey, Rooms, Run
+from .engine import Decision, HiveState, LinkKey, Rooms, Run, access_points
 from .engine.floor import FloorFix, FloorModel
 from .engine.rooms import HOLD
+from .plans import FloorPlans
 
 if TYPE_CHECKING:
     from .hub import WispHub
@@ -66,8 +68,9 @@ class RoomPresence:
         self.store: Store[dict[str, Any]] = Store(self.hass, STORE_VERSION, store_key(self.entry.entry_id))
         self.floors: dict[str, Floor] = {}
         self.live: dict[str, int] = {}  # live links per floor, at the latest second
-        self.models: dict[str, FloorModel] = {}  # position per floor, on the hive's layout
+        self.models: dict[str, FloorModel] = {}  # position per floor, on the hive's layout or the plan
         self.fixes: dict[str, FloorFix] = {}
+        self.plans = FloorPlans(self.hass, self.entry.entry_id)
         self._listeners: list[Callable[[], None]] = []
         self._entity_listeners: list[Callable[[], None]] = []
         self._unsubs: list[CALLBACK_TYPE] = []
@@ -78,6 +81,7 @@ class RoomPresence:
                 self.engine.load(data)
             except ValueError as err:
                 _LOGGER.warning("Discarding the stored room calibration: %s", err)
+        await self.plans.async_load()
         self._unsubs = [
             async_track_time_interval(
                 self.hass, self._async_tick, ROOMS_INTERVAL, name="wisp rooms", cancel_on_shutdown=True
@@ -158,9 +162,12 @@ class RoomPresence:
 
     @callback
     def _async_floor_updated(self, event: Event[fr.EventFloorRegistryUpdatedData]) -> None:
-        if event.data["action"] == "remove" and event.data["floor_id"] in self.engine.empty:
-            self.engine.forget_floor(event.data["floor_id"])
+        floor, removed = event.data["floor_id"], event.data["action"] == "remove"
+        if removed and floor in self.engine.empty:
+            self.engine.forget_floor(floor)
             self._async_save()
+        if removed and self.plans.remove(floor):  # its plan goes with it
+            self.entry.async_create_task(self.hass, self.plans.async_save(), "wisp save floor plans")
         self.async_sync_floors(entities=True)
 
     # Every second
@@ -184,8 +191,7 @@ class RoomPresence:
             scores = self.scores(floor, now)
             live[floor] = len(scores)
             ended.append(self.engine.step(floor, self.floor_areas(floor), scores, now))
-            model = self.models.setdefault(floor, FloorModel())
-            model.set_layout(hive)
+            model = self._layout(floor, hive)
             if (fix := model.update(scores, now)) is not None:
                 self.fixes[floor] = fix
             else:
@@ -199,6 +205,75 @@ class RoomPresence:
                 self._async_save()
             self._async_entities_changed()  # an area's first calibration brings its presence entity
         self._async_notify()
+
+    # Floor plans
+
+    def _layout(self, floor: str, hive: HiveState | None) -> FloorModel:
+        """The floor's positions: the hive's layout, or on its plan the placed ones and the rest fitted."""
+        model = self.models.setdefault(floor, FloorModel())
+        plan = self.plans.floors.get(floor)
+        if plan is None:
+            model.set_layout(hive)
+        else:
+            nodes = self.floors[floor].nodes
+            placed = {mac: p for mac, p in plan.nodes.items() if mac in nodes} | plan.access_points
+            model.set_layout(hive, placed, plan=(plan.width, plan.height), nodes=nodes)
+        return model
+
+    @callback
+    def async_plans_changed(self, floor: str) -> None:
+        """A plan or its placements changed: positions follow at once, a person's track starts over."""
+        self.fixes.pop(floor, None)
+        self.models.pop(floor, None)
+        if floor in self.floors:
+            self._layout(floor, self.hub.hive.current(self.hub.clock()))
+        self._async_notify()
+
+    def placed(self, floor: str) -> set[str]:
+        """What the user placed on the floor's plan: its nodes and any access point."""
+        plan = self.plans.floors.get(floor)
+        if plan is None or floor not in self.floors:
+            return set()
+        return (set(plan.nodes) & self.floors[floor].nodes) | set(plan.access_points)
+
+    def positions(self, floor: str) -> dict[str, dict[str, Any]]:
+        """Every position on the floor's plan, in its metres, and whether the user placed it."""
+        model = self.models.get(floor)
+        if model is None:
+            return {}
+        placed = self.placed(floor)
+        return {
+            key: {"x": round(x, 2), "y": round(y, 2), "placed": key in placed}
+            for key, (x, y) in sorted(model.positions.items())
+        }
+
+    def fit(self, floor: str, digits: int = 2) -> dict[str, Any] | None:
+        """How the hive's layout was fitted onto the placed nodes; None before two are placed."""
+        model = self.models.get(floor)
+        fit = model.fit if model else None
+        if fit is None or fit.pairs < 2:
+            return None
+        return {
+            "nodes": fit.pairs,
+            "scale": round(fit.scale, digits),
+            "rotation": round(fit.rotation, 1),
+            "mirror": fit.mirror,
+            "mirror_guessed": fit.guessed,
+            "error": round(fit.error, digits),
+        }
+
+    def plan_view(self, floor: str) -> dict[str, Any]:
+        """The floor's plan for the panel: its size, the positions, the access points its nodes hear
+        or that were placed, and the fit."""
+        plan, nodes = self.plans.floors[floor], self.floors[floor].nodes
+        positions = self.positions(floor)
+        heard = access_points(self.hub.table, self.hub.hive.current(self.hub.clock()), nodes)
+        return {
+            "plan": plan.summary(),
+            "positions": positions,
+            "access_points": sorted(set(heard) | set(plan.access_points) | {k for k in positions if k not in nodes}),
+            "fit": self.fit(floor),
+        }
 
     # Calibration
 
@@ -329,8 +404,22 @@ class RoomPresence:
             })
         return out
 
+    def map_floors(self) -> list[dict[str, Any]]:
+        """Per floor its nodes, and with a plan the plan and every position on it in plan metres.
+        Empty for one floor without a plan: the map shows everything, as before."""
+        if len(self.floors) < 2 and not any(key in self.plans.floors for key in self.floors):
+            return []
+        out = []
+        for key, floor in self.floors.items():
+            entry: dict[str, Any] = {"floor": key or None, "name": floor.name, "nodes": sorted(floor.nodes)}
+            if (plan := self.plans.floors.get(key)) is not None:
+                entry["plan"] = plan.summary()
+                entry["positions"] = self.positions(key)
+            out.append(entry)
+        return out
+
     def people(self) -> list[dict[str, Any]]:
-        """Where someone moves, per floor, in the layout's metres; empty when nobody moves."""
+        """Where someone moves, per floor, in the layout's metres or the floor plan's; empty when nobody moves."""
         return [
             {
                 "floor": key or None,
@@ -394,6 +483,7 @@ class RoomPresence:
                     for area in sorted(all_areas, key=lambda a: a.name.casefold())
                     if (area.floor_id or NO_FLOOR) == key and area.id not in shown
                 ],
+                **(self.plan_view(key) if key in self.plans.floors else {}),
             })
         elsewhere = [
             {"area": area, "name": self.area_name(area), "samples": len(samples)}
@@ -449,6 +539,7 @@ class RoomPresence:
                     "x": round(fix.x, 2), "y": round(fix.y, 2), "raw": [round(fix.raw_x, 2), round(fix.raw_y, 2)],
                     "quality": round(fix.quality, 2),
                 },
+                **({"plan": self.plans.floors[key].to_dict(), "fit": self.fit(key, 3)} if key in self.plans.floors else {}),
             }
             for key, model in self.models.items()
         }

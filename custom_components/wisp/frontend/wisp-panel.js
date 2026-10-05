@@ -1,13 +1,18 @@
 /*
- * Wisp panel: the live map, the rooms of each floor with their calibration, the nodes and the hive,
- * for admins. Registered by the integration in the sidebar, no build step. Live from
- * wisp/panel/subscribe; the buttons call the wisp services. The map is the map card itself.
+ * Wisp panel: the live map, the rooms of each floor with their calibration and floor plan, the
+ * nodes and the hive, for admins. Registered by the integration in the sidebar, no build step.
+ * Live from wisp/panel/subscribe; the buttons call the wisp services and the wisp/floor commands.
+ * The map is the map card itself; placing nodes on a plan happens on a drawing of the panel's own.
  */
 
 const DURATIONS = [30, 60, 90, 120, 180, 300]; // s to record
 const DURATION = 60; // s, as the services
 const LEAVE_S = 30; // s to leave the floor before the empty floor records
-const PREFS = "wisp-panel"; // this browser's duration, map turn and mirror
+const PREFS = "wisp-panel"; // this browser's duration, map turn, mirror and floor
+const PW = 360; // viewBox width of the drawing to place nodes on
+const PPAD = 16;
+const PMAX_H = 480;
+const NUDGE = 0.1; // metres an arrow key moves a node, five times that with shift
 // The logo's footprint, as in the card
 const SOLE = "M0-13c4.6 0 6.4 4.4 6.4 8.6 0 4.6-2.2 7.9-6.4 7.9s-6.4-3.3-6.4-7.9C-6.4-8.6-4.6-13 0-13Z";
 const HEEL = "M0 5.6c3.3 0 4.8 2.1 4.8 4.4 0 2.6-2 4-4.8 4s-4.8-1.4-4.8-4c0-2.3 1.5-4.4 4.8-4.4Z";
@@ -17,6 +22,12 @@ const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => `&#${c.charCodeAt(
 const plural = (n, one, many) => `${n} ${n === 1 ? one : many}`;
 const secs = (s) => (s >= 120 && s % 60 === 0 ? `${s / 60} min` : `${s} s`);
 const attr = (name, value) => (value == null ? "" : ` data-${name}="${esc(value)}"`);
+const n1 = (v) => Math.round(v * 10) / 10;
+const metres = (v) => Math.round(v * 100) / 100;
+const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
+const apLabel = (bssid) => `AP ${bssid.slice(-5)}`; // as the map
+const NODE_MARK = `<circle class="ring" r="7.5"/><circle class="dot" r="2.6"/>`;
+const AP_MARK = `<path class="waves" d="M-7.1-7.1A10 10 0 0 1 7.1-7.1M-9.9-9.9A14 14 0 0 1 9.9-9.9"/><rect class="ring" x="-5" y="-5" width="10" height="10" transform="rotate(45)"/><circle class="dot" r="2"/>`;
 
 function loadPrefs() {
   try {
@@ -77,6 +88,9 @@ class WispPanel extends HTMLElement {
     this._open = null; // the question open under a row: {kind, floor, area}
     this._busy = null; // the question whose action runs
     this._failure = null; // {open, message}
+    this._planForm = null; // the floor plan form's values while it is open
+    this._placing = null; // placing nodes on a plan: {floor, moved: Map(id, [x, y] or null), selected, focus, busy, failure}
+    this._drag = null; // the node or access point under the pointer
   }
 
   set hass(hass) {
@@ -132,11 +146,17 @@ class WispPanel extends HTMLElement {
           <div class="message"></div>
           <main hidden>
             <section class="map-col" aria-label="Map">
+              <div class="tabs" role="group" aria-label="Floor on the map" hidden></div>
               <div class="map"></div>
               <div class="map-tools">
                 <button data-act="turn">Turn 90°</button>
                 <button data-act="mirror" aria-pressed="false">Mirror</button>
               </div>
+              <section class="sheet placer" aria-labelledby="wisp-placer" hidden>
+                <div class="head"><h2 id="wisp-placer">Place nodes</h2><span class="note placer-note"></span></div>
+                <div class="plan-box"><img class="plan-img" alt=""><div class="plan-draw"></div></div>
+                <div class="placer-info"></div>
+              </section>
             </section>
             <section class="rooms-col" aria-label="Rooms and calibration"></section>
             <section class="sheet nodes-col" aria-labelledby="wisp-nodes">
@@ -157,9 +177,16 @@ class WispPanel extends HTMLElement {
     this._page = root.querySelector(".page");
     root.addEventListener("click", (e) => this._click(e));
     root.addEventListener("change", (e) => this._change(e));
-    root.addEventListener("keydown", (e) => {
-      if (e.key === "Escape" && this._open) this._close();
-    });
+    root.addEventListener("input", (e) => this._input(e));
+    root.addEventListener("keydown", (e) => this._keydown(e));
+    root.addEventListener("pointerdown", (e) => this._pointerDown(e));
+    root.addEventListener("pointermove", (e) => this._pointerMove(e));
+    root.addEventListener("pointerup", (e) => this._pointerUp(e));
+    root.addEventListener("pointercancel", (e) => this._pointerUp(e));
+    // A finger on a node drags it, not the page (Safari scrolls despite touch-action on SVG)
+    root.addEventListener("touchstart", (e) => {
+      if (e.target.closest?.(".placer .item")) e.preventDefault();
+    }, { passive: false });
     this._mirrorButton();
     this._loadCard();
     this._render();
@@ -180,8 +207,16 @@ class WispPanel extends HTMLElement {
     });
   }
 
+  /* The floor the map shows: the one picked in this browser, else the first. */
+  _shownFloor(d = this._data) {
+    if (!d?.loaded || !d.floors.length) return null;
+    return d.floors.find((f) => (f.floor ?? "") === this._prefs.mapFloor) ?? d.floors[0];
+  }
+
   _mapConfig() {
-    return { title: "Map", rotate: Number(this._prefs.rotate) || 0, flip: !!this._prefs.flip };
+    const f = this._shownFloor();
+    this._cardFloor = f ? f.floor ?? f.name : ""; // the card takes a floor id, or the hub's own floor by name
+    return { title: "Map", rotate: Number(this._prefs.rotate) || 0, flip: !!this._prefs.flip, floor: this._cardFloor };
   }
 
   _mirrorButton() {
@@ -276,13 +311,31 @@ class WispPanel extends HTMLElement {
     else if (act === "stop") this._call("stop_calibration", { floor: target });
     else if (act === "device") navigate(`/config/devices/device/${device}`);
     else if (act === "settings") navigate("/config/integrations/integration/wisp");
-    else if (act === "turn" || act === "mirror") {
+    else if (act === "ask-plan") this._openPlanForm(floor);
+    else if (act === "ask-remove-plan") this._ask("remove-plan", floor);
+    else if (act === "save-plan") this._savePlan(floor);
+    else if (act === "remove-plan") this._run({ type: "wisp/floor/clear", floor: floor || null }, () => this._mergeFloor(floor, null));
+    else if (act === "place") this._startPlacing(floor);
+    else if (act === "placer-cancel") this._stopPlacing();
+    else if (act === "placer-save") this._savePlacing();
+    else if (act === "unplace") this._unplace();
+    else if (act === "map-floor") {
+      this._prefs.mapFloor = target;
+      savePrefs(this._prefs);
+      this._render();
+    } else if (act === "turn" || act === "mirror") {
       if (act === "turn") this._prefs.rotate = ((Number(this._prefs.rotate) || 0) + 90) % 360;
       else this._prefs.flip = !this._prefs.flip;
       savePrefs(this._prefs);
       this._mirrorButton();
       this._card?.setConfig(this._mapConfig());
     }
+  }
+
+  _keydown(e) {
+    if (e.key === "Escape" && this._open) this._close();
+    const g = e.target.closest?.(".placer .item");
+    if (g && this._placing && !this._placing.busy) this._nudge(g.dataset.id, e);
   }
 
   _change(e) {
@@ -301,6 +354,7 @@ class WispPanel extends HTMLElement {
   _ask(kind, floor, area) {
     this._open = { kind, floor, area };
     this._failure = null;
+    this._planForm = null;
     this._render();
     this.shadowRoot.querySelector(".ask .primary, .ask .danger")?.focus();
   }
@@ -308,21 +362,298 @@ class WispPanel extends HTMLElement {
   _close() {
     this._open = null;
     this._failure = null;
+    this._planForm = null;
     this._render();
   }
 
-  async _call(service, data) {
+  _call(service, data) {
+    return this._run(() => this._hass.callService("wisp", service, data, undefined, false));
+  }
+
+  /* Runs the open question's action (a function, or a websocket message); done gets its result. */
+  async _run(action, done) {
     const open = this._open;
     this._busy = open;
     this._failure = null;
     this._render();
     try {
-      await this._hass.callService("wisp", service, data, undefined, false);
-      if (this._open === open) this._open = null;
+      const result = await (typeof action === "function" ? action() : this._hass.callWS(action));
+      if (this._open === open) {
+        this._open = null;
+        this._planForm = null;
+      }
+      done?.(result);
     } catch (err) {
       this._failure = { open, message: err?.message || "Wisp could not do that." };
     } finally {
       this._busy = null;
+      this._render();
+    }
+  }
+
+  /* A floor's plan as a command returned it (null: removed), until the next update brings it. */
+  _mergeFloor(key, view) {
+    const f = this._data?.floors?.find((x) => (x.floor ?? "") === key);
+    if (!f) return;
+    if (view) Object.assign(f, view);
+    else for (const k of ["plan", "positions", "access_points", "fit"]) delete f[k];
+  }
+
+  // Floor plan form
+
+  _openPlanForm(key) {
+    const plan = this._data?.floors.find((f) => (f.floor ?? "") === key)?.plan;
+    this._open = { kind: "plan", floor: key };
+    this._failure = null;
+    this._planForm = {
+      url: plan?.url ?? "",
+      width: plan ? String(plan.width) : "",
+      height: plan ? String(plan.height) : "",
+      keep: !plan, // a new plan takes the image's proportions; a saved one keeps its size
+      status: "",
+    };
+    this._render();
+    if (plan) this._loadPlanImage();
+    this.shadowRoot.querySelector(".plan-form [data-plan=url]")?.focus();
+  }
+
+  _input(e) {
+    const el = e.target, form = this._planForm, field = el.dataset?.plan;
+    if (!field || !form) return;
+    if (field === "keep") {
+      form.keep = el.checked;
+      if (!form.keep && !form.height && form.aspect && Number(form.width) > 0) form.height = String(metres(form.width * form.aspect));
+    } else {
+      form[field] = el.value;
+    }
+    if (field === "url") this._loadPlanImage();
+    else this._fillPlanForm();
+  }
+
+  /* The image's size in pixels, for its proportions, a little after the address stops changing. */
+  _loadPlanImage() {
+    const form = this._planForm;
+    const url = form.url.trim();
+    clearTimeout(this._imageTimer);
+    Object.assign(form, { aspect: null, size: null, loaded: null, status: url ? "loading" : "" });
+    this._fillPlanForm();
+    if (!url) return;
+    this._imageTimer = setTimeout(() => {
+      const img = new Image();
+      const done = (ok) => {
+        if (this._planForm !== form || form.url.trim() !== url) return;
+        const w = img.naturalWidth, h = img.naturalHeight;
+        form.status = !ok ? "error" : w && h ? "ok" : "nosize";
+        if (ok) form.loaded = url;
+        if (form.status === "ok") Object.assign(form, { aspect: h / w, size: [w, h] });
+        this._fillPlanForm();
+      };
+      img.onload = () => done(true);
+      img.onerror = () => done(false);
+      img.src = url;
+    }, 350);
+  }
+
+  /* The form's values live here, not in its markup: a redraw puts them back, and leaves alone the
+     field being typed in. */
+  _fillPlanForm() {
+    const form = this._planForm;
+    const box = form && this.shadowRoot.querySelector(".plan-form");
+    if (!box) return;
+    const focused = this.shadowRoot.activeElement;
+    const input = (name) => box.querySelector(`[data-plan="${name}"]`);
+    const put = (el, value) => {
+      if (el !== focused && el.value !== value) el.value = value;
+    };
+    put(input("url"), form.url);
+    put(input("width"), form.width);
+    input("keep").checked = form.keep;
+    const height = input("height");
+    height.disabled = form.keep;
+    if (form.keep) height.value = form.aspect && Number(form.width) > 0 ? String(metres(form.width * form.aspect)) : "";
+    else put(height, form.height);
+    const status = box.querySelector(".plan-status");
+    status.textContent = {
+      loading: "Loading the image…",
+      ok: form.size ? `The image is ${form.size[0]} by ${form.size[1]} pixels.` : "",
+      nosize: "The image has no size of its own: untick Keep the image's proportions and give the height.",
+      error: "The image could not be loaded: check its address.",
+    }[form.status] ?? "";
+    status.classList.toggle("bad", form.status === "error");
+    const preview = box.querySelector(".preview");
+    if (form.loaded && preview.getAttribute("src") !== form.loaded) preview.setAttribute("src", form.loaded);
+    preview.hidden = !form.loaded;
+  }
+
+  _savePlan(key) {
+    const form = this._planForm;
+    if (!form || this._busy) return;
+    const url = form.url.trim();
+    const width = Number(form.width);
+    const height = form.keep ? (form.aspect ? metres(width * form.aspect) : NaN) : Number(form.height);
+    const waiting = {
+      loading: "The image is still loading: try again in a moment.",
+      error: "Check the image's address, or untick Keep the image's proportions and give the height.",
+      nosize: "The image has no size of its own: untick Keep the image's proportions and give the height.",
+    };
+    const problem = !url ? "Give the address of the image."
+      : !(width >= 1 && width <= 500) ? "Give the width in metres, from 1 to 500."
+        : form.keep && !form.aspect ? waiting[form.status] ?? "The image has not loaded yet."
+          : !(height >= 1 && height <= 500) ? "Give the height in metres, from 1 to 500."
+            : null;
+    if (problem) {
+      this._failure = { open: this._open, message: problem };
+      this._render();
+      return;
+    }
+    const fresh = !this._data.floors.find((f) => (f.floor ?? "") === key)?.plan;
+    this._run({ type: "wisp/floor/set_plan", floor: key || null, url, width, height }, (view) => {
+      this._mergeFloor(key, view);
+      if (fresh) this._startPlacing(key); // a new plan: on to placing the nodes
+    });
+  }
+
+  // Placing nodes on a plan
+
+  _startPlacing(key) {
+    this._placing = { floor: key, moved: new Map(), selected: null, focus: null, busy: false, failure: null };
+    this._prefs.mapFloor = key;
+    savePrefs(this._prefs);
+    this._open = null;
+    this._failure = null;
+    this._planForm = null;
+    this._render();
+    const still = matchMedia("(prefers-reduced-motion: reduce)").matches;
+    this.shadowRoot.querySelector(".map-col").scrollIntoView({ block: "start", behavior: still ? "auto" : "smooth" });
+  }
+
+  _stopPlacing() {
+    this._placing = null;
+    this._drag = null;
+    this._render();
+  }
+
+  _placingFloor(d = this._data) {
+    const p = this._placing;
+    return p && d?.loaded ? d.floors.find((f) => (f.floor ?? "") === p.floor) : null;
+  }
+
+  /* What can go on the floor's plan, where it is now with the changes not saved yet, and whether
+     the user placed it. Without a position it waits below the plan. */
+  _items(f, d) {
+    const moved = this._placing.moved;
+    const names = new Map(d.nodes.map((n) => [n.mac, n.name]));
+    const all = [
+      ...f.nodes.map((id) => ({ id, kind: "node", name: names.get(id) ?? id })),
+      ...(f.access_points ?? []).map((id) => ({ id, kind: "ap", name: apLabel(id) })),
+    ];
+    return all.map((i) => {
+      const saved = f.positions?.[i.id];
+      const change = moved.get(i.id);
+      const pos = Array.isArray(change) ? { x: change[0], y: change[1] } : saved ? { x: saved.x, y: saved.y } : null;
+      return { ...i, pos, placed: Array.isArray(change) || (change === undefined && !!saved?.placed) };
+    });
+  }
+
+  _where(i) {
+    if (i.placed) return `is ${i.pos.x.toFixed(2)} m from the left and ${i.pos.y.toFixed(2)} m from the top.`;
+    if (!i.pos) return "is not on the plan yet: drag it onto the plan.";
+    return i.kind === "ap"
+      ? "is not placed: Wisp puts it where the nodes hear it best. Drag it to where it is."
+      : "is not placed: it follows the placed nodes. Drag it to where it stands.";
+  }
+
+  _unplace() {
+    const p = this._placing, f = this._placingFloor();
+    if (!p || !f || !p.selected) return;
+    if (f.positions?.[p.selected]?.placed) p.moved.set(p.selected, null);
+    else p.moved.delete(p.selected);
+    this._render();
+  }
+
+  _nudge(id, e) {
+    const p = this._placing, f = this._placingFloor();
+    const step = (e.shiftKey ? 5 : 1) * NUDGE;
+    const move = { ArrowLeft: [-step, 0], ArrowRight: [step, 0], ArrowUp: [0, -step], ArrowDown: [0, step] }[e.key];
+    if (!f || (!move && e.key !== "Enter" && e.key !== " ")) return;
+    e.preventDefault();
+    p.selected = p.focus = id;
+    if (move) {
+      const plan = f.plan;
+      const from = this._items(f, this._data).find((i) => i.id === id)?.pos ?? { x: plan.width / 2, y: plan.height / 2 };
+      p.moved.set(id, [clamp(metres(from.x + move[0]), 0, plan.width), clamp(metres(from.y + move[1]), 0, plan.height)]);
+    }
+    this._render();
+  }
+
+  _svgPoint(svg, e) {
+    return new DOMPoint(e.clientX, e.clientY).matrixTransform(svg.getScreenCTM().inverse());
+  }
+
+  _pointerDown(e) {
+    const g = e.target.closest?.(".placer .item");
+    if (!g || !this._placing || this._placing.busy || e.button > 0) return;
+    e.preventDefault();
+    const svg = g.ownerSVGElement;
+    const at = this._svgPoint(svg, e);
+    const [x, y] = g.getAttribute("transform").match(/-?[\d.]+/g).map(Number);
+    g.parentNode.appendChild(g); // on top while it moves
+    try {
+      g.setPointerCapture(e.pointerId);
+    } catch {
+      // the pointer is gone already; its move and up events still come to the page
+    }
+    g.classList.add("dragging");
+    this._drag = { id: g.dataset.id, g, svg, pointer: e.pointerId, dx: x - at.x, dy: y - at.y, x0: at.x, y0: at.y, x, y, moved: false };
+  }
+
+  _pointerMove(e) {
+    const drag = this._drag;
+    if (!drag || e.pointerId !== drag.pointer) return;
+    const at = this._svgPoint(drag.svg, e);
+    if (!drag.moved && Math.hypot(at.x - drag.x0, at.y - drag.y0) < 3) return; // a tap, so far
+    drag.moved = true;
+    const f = this._frame;
+    drag.x = clamp(at.x + drag.dx, f.x, f.x + f.w);
+    drag.y = clamp(at.y + drag.dy, f.y, f.y + f.h);
+    drag.g.setAttribute("transform", `translate(${n1(drag.x)} ${n1(drag.y)})`);
+  }
+
+  _pointerUp(e) {
+    const drag = this._drag, p = this._placing;
+    if (!drag || e.pointerId !== drag.pointer) return;
+    this._drag = null;
+    this._redraw = true; // the drawing changed under the pointer: draw it again from the state
+    if (p && e.type === "pointerup") {
+      const f = this._frame;
+      if (drag.moved) {
+        p.moved.set(drag.id, [
+          clamp(metres((drag.x - f.x) / f.s), 0, f.plan.width),
+          clamp(metres((drag.y - f.y) / f.s), 0, f.plan.height),
+        ]);
+      }
+      p.selected = drag.id;
+      p.focus = null;
+    }
+    this._render();
+  }
+
+  async _savePlacing() {
+    const p = this._placing, f = this._placingFloor();
+    if (!p || !f || p.busy) return;
+    const nodes = {}, access_points = {};
+    for (const [id, at] of p.moved) (f.nodes.includes(id) ? nodes : access_points)[id] = at;
+    p.busy = true;
+    p.failure = null;
+    this._render();
+    try {
+      const view = await this._hass.callWS({ type: "wisp/floor/place", floor: p.floor || null, nodes, access_points });
+      this._mergeFloor(p.floor, view);
+      if (this._placing === p) this._placing = null;
+    } catch (err) {
+      p.failure = err?.message || "Wisp could not save the positions.";
+    } finally {
+      p.busy = false;
       this._render();
     }
   }
@@ -343,8 +674,11 @@ class WispPanel extends HTMLElement {
     root.querySelector(".runs").hidden = !ready;
     root.querySelector(".message").innerHTML = ready ? "" : this._message(d);
     if (!ready) return;
-    patch(root.querySelector(".runs"), d.floors.filter((f) => f.run).map((f) => [f.floor ?? "", this._run(f)]));
+    patch(root.querySelector(".runs"), d.floors.filter((f) => f.run).map((f) => [f.floor ?? "", this._runBanner(f)]));
+    this._mapTools(d);
+    this._renderPlacer(d);
     this._rooms(d);
+    this._fillPlanForm();
     const added = d.nodes.filter((n) => n.added);
     root.querySelector(".nodes-note").textContent = `${added.filter((n) => n.online).length} of ${added.length} online`;
     patch(root.querySelector(".nodes"), d.nodes.map((n) => [n.mac, this._node(n, d)]));
@@ -366,7 +700,7 @@ class WispPanel extends HTMLElement {
     return `<div class="sheet empty">${FEET}<p class="lead">${esc(lead)}</p>${text ? `<p>${esc(text)}</p>` : ""}${more}</div>`;
   }
 
-  _run(f) {
+  _runBanner(f) {
     const r = f.run;
     const waiting = r.starts_in > 0;
     const done = r.recorded + r.skipped;
@@ -388,6 +722,152 @@ class WispPanel extends HTMLElement {
       <div class="run-text"><b>${esc(title)}</b><span>${esc(text)}</span></div>
       <div class="run-side"><div class="count" title="${waiting ? "Seconds until recording starts" : "Seconds left"}">${left}<small>s</small></div><button class="stop" data-act="stop"${attr("target", f.floor ?? f.name)} title="Stop now and keep what was recorded">Stop</button></div>
       ${waiting ? "" : `<div class="bar" role="progressbar" aria-label="Recorded" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${pct}"><i style="width:${pct}%"></i></div>`}
+    </div>`;
+  }
+
+  /* A button per floor over the map when there are several; turn and mirror only without a plan. */
+  _mapTools(d) {
+    const root = this.shadowRoot;
+    const shown = this._shownFloor(d);
+    const placing = !!this._placing;
+    const tabs = root.querySelector(".tabs");
+    tabs.hidden = placing || d.floors.length < 2;
+    const html = d.floors.map((f) => `<button data-act="map-floor"${attr("target", f.floor ?? "")} aria-pressed="${f === shown}">${esc(floorLabel(f, d.floors))}</button>`).join("");
+    if (tabs._html !== html) {
+      tabs.innerHTML = html;
+      tabs._html = html;
+    }
+    root.querySelector(".map").hidden = placing;
+    root.querySelector(".map-tools").hidden = placing || !!shown?.plan;
+    if (this._card && (shown ? shown.floor ?? shown.name : "") !== this._cardFloor) this._card.setConfig(this._mapConfig());
+  }
+
+  /* Placing nodes: the plan, its nodes and access points to drag, and what is still to do. */
+  _renderPlacer(d) {
+    const root = this.shadowRoot;
+    const f = this._placingFloor(d);
+    if (this._placing && !f?.plan) this._placing = null; // the plan or the floor went away
+    const p = this._placing;
+    root.querySelector(".placer").hidden = !p;
+    if (!p || this._drag) return; // nothing moves under a finger
+    root.querySelector(".placer-note").textContent = floorLabel(f, d.floors);
+    const items = this._items(f, d);
+    const { svg, frame } = this._placerSvg(f, items);
+    this._frame = frame;
+    const draw = root.querySelector(".plan-draw"), info = root.querySelector(".placer-info");
+    if (draw._html !== svg || this._redraw) {
+      draw.innerHTML = svg;
+      draw._html = svg;
+      this._redraw = false;
+      // The node moved with the keys keeps the focus in the new drawing, once
+      if (p.focus) draw.querySelector(`.item[data-id="${CSS.escape(p.focus)}"]`)?.focus({ preventScroll: true });
+    }
+    p.focus = null;
+    const text = this._placerInfo(f, items);
+    if (info._html !== text) {
+      info.innerHTML = text;
+      info._html = text;
+    }
+    const img = root.querySelector(".plan-img");
+    if (img.getAttribute("src") !== f.plan.url) img.setAttribute("src", f.plan.url);
+    const pct = (v) => `${(100 * v).toFixed(3)}%`;
+    Object.assign(img.style, {
+      left: pct(frame.x / PW), top: pct(frame.y / frame.vh), width: pct(frame.w / PW), height: pct(frame.h / frame.vh),
+    });
+  }
+
+  _placerSvg(f, items) {
+    const plan = f.plan, selected = this._placing.selected;
+    const s = Math.min((PW - 2 * PPAD) / plan.width, (PMAX_H - 2 * PPAD) / plan.height);
+    const frame = { x: (PW - plan.width * s) / 2, y: PPAD, w: plan.width * s, h: plan.height * s, s, plan };
+    const tray = items.filter((i) => !i.pos);
+    frame.vh = Math.round(frame.y + frame.h + PPAD + (tray.length ? 58 : 0));
+    const gap = Math.min(84, (PW - 2 * PPAD) / Math.max(tray.length, 1));
+    const at = (i) => (i.pos
+      ? { x: frame.x + i.pos.x * s, y: frame.y + i.pos.y * s }
+      : { x: PW / 2 + (tray.indexOf(i) - (tray.length - 1) / 2) * gap, y: frame.y + frame.h + 32 });
+    const order = [...items.filter((i) => i.id !== selected), ...items.filter((i) => i.id === selected)];
+    const marks = order.map((i) => {
+      const { x, y } = at(i);
+      const cls = `item ${i.kind}${i.placed ? " placed" : ""}${i.id === selected ? " sel" : ""}`;
+      const label = `${i.name} ${this._where(i)} Drag it, or move it with the arrow keys.`;
+      return `<g class="${cls}" data-id="${esc(i.id)}" transform="translate(${n1(x)} ${n1(y)})" tabindex="0" role="button" aria-label="${esc(label)}"><circle class="hit" r="22"/>${i.kind === "ap" ? AP_MARK : NODE_MARK}<text y="24">${esc(i.name)}</text></g>`;
+    }).join("");
+    const below = tray.length ? `<text class="tray" x="${PW / 2}" y="${n1(frame.y + frame.h + 13)}">Not on the plan yet: drag onto it</text>` : "";
+    const svg = `<svg viewBox="0 0 ${PW} ${frame.vh}" role="group" aria-label="The plan of ${esc(floorPhrase(f))}, ${n1(plan.width)} by ${n1(plan.height)} m"><rect class="edge" x="${n1(frame.x)}" y="${n1(frame.y)}" width="${n1(frame.w)}" height="${n1(frame.h)}"/>${below}${marks}</svg>`;
+    return { svg, frame };
+  }
+
+  _placerInfo(f, items) {
+    const p = this._placing;
+    const nodes = items.filter((i) => i.kind === "node");
+    const placed = nodes.filter((i) => i.placed).length;
+    const loose = nodes.filter((i) => !i.placed).map((i) => i.name);
+    const sel = items.find((i) => i.id === p.selected);
+    const pending = p.moved.size > 0;
+    const hint = placed === 0
+      ? "Drag each node to where it stands on the plan, and the access points too where you know them. Tap one to select it."
+      : placed === 1
+        ? "Place one more node: from two on, Wisp turns and scales its own layout to fit them, and the nodes you leave follow."
+        : placed === 2
+          ? "The nodes you leave follow these two. A third one, away from the line between them, tells Wisp which way round its layout goes."
+          : "The nodes you leave follow the placed ones.";
+    // Two placed nodes always match exactly; from three the error says how well the layout agrees
+    const fit = f.fit && f.fit.nodes > 2 && !pending ? `<p class="say">The placed nodes match the hive's own layout within ${f.fit.error} m.</p>` : "";
+    return `${sel ? `<div class="sel-line"><p><b>${esc(sel.name)}</b> ${esc(this._where(sel))}</p>${sel.placed ? `<button class="quiet" data-act="unplace"${p.busy ? " disabled" : ""}>Let Wisp place it</button>` : ""}</div>` : ""}
+      <p class="say">${esc(hint)}${pending && loose.length ? " Save to see them follow." : ""}</p>
+      <p class="unplaced${loose.length ? "" : " done"}">${loose.length ? `<b>Not placed yet:</b> ${esc(loose.join(", "))}.` : "Every node is placed."}</p>
+      ${fit}
+      ${p.failure ? `<p class="fail" role="alert">${esc(p.failure)}</p>` : ""}
+      <div class="ask-line"><span class="ask-buttons">
+        <button data-act="placer-cancel"${p.busy ? " disabled" : ""}>Cancel</button>
+        <button class="primary" data-act="placer-save"${p.busy || !pending ? " disabled" : ""}>${p.busy ? "Saving" : "Save"}</button></span></div>`;
+  }
+
+  _planRow(f) {
+    const key = f.floor ?? "";
+    const plan = f.plan;
+    const form = this._isOpen("plan", key), removing = this._isOpen("remove-plan", key);
+    const placed = plan ? f.nodes.filter((mac) => f.positions?.[mac]?.placed).length : 0;
+    const meta = plan
+      ? `${metres(plan.width)} by ${metres(plan.height)} m, ${placed} of ${plural(f.nodes.length, "node", "nodes")} placed`
+      : "none yet: the map shows the hive's own layout";
+    const placing = this._placing?.floor === key;
+    const acts = plan
+      ? `<button data-act="place"${attr("floor", key)}${placing || form || removing ? " disabled" : ""}>Place nodes</button>
+         <button data-act="ask-plan"${attr("floor", key)}${form ? " disabled" : ""}>Change</button>
+         <button class="quiet" data-act="ask-remove-plan"${attr("floor", key)}${removing ? " disabled" : ""}>Remove</button>`
+      : `<button data-act="ask-plan"${attr("floor", key)}${form ? " disabled" : ""}>Add floor plan</button>`;
+    return `<div class="row">
+      <div class="line">
+        <div class="what"><b>Floor plan</b><small>${esc(meta)}</small></div>
+        <div class="acts">${acts}</div>
+      </div>
+      ${form ? this._askPlan(f) : removing ? this._askRemovePlan(f) : ""}
+    </div>`;
+  }
+
+  _askPlan(f) {
+    const key = f.floor ?? "";
+    return `<div class="ask plan-form" role="group" aria-label="Floor plan">
+      <p>An image of ${esc(floorPhrase(f))} seen from above, and its size in metres. Put the image in Home Assistant's www folder and give its address as /local/ and the file name, or give any web address.</p>
+      <label class="field"><span>Image address</span><input data-plan="url" type="text" inputmode="url" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="/local/wisp/plan.png"></label>
+      <div class="fields">
+        <label class="field"><span>Width, m</span><input data-plan="width" type="number" inputmode="decimal" min="1" max="500" step="0.01"></label>
+        <label class="field"><span>Height, m</span><input data-plan="height" type="number" inputmode="decimal" min="1" max="500" step="0.01"></label>
+      </div>
+      <label class="check"><input data-plan="keep" type="checkbox">Keep the image's proportions</label>
+      <p class="plan-status" aria-live="polite"></p>
+      <img class="preview" alt="The image" hidden>
+      ${this._buttons("save-plan", "Save", "primary", attr("floor", key), { busy: "Saving", duration: false })}
+    </div>`;
+  }
+
+  _askRemovePlan(f) {
+    const which = f.floor != null ? `the floor plan of ${esc(f.name)}` : "the floor plan";
+    return `<div class="ask danger" role="alertdialog" aria-label="Remove the floor plan">
+      <p>Remove ${which}? The positions placed on it go too, and the map shows the hive's own layout again. The image itself stays where it is.</p>
+      ${this._buttons("remove-plan", "Remove", "danger", attr("floor", f.floor ?? ""), { busy: "Removing" })}
     </div>`;
   }
 
@@ -417,6 +897,7 @@ class WispPanel extends HTMLElement {
     for (const a of f.areas) rows.push([`area:${a.area}`, this._area(f, a, d)]);
     if (f.other_areas.length) rows.push(["other", this._other(f, d)]);
     rows.push(["empty", this._empty(f)]);
+    rows.push(["plan", this._planRow(f)]);
     return rows.map(([k, html]) => [`${key}:${k}`, html]);
   }
 
@@ -482,12 +963,12 @@ class WispPanel extends HTMLElement {
   }
 
   /* Duration (for a recording), Cancel and the action; a failed call says why above them. */
-  _buttons(act, label, cls, data) {
+  _buttons(act, label, cls, data, { busy: working = cls === "primary" ? "Starting" : "Clearing", duration = cls === "primary" } = {}) {
     const busy = !!this._busy && this._busy === this._open;
     const failure = this._failure && this._failure.open === this._open ? `<p class="fail" role="alert">${esc(this._failure.message)}</p>` : "";
-    return `${failure}<div class="ask-line">${cls === "primary" ? this._durations() : ""}<span class="ask-buttons">
+    return `${failure}<div class="ask-line">${duration ? this._durations() : ""}<span class="ask-buttons">
       <button data-act="close"${busy ? " disabled" : ""}>Cancel</button>
-      <button class="${cls}" data-act="${act}"${data}${busy ? " disabled" : ""}>${busy ? (cls === "primary" ? "Starting" : "Clearing") : label}</button></span></div>`;
+      <button class="${cls}" data-act="${act}"${data}${busy ? " disabled" : ""}>${busy ? working : label}</button></span></div>`;
   }
 
   _askRoom(f, area, name) {
@@ -543,9 +1024,11 @@ class WispPanel extends HTMLElement {
   _node(n, d) {
     const floor = n.added ? d.floors.find((f) => f.floor === n.floor) : null;
     const where = [n.added ? n.area_name ?? "no area" : null, floor ? floorLabel(floor, d.floors) : null, n.host].filter(Boolean).join(", ");
+    const onPlan = floor?.plan ? !!floor.positions?.[n.mac]?.placed : null;
     const chips = [
       `<span class="chip${n.online ? " up" : ""}">${n.online ? "online" : "offline"}</span>`,
       `<span class="chip">${n.placed ? "on the layout" : "not placed yet"}</span>`,
+      onPlan == null ? "" : `<span class="chip${onPlan ? "" : " todo"}">${onPlan ? "placed on the plan" : "not placed on the plan"}</span>`,
       n.added ? "" : `<span class="chip">not added to Wisp</span>`,
     ].join("");
     return `<div class="row">
@@ -612,6 +1095,56 @@ const STYLE = `
   .map-tools { display: flex; justify-content: flex-end; gap: 8px; margin-top: 8px; color: var(--wisp-ink); font-family: var(--wisp-serif); }
   .map-tools button { min-height: 34px; font-size: .875rem; }
   .map-tools button[aria-pressed="true"] { background: var(--wisp-ink); color: var(--wisp-paper-1); }
+  .tabs { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 8px; color: var(--wisp-ink); font-family: var(--wisp-serif); }
+  .tabs button { min-height: 34px; font-size: .875rem; }
+  .tabs button[aria-pressed="true"] { background: var(--wisp-ink); color: var(--wisp-paper-1); }
+
+  .plan-box { position: relative; margin: 4px 14px 0; border: 1.5px solid color-mix(in srgb, var(--wisp-ink) 55%, transparent); }
+  /* The plan inked onto the parchment, as on the map */
+  .plan-img { position: absolute; display: block; object-fit: fill; pointer-events: none; mix-blend-mode: multiply; opacity: .9; }
+  .page.dark .plan-img { filter: invert(1) hue-rotate(180deg); mix-blend-mode: screen; opacity: .7; }
+  .plan-draw { position: relative; }
+  .plan-draw svg { display: block; width: 100%; height: auto; user-select: none; -webkit-user-select: none; -webkit-touch-callout: none; }
+  .plan-draw .edge { fill: none; stroke: var(--wisp-ink); stroke-width: 1; opacity: .35; }
+  .plan-draw text { font-family: var(--wisp-serif); fill: var(--wisp-ink); text-anchor: middle;
+                    paint-order: stroke; stroke: var(--wisp-paper-1); stroke-width: 3.5px; stroke-linejoin: round; }
+  .plan-draw .tray { font-size: 11px; font-style: italic; opacity: .8; }
+  .item { cursor: grab; touch-action: none; outline: none; }
+  .item.dragging { cursor: grabbing; }
+  .item .hit { fill: transparent; }
+  .item .ring { fill: var(--wisp-mark); stroke: var(--wisp-ink); stroke-width: 2.2; stroke-dasharray: 2.5 2; }
+  .item.placed .ring { stroke-dasharray: none; stroke-width: 2.6; }
+  .item .dot { fill: var(--wisp-ink); }
+  .item .waves { fill: none; stroke: var(--wisp-ink); stroke-width: 1.5; stroke-linecap: round; opacity: .75; }
+  .item text { font-size: 12px; font-weight: 600; }
+  .item:not(.placed) text { font-weight: 400; font-style: italic; }
+  .item.sel .hit, .item:focus-visible .hit { fill: color-mix(in srgb, var(--wisp-hot) 16%, transparent); stroke: var(--wisp-hot); stroke-width: 1.5; }
+  .placer-info { display: grid; gap: 8px; padding: 12px 18px 14px; }
+  .placer-info p { margin: 0; line-height: 1.45; }
+  .placer-info .say { font-size: .9rem; font-style: italic; opacity: .85; }
+  .placer-info .fail { color: var(--wisp-hot); font-style: italic; }
+  .unplaced b { color: var(--wisp-hot); }
+  .unplaced.done { font-style: italic; }
+  .sel-line { display: flex; align-items: center; flex-wrap: wrap; gap: 4px 12px; }
+  .sel-line p { flex: 1 1 12rem; }
+
+  .ask .field { display: grid; gap: 4px; flex: 1 1 8rem; }
+  .field span { font-size: .85rem; font-style: italic; opacity: .85; }
+  .fields { display: flex; flex-wrap: wrap; gap: 8px 12px; }
+  input[type=text], input[type=number] {
+    font: inherit; font-size: 16px; color: var(--wisp-ink); box-sizing: border-box; width: 100%; min-height: 40px; padding: 6px 10px;
+    border-radius: 8px; border: 1.5px solid color-mix(in srgb, var(--wisp-ink) 55%, transparent);
+    background: color-mix(in srgb, var(--wisp-paper-1) 85%, transparent);
+  }
+  input:disabled { opacity: .6; }
+  input:focus-visible { outline: 2px solid var(--wisp-hot); outline-offset: 2px; }
+  .ask .check { justify-self: start; }
+  .check input { width: 18px; height: 18px; margin: 0; accent-color: var(--wisp-ink); }
+  .plan-status { font-size: .9rem; font-style: italic; }
+  .plan-status:empty { display: none; }
+  .plan-status.bad { color: var(--wisp-hot); }
+  .preview { justify-self: start; max-width: 100%; max-height: 120px; border: 1px solid var(--wisp-edge); border-radius: 4px; background: #fff; }
+  .chip.todo { border-style: dashed; }
 
   .sheet {
     position: relative; overflow: hidden; color: var(--wisp-ink); font-family: var(--wisp-serif);

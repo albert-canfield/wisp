@@ -32,3 +32,4 @@ ROOM_LINK_AGE = 3.0  # s: older scores are left out of a floor's features
 NO_FLOOR = ""  # nodes and areas without a Home Assistant floor share one, named after the hub
 CALIBRATION_SECONDS = 60
 STORE_VERSION = 1  # calibration samples in .storage
+PLANS_STORE_VERSION = 1  # floor plans and placements in .storage
