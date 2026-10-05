@@ -26,3 +26,6 @@ data/
 # Local agent worktrees
 .claude/
 .venv-ha/
+
+# Built packages (integration zip)
+dist/
