@@ -39,7 +39,7 @@ Everything stays on your local network.
 
 ## Try it
 
-Until the first release puts the web flasher online, nodes are built with ESPHome:
+The full guide, including where to put the nodes and recommended access point settings, is in [docs/SETUP.md](docs/SETUP.md). In short, until the first release puts the web flasher online, nodes are built with ESPHome:
 
 ```bash
 python3.13 -m venv .venv && .venv/bin/pip install esphome
