@@ -13,13 +13,14 @@ import voluptuous as vol
 
 from homeassistant.components import websocket_api
 from homeassistant.core import HomeAssistant, callback
-from homeassistant.helpers import config_validation as cv
+from homeassistant.helpers import area_registry as ar, config_validation as cv
 from homeassistant.helpers.device_registry import format_mac
 from homeassistant.helpers.event import async_track_time_interval
 
 from .const import DOMAIN, MAP_INTERVAL, NO_FLOOR
 from .engine.rooms import MIN_SAMPLES
 from .hub import WispHub
+from .plan_images import async_delete_unused
 from .presence import RoomPresence
 
 EMPTY_MAP: dict[str, Any] = {"nodes": [], "access_points": [], "links": [], "hive": None}
@@ -37,6 +38,7 @@ def async_register(hass: HomeAssistant) -> None:
     websocket_api.async_register_command(hass, ws_set_plan)
     websocket_api.async_register_command(hass, ws_place)
     websocket_api.async_register_command(hass, ws_clear_plan)
+    websocket_api.async_register_command(hass, ws_set_node_area)
 
 
 def _hub(hass: HomeAssistant) -> WispHub | None:
@@ -107,8 +109,11 @@ def ws_subscribe_panel(
 # Floor plans
 
 def _image_url(value: Any) -> str:
-    """A path on Home Assistant, such as /local/wisp/ground.png, or an http or https address."""
+    """A path on Home Assistant, such as /local/wisp/ground.png, an http or https address, or
+    nothing: a blank plan, drawn as a grid."""
     url = cv.string(value).strip()
+    if not url:
+        return ""
     parts = urlsplit(url)
     if (
         len(url) > MAX_URL
@@ -168,15 +173,20 @@ def _no_floor(connection: websocket_api.ActiveConnection, msg: dict[str, Any], f
 async def ws_set_plan(
     hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict[str, Any]
 ) -> None:
-    """A floor's plan: its image and size in metres. A new image or size keeps the placed positions."""
+    """A floor's plan: its image (or none, for a grid) and size in metres. Any Home Assistant floor
+    can have one before its nodes are there. A new image or size keeps the placed positions."""
     if (presence := _presence(hass, connection, msg)) is None:
         return
     floor = msg.get("floor") or NO_FLOOR
-    if floor not in presence.floors:
-        _no_floor(connection, msg, floor)
+    if not presence.known_floor(floor):
+        text = f"Home Assistant has no floor {floor}." if floor else "No Wisp node is without a floor."
+        connection.send_error(msg["id"], websocket_api.ERR_NOT_FOUND, text)
         return
+    old = presence.plans.floors.get(floor)
+    old_url = old.url if old else ""
     presence.plans.set_plan(floor, msg["url"], msg["width"], msg["height"])
     await presence.plans.async_save()
+    await async_delete_unused(hass, old_url, {p.url for p in presence.plans.floors.values()})
     presence.async_plans_changed(floor)
     connection.send_result(msg["id"], presence.plan_view(floor))
 
@@ -231,7 +241,36 @@ async def ws_clear_plan(
     if (presence := _presence(hass, connection, msg)) is None:
         return
     floor = msg.get("floor") or NO_FLOOR
+    old = presence.plans.floors.get(floor)
     if presence.plans.remove(floor):
         await presence.plans.async_save()
+        await async_delete_unused(hass, old.url, {p.url for p in presence.plans.floors.values()})
         presence.async_plans_changed(floor)
+    connection.send_result(msg["id"])
+
+
+@websocket_api.websocket_command({
+    vol.Required("type"): "wisp/node/set_area",
+    vol.Required("mac"): _mac,
+    vol.Required("area"): vol.Any(None, cv.string),
+})
+@websocket_api.require_admin
+@callback
+def ws_set_node_area(
+    hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict[str, Any]
+) -> None:
+    """The area a node stands in, set on its devices as anywhere in Home Assistant; its floor
+    follows. None takes it out of every area."""
+    hub = _hub(hass)
+    if hub is None:
+        connection.send_error(msg["id"], websocket_api.ERR_NOT_FOUND, "Wisp is not loaded.")
+        return
+    if msg["mac"] not in hub.nodes:
+        connection.send_error(msg["id"], websocket_api.ERR_NOT_FOUND, f"No Wisp node {msg['mac']}.")
+        return
+    area = msg["area"] or None
+    if area is not None and ar.async_get(hass).async_get_area(area) is None:
+        connection.send_error(msg["id"], websocket_api.ERR_NOT_FOUND, f"No area {area}.")
+        return
+    hub.async_set_node_area(msg["mac"], area)
     connection.send_result(msg["id"])

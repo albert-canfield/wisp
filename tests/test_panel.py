@@ -111,7 +111,12 @@ async def test_snapshot_of_nodes_floors_and_areas(hass: HomeAssistant, udp: Fake
                 "floor": "ground_floor", "name": "Ground floor", "nodes": [NODE_A], "live_links": 0,
                 "room": None, "area": None, "confidence": None, "empty_samples": 0, "run": None,
                 "areas": [{"area": "hall", "name": "Hall", "nodes": 1, "samples": 0, "presence": False, "confidence": None}],
-                "other_areas": [{"area": "kitchen", "name": "Kitchen"}],  # Bedroom is upstairs, where no node is
+                "other_areas": [{"area": "kitchen", "name": "Kitchen"}],
+            },
+            {  # every Home Assistant floor is there, with nodes or not: a plan can wait for them
+                "floor": "upstairs", "name": "Upstairs", "nodes": [], "live_links": 0,
+                "room": None, "area": None, "confidence": None, "empty_samples": 0, "run": None,
+                "areas": [], "other_areas": [{"area": "bedroom", "name": "Bedroom"}],
             },
             {
                 "floor": None, "name": "Wisp", "nodes": [NODE_B], "live_links": 0,
@@ -121,6 +126,13 @@ async def test_snapshot_of_nodes_floors_and_areas(hass: HomeAssistant, udp: Fake
             },
         ],
         "elsewhere": [],
+        "areas": [  # for the node area pickers, by floor
+            {"area": "hall", "name": "Hall", "floor": "ground_floor", "floor_name": "Ground floor"},
+            {"area": "kitchen", "name": "Kitchen", "floor": "ground_floor", "floor_name": "Ground floor"},
+            {"area": "bedroom", "name": "Bedroom", "floor": "upstairs", "floor_name": "Upstairs"},
+            {"area": "garden", "name": "Garden", "floor": None, "floor_name": None},
+            {"area": "office", "name": "Office", "floor": None, "floor_name": None},
+        ],
         "min_samples": 20,
         "hive": None,
     }
@@ -129,7 +141,7 @@ async def test_snapshot_of_nodes_floors_and_areas(hass: HomeAssistant, udp: Fake
     house = House(hass, udp, entry)
     await hass.services.async_call(DOMAIN, "calibrate_room", {"area": "Kitchen", "duration": 25}, blocking=True)
     await house.seconds(5, "kitchen")
-    (ground_floor, _) = entry.runtime_data.panel_snapshot()["floors"]
+    ground_floor = entry.runtime_data.panel_snapshot()["floors"][0]
     assert ground_floor["run"] == {
         "area": "kitchen", "name": "Kitchen", "starts_in": 0, "seconds_left": 20, "recorded": 5, "skipped": 0
     }
@@ -142,12 +154,18 @@ async def test_snapshot_of_nodes_floors_and_areas(hass: HomeAssistant, udp: Fake
         "area": "kitchen", "name": "Kitchen", "nodes": 0, "samples": 25, "presence": True, "confidence": 1.0
     }
 
-    # Kitchen moves upstairs, where no node is: its samples wait elsewhere, to be cleared
+    # Kitchen moves upstairs, where no node is yet: its samples go with it, shown there to clear
     areas.async_update("kitchen", floor_id=upstairs.floor_id)
     await hass.async_block_till_done()
     snapshot = entry.runtime_data.panel_snapshot()
-    assert snapshot["elsewhere"] == [{"area": "kitchen", "name": "Kitchen", "samples": 25}]
+    assert snapshot["elsewhere"] == []
     assert [a["area"] for a in snapshot["floors"][0]["areas"]] == ["hall"]
+    assert [a["area"] for a in snapshot["floors"][1]["areas"]] == ["kitchen"]
+    # A calibrated area on no floor while no node is without one has nowhere else to be shown
+    areas.async_update("kitchen", floor_id=None)
+    entry.runtime_data.async_set_node_area(NODE_B, "hall")
+    await hass.async_block_till_done()
+    assert entry.runtime_data.panel_snapshot()["elsewhere"] == [{"area": "kitchen", "name": "Kitchen", "samples": 25}]
 
 
 async def test_changes_at_most_once_a_second(hass: HomeAssistant, udp: FakeUdp, hass_ws_client) -> None:

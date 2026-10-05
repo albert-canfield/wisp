@@ -170,19 +170,25 @@ async def test_state_writes_are_rate_limited(hass: HomeAssistant, feed: Feed) ->
     feed.clock.now = 1001.0
     await fire(hass, 1)
     assert state(hass, SCORE) == "1.6" and writes(SCORE) == 1
-    await feed(at=1.3, score=170)
+    await feed(at=1.3, score=200)  # 0.4 up: worth a write, once the second is up
     assert state(hass, SCORE) == "1.6"
-    await feed(at=2.1, score=170)
-    assert state(hass, SCORE) == "1.7" and writes(SCORE) == 2
+    await feed(at=2.1, score=200)
+    assert state(hass, SCORE) == "2.0" and writes(SCORE) == 2
+    # A small change waits up to a minute, so the recorder stays light
+    await feed(at=3.2, score=210)
+    await feed(at=30.0, score=210)
+    assert state(hass, SCORE) == "2.0" and writes(SCORE) == 2
+    await feed(at=62.4, score=210)
+    assert state(hass, SCORE) == "2.1" and writes(SCORE) == 3
     # Motion is written at once, on and off
-    await feed(at=2.2, score=170, motion=1)
+    await feed(at=62.5, score=210, motion=1)
     assert state(hass, MOTION) == "on"
-    await feed(at=2.3, score=170, motion=0)
+    await feed(at=62.6, score=210, motion=0)
     assert state(hass, MOTION) == "off" and writes(MOTION) == 2
     # Same values: nothing written
-    await feed(at=5.0, score=170)
-    await feed(at=7.0, score=170)
-    assert writes(SCORE) == 2
+    await feed(at=65.0, score=210)
+    await feed(at=67.0, score=210)
+    assert writes(SCORE) == 3
 
 
 async def test_links_go_unavailable_after_10_seconds(hass: HomeAssistant, feed: Feed) -> None:

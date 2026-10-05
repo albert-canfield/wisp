@@ -22,6 +22,7 @@ SUBSCRIBE_INTERVAL = timedelta(seconds=3)  # the node's lease lasts 10 s
 LINK_TIMEOUT = 10.0  # s without a report before a link's entities go unavailable
 HIVE_TIMEOUT = 15.0  # s a node's hive report stays current; they come every 5 s
 WRITE_INTERVAL = 1.0  # s between state writes per entity; reports come 5 times a second
+QUIET_WRITE_INTERVAL = 60.0  # s: a change too small to matter waits this long (keeps the recorder light)
 RESOLVE_INTERVAL = 60.0  # s to keep a resolved host name
 PROBE_TRIES = 3  # subscriptions, 1 s apart, when adding a node by address
 MAP_INTERVAL = timedelta(seconds=1)  # at most one map update a second per card

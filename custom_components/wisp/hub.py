@@ -13,7 +13,7 @@ from typing import Any
 
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import CONF_HOST, CONF_MAC, CONF_NAME
-from homeassistant.core import CALLBACK_TYPE, HomeAssistant, callback
+from homeassistant.core import CALLBACK_TYPE, Event, HomeAssistant, callback
 from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers.device_registry import CONNECTION_NETWORK_MAC, DeviceInfo
 from homeassistant.helpers.event import async_track_time_interval
@@ -121,6 +121,8 @@ class WispHub:
                 self.hass, self._async_expire_tick, timedelta(seconds=1),
                 name="wisp link timeout", cancel_on_shutdown=True,
             ),
+            # A node's area is its device's: follow it when it is set or moved in Home Assistant.
+            self.hass.bus.async_listen(dr.EVENT_DEVICE_REGISTRY_UPDATED, self._async_device_updated),
         ]
         await self.async_subscribe()
 
@@ -161,13 +163,54 @@ class WispHub:
                     node.host, node.address, node.resolved_at = host, None, 0.0
                     changed = True
                 node.name, node.subentry_id = name, sub.subentry_id
-            node.area = sub.data.get(CONF_AREA)
+            node.area = self.node_area(mac, sub.data.get(CONF_AREA))
             dev_reg.async_get_or_create(
                 config_entry_id=self.entry.entry_id, config_subentry_id=sub.subentry_id, **self.device_info(mac)
             )
+        # An area given in Wisp's node settings moves onto the node's devices: one place for it.
+        for mac, sub in wanted.items():
+            if sub.data.get(CONF_AREA):
+                self.async_set_node_area(mac, sub.data[CONF_AREA])
         self.presence.async_sync_floors()
         if changed and self.transport:
             self.entry.async_create_task(self.hass, self.async_subscribe(), "wisp subscribe")
+
+    def node_area(self, mac: str, legacy: str | None = None) -> str | None:
+        """The area a node stands in: the area of its device in Home Assistant (Wisp's own device
+        first, then ESPHome's), else the one given in Wisp's node settings before devices had it."""
+        devices = node_devices(self.hass, mac)
+        ours = [d for d in devices if self.entry.entry_id in d.config_entries]
+        for device in ours + [d for d in devices if d not in ours]:
+            if device.area_id:
+                return device.area_id
+        return legacy
+
+    @callback
+    def _async_device_updated(self, _event: Event[dr.EventDeviceRegistryUpdatedData]) -> None:
+        changed = False
+        for node in self.nodes.values():
+            sub = self.entry.subentries.get(node.subentry_id) if node.subentry_id else None
+            area = self.node_area(node.mac, sub.data.get(CONF_AREA) if sub else None)
+            if area != node.area:
+                node.area, changed = area, True
+        if changed:
+            self.presence.async_sync_floors(entities=True)
+
+    @callback
+    def async_set_node_area(self, mac: str, area: str | None) -> None:
+        """Puts the node in an area, the Home Assistant way: on its devices. Wisp's own setting goes."""
+        dev_reg = dr.async_get(self.hass)
+        for device in node_devices(self.hass, mac):
+            if device.area_id != area:
+                dev_reg.async_update_device(device.id, area_id=area)
+        node = self.nodes.get(mac)
+        sub = self.entry.subentries.get(node.subentry_id) if node and node.subentry_id else None
+        if sub is not None and CONF_AREA in sub.data:
+            data = {k: v for k, v in sub.data.items() if k != CONF_AREA}
+            self.hass.config_entries.async_update_subentry(self.entry, sub, data=data)
+        if node is not None and node.area != area:
+            node.area = area
+            self.presence.async_sync_floors(entities=True)
 
     def device_info(self, mac: str) -> DeviceInfo:
         """The node's device, matched to its ESPHome device by MAC."""

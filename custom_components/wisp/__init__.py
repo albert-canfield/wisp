@@ -4,6 +4,7 @@ from __future__ import annotations
 from contextlib import suppress
 import logging
 from pathlib import Path
+import shutil
 
 from homeassistant.components import frontend, panel_custom
 from homeassistant.components.http import StaticPathConfig
@@ -18,6 +19,7 @@ from homeassistant.helpers.typing import ConfigType
 from . import services, websocket
 from .const import DOMAIN, PLANS_STORE_VERSION, PLATFORMS, STORE_VERSION, TITLE, VERSION
 from .hub import WispConfigEntry, WispHub
+from .plan_images import PlanImageServeView, PlanImageUploadView, images_dir
 from .plans import plans_store_key
 from .presence import store_key
 
@@ -32,6 +34,9 @@ PANEL_PATH = DOMAIN  # the panel's address: /wisp
 async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
     websocket.async_register(hass)
     services.async_register(hass)
+    if getattr(hass, "http", None) is not None:  # floor plan images uploaded from the panel
+        hass.http.register_view(PlanImageUploadView())
+        hass.http.register_view(PlanImageServeView())
     await _async_register_frontend(hass)
     return True
 
@@ -93,6 +98,7 @@ async def async_remove_entry(hass: HomeAssistant, entry: WispConfigEntry) -> Non
     clean, and the panel."""
     await Store(hass, STORE_VERSION, store_key(entry.entry_id)).async_remove()
     await Store(hass, PLANS_STORE_VERSION, plans_store_key(entry.entry_id)).async_remove()
+    await hass.async_add_executor_job(shutil.rmtree, images_dir(hass), True)  # the uploaded plan images
     frontend.async_remove_panel(hass, PANEL_PATH, warn_if_unknown=False)
 
 

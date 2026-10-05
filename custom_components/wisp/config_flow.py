@@ -183,11 +183,16 @@ class NodeSubentryFlow(ConfigSubentryFlow):
                     errors = {"base": "different_node"}
             if not errors:
                 name = (user_input.get(CONF_NAME) or "").strip() or sub.title
-                kept = {k: v for k, v in sub.data.items() if k != CONF_AREA}  # a cleared area goes
-                data = kept | _node_data(sub.data[CONF_MAC], host, name, user_input.get(CONF_AREA))
+                kept = {k: v for k, v in sub.data.items() if k != CONF_AREA}
+                area = user_input.get(CONF_AREA) or None
+                hub = getattr(self._get_entry(), "runtime_data", None)
+                if hub is not None:  # the area lives on the node's devices, as anywhere in Home Assistant
+                    hub.async_set_node_area(sub.data[CONF_MAC], area)
+                    area = None
+                data = kept | _node_data(sub.data[CONF_MAC], host, name, area)
                 return self.async_update_and_abort(self._get_entry(), sub, title=name, data=data)
-        # The ESPHome device's area is a good first guess for the room the node stands in
-        area = sub.data.get(CONF_AREA) or next(
+        hub = getattr(self._get_entry(), "runtime_data", None)
+        area = hub.node_area(sub.data[CONF_MAC], sub.data.get(CONF_AREA)) if hub else sub.data.get(CONF_AREA) or next(
             (d.area_id for d in node_devices(self.hass, sub.data[CONF_MAC]) if d.area_id), None
         )
         return self.async_show_form(

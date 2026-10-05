@@ -146,10 +146,19 @@ function projectPlan(map, floor) {
 
 /* The plan's edge and a scale bar of a round number of metres. The image itself lies under the
    drawing as an img that stays across redraws, so it does not load again each second. */
-function planLayer(f) {
+/* A plan without an image: a grid of whole metres (or halves, or a few), about 14 px or more apart. */
+function gridPath(f) {
+  const step = [0.5, 1, 2, 5, 10].find((v) => v * f.s >= 14) ?? 10;
+  let d = "";
+  for (let x = step; x * f.s < f.w - 0.5; x += step) d += `M${n1(f.x + x * f.s)} ${n1(f.y)}v${n1(f.h)}`;
+  for (let y = step; y * f.s < f.h - 0.5; y += step) d += `M${n1(f.x)} ${n1(f.y + y * f.s)}h${n1(f.w)}`;
+  return d;
+}
+
+function planLayer(f, grid = false) {
   const m = SCALES.find((v) => v * f.s >= 36) ?? SCALES[SCALES.length - 1];
   const x = f.x + 10, y = f.y + f.h - 10, len = m * f.s;
-  return `<rect class="edge" x="${n1(f.x)}" y="${n1(f.y)}" width="${n1(f.w)}" height="${n1(f.h)}"/><g class="scale" aria-hidden="true"><path d="M${n1(x)} ${n1(y - 4)}V${n1(y)}H${n1(x + len)}V${n1(y - 4)}"/><text x="${n1(x + len / 2)}" y="${n1(y - 6)}">${m} m</text></g>`;
+  return `${grid ? `<path class="grid" d="${gridPath(f)}"/>` : ""}<rect class="edge" x="${n1(f.x)}" y="${n1(f.y)}" width="${n1(f.w)}" height="${n1(f.h)}"/><g class="scale" aria-hidden="true"><path d="M${n1(x)} ${n1(y - 4)}V${n1(y)}H${n1(x + len)}V${n1(y - 4)}"/><text x="${n1(x + len / 2)}" y="${n1(y - 6)}">${m} m</text></g>`;
 }
 
 /* Metres to the viewBox: turn, mirror, then scale to fit. */
@@ -283,7 +292,7 @@ function draw(map, config, floor) {
   const where = rooms.length ? `${rooms.length > 1 ? "Rooms" : "Room"}: ${rooms.join(", ")}. ` : "";
   const motion = where + (moving.length ? `Motion: ${moving.join(", ")}` : "All quiet");
   return {
-    svg: `<svg viewBox="0 0 ${W} ${h}" role="img" aria-label="${esc(`Map of ${summary}. ${motion}.`)}">${plan ? planLayer(frame) : ""}<g class="lines">${lines}</g><g class="steps">${steps}</g><g class="marks">${marks}</g><g class="labels">${labels}</g></svg>`,
+    svg: `<svg viewBox="0 0 ${W} ${h}" role="img" aria-label="${esc(`Map of ${summary}. ${motion}.`)}">${plan ? planLayer(frame, !plan.url) : ""}<g class="lines">${lines}</g><g class="steps">${steps}</g><g class="marks">${marks}</g><g class="labels">${labels}</g></svg>`,
     summary,
     motion,
     // Where the plan's image goes, in shares of the drawing
@@ -416,14 +425,14 @@ class WispMapCard extends HTMLElement {
     }
     const { svg, summary, motion, plan } = draw(pick.map, this._config, pick.floor);
     root.querySelector(".draw").innerHTML = svg;
-    if (plan) {
+    if (plan?.url) {  // a plan without an image is a grid, drawn in the svg
       if (img.getAttribute("src") !== plan.url) img.setAttribute("src", plan.url);
       const pct = (v) => `${(100 * v).toFixed(3)}%`;
       Object.assign(img.style, { left: pct(plan.left), top: pct(plan.top), width: pct(plan.width), height: pct(plan.height) });
       img.hidden = false;
     }
     foot.hidden = false;
-    foot.querySelector(".sum").textContent = summary + (plan && this._badPlan === plan.url ? ". The floor plan image could not be loaded" : "");
+    foot.querySelector(".sum").textContent = summary + (plan?.url && this._badPlan === plan.url ? ". The floor plan image could not be loaded" : "");
     foot.querySelector(".mot").textContent = motion;
   }
 }
@@ -467,6 +476,7 @@ const STYLE = `
   ha-card.dark img.plan { filter: invert(1) hue-rotate(180deg); mix-blend-mode: screen; opacity: .7; }
   ha-card.dark.photo img.plan { filter: brightness(.55) saturate(.8); mix-blend-mode: normal; opacity: .85; }
   .edge { fill: none; stroke: var(--wisp-ink); stroke-width: 1; opacity: .35; }
+  .grid { fill: none; stroke: var(--wisp-ink); stroke-width: .6; opacity: .14; }
   .scale path { fill: none; stroke: var(--wisp-ink); stroke-width: 1.5; stroke-linecap: square; }
   .scale text { font-size: 10px; font-style: italic; }
   .link { fill: none; stroke-linecap: round; }

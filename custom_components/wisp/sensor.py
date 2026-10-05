@@ -62,6 +62,9 @@ class MotionScore(LinkSensor):
         link = self.link
         return None if link is None or link.score is None else round(link.score, 2)
 
+    def _significant(self, value: float | None) -> bool:
+        return _moved(value, self._written[1], 0.25)
+
 
 class Signal(LinkSensor):
     key = "signal"
@@ -73,6 +76,9 @@ class Signal(LinkSensor):
     def value(self) -> int | None:
         link = self.link
         return link.rssi if link else None
+
+    def _significant(self, value: int | None) -> bool:
+        return _moved(value, self._written[1], 3)
 
 
 class Spread(LinkSensor):
@@ -87,6 +93,9 @@ class Spread(LinkSensor):
     def value(self) -> float | None:
         link = self.link
         return round(link.spread, 2) if link else None
+
+    def _significant(self, value: float | None) -> bool:
+        return _moved(value, self._written[1], 0.5)
 
 
 class FloorSensor(WispRoomEntity, SensorEntity):
@@ -186,6 +195,9 @@ class Position(FloorSensor):
     def _urgent(self, value: tuple[float | None, dict[str, Any]]) -> bool:
         return (value[0] is None) != (self._written[1][0] is None)  # someone appears or is gone
 
+    def _significant(self, value: tuple[float | None, dict[str, Any]]) -> bool:
+        return _moved(value[0], self._written[1][0], 0.25)  # metres
+
 
 class PositionX(Position):
     key = "x"
@@ -225,3 +237,8 @@ class NodesOnline(WispRoomEntity, SensorEntity):
 
     def _urgent(self, value: tuple[int, dict[str, Any]]) -> bool:
         return value[0] != self._written[1][0]
+
+
+def _moved(value: float | None, written: float | None, step: float) -> bool:
+    """A change worth writing within a second: from or to unknown, or by step or more."""
+    return value is None or written is None or abs(value - written) >= step

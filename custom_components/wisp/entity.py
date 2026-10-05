@@ -12,14 +12,15 @@ from homeassistant.helpers.entity import Entity
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 from homeassistant.helpers.event import async_call_later
 
-from .const import WRITE_INTERVAL
+from .const import QUIET_WRITE_INTERVAL, WRITE_INTERVAL
 from .engine import LinkKey, LinkState
 from .hub import WispHub
 
 
 class WispEntity(Entity):
     """Updates come 5 times a second (links) or every second (rooms); the state is written at most
-    once a second, the last value always lands, and availability and urgent changes are written at once.
+    once a second, availability and urgent changes at once, and a change too small to matter (see
+    _significant) at most once a minute, so the recorder stays light. The last value always lands.
     """
 
     _attr_has_entity_name = True
@@ -30,6 +31,7 @@ class WispEntity(Entity):
         self._written: tuple[bool, Any] | None = None
         self._last_write = 0.0
         self._cancel_flush: CALLBACK_TYPE | None = None
+        self._flush_at = 0.0
 
     def value(self) -> Any:
         """What the entity shows."""
@@ -38,6 +40,10 @@ class WispEntity(Entity):
     def _urgent(self, value: Any) -> bool:
         """Write at once, even within the interval."""
         return False
+
+    def _significant(self, value: Any) -> bool:
+        """Worth a write within a second; otherwise it waits up to QUIET_WRITE_INTERVAL."""
+        return True
 
     def _view(self) -> tuple[bool, Any]:
         return self.available, self.value()
@@ -55,12 +61,15 @@ class WispEntity(Entity):
         if self._written is None or view[0] != self._written[0] or self._urgent(view[1]):
             self._async_write()
             return
-        wait = WRITE_INTERVAL - (self.hub.clock() - self._last_write)
-        if wait <= 0:
+        now = self.hub.clock()
+        due = self._last_write + (WRITE_INTERVAL if self._significant(view[1]) else QUIET_WRITE_INTERVAL)
+        if due <= now:
             self._async_write()
-        elif self._cancel_flush is None:
+        elif self._cancel_flush is None or due < self._flush_at:  # none pending, or this one is sooner
+            self._async_cancel_flush()
+            self._flush_at = due
             self._cancel_flush = async_call_later(
-                self.hass, wait, HassJob(self._async_flush, "wisp state flush", cancel_on_shutdown=True)
+                self.hass, due - now, HassJob(self._async_flush, "wisp state flush", cancel_on_shutdown=True)
             )
 
     @callback

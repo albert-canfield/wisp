@@ -209,8 +209,9 @@ class WispPanel extends HTMLElement {
 
   /* The floor the map shows: the one picked in this browser, else the first. */
   _shownFloor(d = this._data) {
-    if (!d?.loaded || !d.floors.length) return null;
-    return d.floors.find((f) => (f.floor ?? "") === this._prefs.mapFloor) ?? d.floors[0];
+    const floors = d?.loaded ? d.floors.filter((f) => f.nodes.length) : [];
+    if (!floors.length) return null;
+    return floors.find((f) => (f.floor ?? "") === this._prefs.mapFloor) ?? floors[0];
   }
 
   _mapConfig() {
@@ -312,6 +313,7 @@ class WispPanel extends HTMLElement {
     else if (act === "device") navigate(`/config/devices/device/${device}`);
     else if (act === "settings") navigate("/config/integrations/integration/wisp");
     else if (act === "ask-plan") this._openPlanForm(floor);
+    else if (act === "upload-plan") this.shadowRoot.querySelector(".plan-form [data-plan=file]")?.click();
     else if (act === "ask-remove-plan") this._ask("remove-plan", floor);
     else if (act === "save-plan") this._savePlan(floor);
     else if (act === "remove-plan") this._run({ type: "wisp/floor/clear", floor: floor || null }, () => this._mergeFloor(floor, null));
@@ -348,7 +350,27 @@ class WispPanel extends HTMLElement {
     } else if (el.dataset.act === "pick") {
       if (el.value) this._ask("room", el.dataset.floor, el.value);
       else this._close();
+    } else if (el.dataset.act === "node-area") {
+      this._setNodeArea(el.dataset.mac, el.value || null);
+    } else if (el.dataset.plan === "file") {
+      this._input(e); // browsers that send no input event for a chosen file
     }
+  }
+
+  /* A node's area, set on its devices as anywhere in Home Assistant; its floor follows. The choice
+     shows at once and stays until the next update brings it. */
+  async _setNodeArea(mac, area) {
+    this._areaChoice = { mac, area, busy: true };
+    this._areaFailure = null;
+    this._render();
+    try {
+      await this._hass.callWS({ type: "wisp/node/set_area", mac, area });
+      if (this._areaChoice?.mac === mac) this._areaChoice.busy = false;
+    } catch (err) {
+      this._areaChoice = null;
+      this._areaFailure = { mac, message: err?.message || "Wisp could not set the area." };
+    }
+    this._render();
   }
 
   _ask(kind, floor, area) {
@@ -410,16 +432,32 @@ class WispPanel extends HTMLElement {
       width: plan ? String(plan.width) : "",
       height: plan ? String(plan.height) : "",
       keep: !plan, // a new plan takes the image's proportions; a saved one keeps its size
+      blank: plan?.url === "", // no image: a grid of metres
       status: "",
     };
     this._render();
-    if (plan) this._loadPlanImage();
+    if (plan?.url) this._loadPlanImage();
     this.shadowRoot.querySelector(".plan-form [data-plan=url]")?.focus();
   }
 
   _input(e) {
     const el = e.target, form = this._planForm, field = el.dataset?.plan;
     if (!field || !form) return;
+    if (field === "file") {
+      const file = el.files?.[0];
+      el.value = "";
+      if (file) this._uploadPlan(file);
+      return;
+    }
+    if (field === "blank") {
+      form.blank = el.checked;
+      if (form.blank) {
+        form.keep = false;
+        Object.assign(form, { aspect: null, size: null, loaded: null, status: "" });
+      } else if (form.url.trim()) this._loadPlanImage();
+      this._fillPlanForm();
+      return;
+    }
     if (field === "keep") {
       form.keep = el.checked;
       if (!form.keep && !form.height && form.aspect && Number(form.width) > 0) form.height = String(metres(form.width * form.aspect));
@@ -428,6 +466,28 @@ class WispPanel extends HTMLElement {
     }
     if (field === "url") this._loadPlanImage();
     else this._fillPlanForm();
+  }
+
+  /* An image from this device, kept by Wisp in Home Assistant: its address goes in the form. */
+  async _uploadPlan(file) {
+    const form = this._planForm;
+    Object.assign(form, { blank: false, status: "uploading", uploadError: "" });
+    this._fillPlanForm();
+    try {
+      const body = new FormData();
+      body.append("file", file, file.name);
+      const res = await this._hass.fetchWithAuth("/api/wisp/plan_image", { method: "POST", body });
+      const json = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(json.message || `The upload failed (${res.status}).`);
+      if (this._planForm !== form) return;
+      form.url = json.url;
+      form.keep = true;
+      this._loadPlanImage();
+    } catch (err) {
+      if (this._planForm !== form) return;
+      Object.assign(form, { status: "upload-error", uploadError: err?.message || "The upload failed." });
+      this._fillPlanForm();
+    }
   }
 
   /* The image's size in pixels, for its proportions, a little after the address stops changing. */
@@ -467,38 +527,45 @@ class WispPanel extends HTMLElement {
     };
     put(input("url"), form.url);
     put(input("width"), form.width);
+    input("url").disabled = form.blank || form.status === "uploading";
+    input("blank").checked = form.blank;
     input("keep").checked = form.keep;
+    input("keep").disabled = form.blank;
+    box.querySelector("[data-act=upload-plan]").disabled = form.status === "uploading";
     const height = input("height");
     height.disabled = form.keep;
     if (form.keep) height.value = form.aspect && Number(form.width) > 0 ? String(metres(form.width * form.aspect)) : "";
     else put(height, form.height);
     const status = box.querySelector(".plan-status");
-    status.textContent = {
+    status.textContent = form.blank ? "Wisp draws a grid of metres to place the nodes on." : {
+      uploading: "Uploading the image…",
+      "upload-error": form.uploadError,
       loading: "Loading the image…",
       ok: form.size ? `The image is ${form.size[0]} by ${form.size[1]} pixels.` : "",
       nosize: "The image has no size of its own: untick Keep the image's proportions and give the height.",
       error: "The image could not be loaded: check its address.",
     }[form.status] ?? "";
-    status.classList.toggle("bad", form.status === "error");
+    status.classList.toggle("bad", !form.blank && (form.status === "error" || form.status === "upload-error"));
     const preview = box.querySelector(".preview");
     if (form.loaded && preview.getAttribute("src") !== form.loaded) preview.setAttribute("src", form.loaded);
-    preview.hidden = !form.loaded;
+    preview.hidden = !form.loaded || form.blank;
   }
 
   _savePlan(key) {
     const form = this._planForm;
     if (!form || this._busy) return;
-    const url = form.url.trim();
+    const url = form.blank ? "" : form.url.trim();
     const width = Number(form.width);
-    const height = form.keep ? (form.aspect ? metres(width * form.aspect) : NaN) : Number(form.height);
+    const height = form.keep && !form.blank ? (form.aspect ? metres(width * form.aspect) : NaN) : Number(form.height);
     const waiting = {
       loading: "The image is still loading: try again in a moment.",
       error: "Check the image's address, or untick Keep the image's proportions and give the height.",
       nosize: "The image has no size of its own: untick Keep the image's proportions and give the height.",
     };
-    const problem = !url ? "Give the address of the image."
+    const problem = form.status === "uploading" && !form.blank ? "The image is still uploading: try again in a moment."
+      : !url && !form.blank ? "Upload an image, give its address, or tick No image."
       : !(width >= 1 && width <= 500) ? "Give the width in metres, from 1 to 500."
-        : form.keep && !form.aspect ? waiting[form.status] ?? "The image has not loaded yet."
+        : form.keep && !form.blank && !form.aspect ? waiting[form.status] ?? "The image has not loaded yet."
           : !(height >= 1 && height <= 500) ? "Give the height in metres, from 1 to 500."
             : null;
     if (problem) {
@@ -731,8 +798,9 @@ class WispPanel extends HTMLElement {
     const shown = this._shownFloor(d);
     const placing = !!this._placing;
     const tabs = root.querySelector(".tabs");
-    tabs.hidden = placing || d.floors.length < 2;
-    const html = d.floors.map((f) => `<button data-act="map-floor"${attr("target", f.floor ?? "")} aria-pressed="${f === shown}">${esc(floorLabel(f, d.floors))}</button>`).join("");
+    const mapped = d.floors.filter((f) => f.nodes.length); // the map draws floors with nodes
+    tabs.hidden = placing || mapped.length < 2;
+    const html = mapped.map((f) => `<button data-act="map-floor"${attr("target", f.floor ?? "")} aria-pressed="${f === shown}">${esc(floorLabel(f, d.floors))}</button>`).join("");
     if (tabs._html !== html) {
       tabs.innerHTML = html;
       tabs._html = html;
@@ -769,7 +837,8 @@ class WispPanel extends HTMLElement {
       info._html = text;
     }
     const img = root.querySelector(".plan-img");
-    if (img.getAttribute("src") !== f.plan.url) img.setAttribute("src", f.plan.url);
+    img.hidden = !f.plan.url; // no image: the drawing has a grid
+    if (f.plan.url && img.getAttribute("src") !== f.plan.url) img.setAttribute("src", f.plan.url);
     const pct = (v) => `${(100 * v).toFixed(3)}%`;
     Object.assign(img.style, {
       left: pct(frame.x / PW), top: pct(frame.y / frame.vh), width: pct(frame.w / PW), height: pct(frame.h / frame.vh),
@@ -794,7 +863,14 @@ class WispPanel extends HTMLElement {
       return `<g class="${cls}" data-id="${esc(i.id)}" transform="translate(${n1(x)} ${n1(y)})" tabindex="0" role="button" aria-label="${esc(label)}"><circle class="hit" r="22"/>${i.kind === "ap" ? AP_MARK : NODE_MARK}<text y="24">${esc(i.name)}</text></g>`;
     }).join("");
     const below = tray.length ? `<text class="tray" x="${PW / 2}" y="${n1(frame.y + frame.h + 13)}">Not on the plan yet: drag onto it</text>` : "";
-    const svg = `<svg viewBox="0 0 ${PW} ${frame.vh}" role="group" aria-label="The plan of ${esc(floorPhrase(f))}, ${n1(plan.width)} by ${n1(plan.height)} m"><rect class="edge" x="${n1(frame.x)}" y="${n1(frame.y)}" width="${n1(frame.w)}" height="${n1(frame.h)}"/>${below}${marks}</svg>`;
+    let grid = "";
+    if (!plan.url) {
+      const step = [0.5, 1, 2, 5, 10].find((v) => v * s >= 14) ?? 10;
+      for (let x = step; x * s < frame.w - 0.5; x += step) grid += `M${n1(frame.x + x * s)} ${n1(frame.y)}v${n1(frame.h)}`;
+      for (let y = step; y * s < frame.h - 0.5; y += step) grid += `M${n1(frame.x)} ${n1(frame.y + y * s)}h${n1(frame.w)}`;
+      grid = `<path class="grid" d="${grid}"/>`;
+    }
+    const svg = `<svg viewBox="0 0 ${PW} ${frame.vh}" role="group" aria-label="The plan of ${esc(floorPhrase(f))}, ${n1(plan.width)} by ${n1(plan.height)} m">${grid}<rect class="edge" x="${n1(frame.x)}" y="${n1(frame.y)}" width="${n1(frame.w)}" height="${n1(frame.h)}"/>${below}${marks}</svg>`;
     return { svg, frame };
   }
 
@@ -829,12 +905,13 @@ class WispPanel extends HTMLElement {
     const plan = f.plan;
     const form = this._isOpen("plan", key), removing = this._isOpen("remove-plan", key);
     const placed = plan ? f.nodes.filter((mac) => f.positions?.[mac]?.placed).length : 0;
+    const kind = plan && !plan.url ? "a grid, " : "";
     const meta = plan
-      ? `${metres(plan.width)} by ${metres(plan.height)} m, ${placed} of ${plural(f.nodes.length, "node", "nodes")} placed`
-      : "none yet: the map shows the hive's own layout";
+      ? `${kind}${metres(plan.width)} by ${metres(plan.height)} m, ${f.nodes.length ? `${placed} of ${plural(f.nodes.length, "node", "nodes")} placed` : "no nodes on this floor yet"}`
+      : f.nodes.length ? "none yet: the map shows the hive's own layout" : "none yet";
     const placing = this._placing?.floor === key;
     const acts = plan
-      ? `<button data-act="place"${attr("floor", key)}${placing || form || removing ? " disabled" : ""}>Place nodes</button>
+      ? `<button data-act="place"${attr("floor", key)}${placing || form || removing || !f.nodes.length ? " disabled" : ""}>Place nodes</button>
          <button data-act="ask-plan"${attr("floor", key)}${form ? " disabled" : ""}>Change</button>
          <button class="quiet" data-act="ask-remove-plan"${attr("floor", key)}${removing ? " disabled" : ""}>Remove</button>`
       : `<button data-act="ask-plan"${attr("floor", key)}${form ? " disabled" : ""}>Add floor plan</button>`;
@@ -850,8 +927,11 @@ class WispPanel extends HTMLElement {
   _askPlan(f) {
     const key = f.floor ?? "";
     return `<div class="ask plan-form" role="group" aria-label="Floor plan">
-      <p>An image of ${esc(floorPhrase(f))} seen from above, and its size in metres. Put the image in Home Assistant's www folder and give its address as /local/ and the file name, or give any web address.</p>
-      <label class="field"><span>Image address</span><input data-plan="url" type="text" inputmode="url" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="/local/wisp/plan.png"></label>
+      <p>An image of ${esc(floorPhrase(f))} seen from above, and its size in metres: upload one, give its address, or use no image and place the nodes on a grid of metres.</p>
+      <div class="upload-line"><button data-act="upload-plan">Upload an image</button><small>PNG, JPEG, GIF or WebP, up to 20 MB</small>
+        <input data-plan="file" type="file" accept="image/png,image/jpeg,image/gif,image/webp" hidden></div>
+      <label class="field"><span>or its address</span><input data-plan="url" type="text" inputmode="url" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="/local/wisp/plan.png"></label>
+      <label class="check"><input data-plan="blank" type="checkbox">No image: a grid of metres</label>
       <div class="fields">
         <label class="field"><span>Width, m</span><input data-plan="width" type="number" inputmode="decimal" min="1" max="500" step="0.01"></label>
         <label class="field"><span>Height, m</span><input data-plan="height" type="number" inputmode="decimal" min="1" max="500" step="0.01"></label>
@@ -884,19 +964,22 @@ class WispPanel extends HTMLElement {
   _floorRows(f, d) {
     const key = f.floor ?? "";
     let now;
-    if (!f.live_links) now = "no live links";
+    if (!f.nodes.length) now = "no nodes yet";
+    else if (!f.live_links) now = "no live links";
     else if (f.room === "none") now = "nobody moving";
     else if (f.room == null) now = f.areas.some((a) => a.samples >= d.min_samples) ? "cannot tell" : "not calibrated yet";
     else now = `${f.room}, ${Math.round((f.confidence ?? 0) * 100)}% sure`;
     const rows = [["head", `<div class="head"><h2>${esc(floorLabel(f, d.floors))}</h2><span class="note">${esc(now)}</span></div>`]];
-    if (!f.areas.length && !f.other_areas.length) {
-      rows.push(["hint", `<p class="hint">No rooms on this floor yet. Give each node the area it stands in, under Wisp, the node, Change node.</p>`]);
+    if (!f.nodes.length) {
+      rows.push(["hint", `<p class="hint">No node on ${esc(floorPhrase(f))} yet: give a node an area on this floor under Nodes. Its floor plan can be added already.</p>`]);
+    } else if (!f.areas.length && !f.other_areas.length) {
+      rows.push(["hint", `<p class="hint">No rooms on this floor yet. Give each node the area it stands in, under Nodes.</p>`]);
     } else if (!f.areas.some((a) => a.samples >= d.min_samples)) {
       rows.push(["hint", `<p class="hint">Teach Wisp each room: stand in it, tap Calibrate and walk around until the countdown ends. A room counts from ${d.min_samples} samples.</p>`]);
     }
     for (const a of f.areas) rows.push([`area:${a.area}`, this._area(f, a, d)]);
-    if (f.other_areas.length) rows.push(["other", this._other(f, d)]);
-    rows.push(["empty", this._empty(f)]);
+    if (f.other_areas.length && f.nodes.length) rows.push(["other", this._other(f, d)]);
+    if (f.nodes.length) rows.push(["empty", this._empty(f)]);
     rows.push(["plan", this._planRow(f)]);
     return rows.map(([k, html]) => [`${key}:${k}`, html]);
   }
@@ -914,7 +997,7 @@ class WispPanel extends HTMLElement {
         <div class="what"><b>${esc(a.name)}</b><small>${esc(meta.join(", "))}</small></div>
         ${chip}
         <div class="acts">
-          <button data-act="ask-room"${attr("floor", key)}${attr("area", a.area)}${asking || recording ? " disabled" : ""}>Calibrate</button>
+          <button data-act="ask-room"${attr("floor", key)}${attr("area", a.area)}${asking || recording || !f.nodes.length ? " disabled" : ""}>Calibrate</button>
           ${a.samples ? `<button class="quiet" data-act="ask-clear"${attr("floor", key)}${attr("area", a.area)}${asking ? " disabled" : ""}>Clear</button>` : ""}
         </div>
       </div>
@@ -1023,7 +1106,7 @@ class WispPanel extends HTMLElement {
 
   _node(n, d) {
     const floor = n.added ? d.floors.find((f) => f.floor === n.floor) : null;
-    const where = [n.added ? n.area_name ?? "no area" : null, floor ? floorLabel(floor, d.floors) : null, n.host].filter(Boolean).join(", ");
+    const where = [floor ? floorLabel(floor, d.floors) : null, n.host].filter(Boolean).join(", ");
     const onPlan = floor?.plan ? !!floor.positions?.[n.mac]?.placed : null;
     const chips = [
       `<span class="chip${n.online ? " up" : ""}">${n.online ? "online" : "offline"}</span>`,
@@ -1037,7 +1120,26 @@ class WispPanel extends HTMLElement {
         <div class="what"><b>${esc(n.name)}</b>${where ? `<small>${esc(where)}</small>` : ""}<span class="chips">${chips}</span></div>
         ${n.device_id ? `<div class="acts"><button data-act="device"${attr("device", n.device_id)} aria-label="Open the ESPHome device of ${esc(n.name)}">ESPHome</button></div>` : ""}
       </div>
+      ${n.added ? this._nodeArea(n, d) : ""}
     </div>`;
+  }
+
+  /* The area the node stands in: Home Assistant's areas by floor. Setting it moves the node to
+     that floor, its rooms and its plan. */
+  _nodeArea(n, d) {
+    const choice = this._areaChoice?.mac === n.mac ? this._areaChoice : null;
+    if (choice && !choice.busy && (n.area ?? null) === choice.area) this._areaChoice = null; // arrived
+    const current = choice ? choice.area : n.area ?? null;
+    const groups = new Map();
+    for (const a of d.areas ?? []) {
+      const key = a.floor_name ?? "Areas without a floor";
+      if (!groups.has(key)) groups.set(key, []);
+      groups.get(key).push(a);
+    }
+    const options = [...groups].map(([floor, list]) => `<optgroup label="${esc(floor)}">${list.map((a) => `<option value="${esc(a.area)}"${a.area === current ? " selected" : ""}>${esc(a.name)}</option>`).join("")}</optgroup>`).join("");
+    const id = `wisp-area-${n.mac.replace(/:/g, "")}`;
+    const failed = this._areaFailure?.mac === n.mac ? `<p class="fail" role="alert">${esc(this._areaFailure.message)}</p>` : "";
+    return `<div class="node-area"><label for="${id}">Area</label><select id="${id}" data-act="node-area"${attr("mac", n.mac)}${choice?.busy ? " disabled" : ""}><option value=""${current ? "" : " selected"}>No area</option>${options}</select></div>${failed}`;
   }
 
   _hive(d) {
@@ -1106,6 +1208,12 @@ const STYLE = `
   .plan-draw { position: relative; }
   .plan-draw svg { display: block; width: 100%; height: auto; user-select: none; -webkit-user-select: none; -webkit-touch-callout: none; }
   .plan-draw .edge { fill: none; stroke: var(--wisp-ink); stroke-width: 1; opacity: .35; }
+  .plan-draw .grid { fill: none; stroke: var(--wisp-ink); stroke-width: .6; opacity: .16; }
+  .upload-line { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin: 8px 0; }
+  .upload-line small { opacity: .7; }
+  .node-area { display: flex; align-items: center; gap: 8px; margin: 6px 0 2px 22px; }
+  .node-area label { font-size: .85em; opacity: .8; }
+  .node-area select { flex: 1; min-width: 0; max-width: 280px; }
   .plan-draw text { font-family: var(--wisp-serif); fill: var(--wisp-ink); text-anchor: middle;
                     paint-order: stroke; stroke: var(--wisp-paper-1); stroke-width: 3.5px; stroke-linejoin: round; }
   .plan-draw .tray { font-size: 11px; font-style: italic; opacity: .8; }

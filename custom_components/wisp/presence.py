@@ -296,7 +296,8 @@ class RoomPresence:
     def plan_view(self, floor: str) -> dict[str, Any]:
         """The floor's plan for the panel: its size, the positions, the access points its nodes hear
         or that were placed, and the fit."""
-        plan, nodes = self.plans.floors[floor], self.floors[floor].nodes
+        plan = self.plans.floors[floor]
+        nodes = self.floors[floor].nodes if floor in self.floors else set()
         positions = self.positions(floor)
         heard = access_points(self.hub.table, self.hub.hive.current(self.hub.clock()), nodes)
         return {
@@ -477,9 +478,14 @@ class RoomPresence:
             if key in self.floors
         ]
 
+    def known_floor(self, floor: str) -> bool:
+        """A floor a plan can belong to: one with nodes, or any Home Assistant floor."""
+        return floor in self.floors or (bool(floor) and fr.async_get(self.hass).async_get_floor(floor) is not None)
+
     def panel(self) -> dict[str, Any]:
         """Per floor: its room, its run and every area with a node or samples, then the other areas
-        on it to calibrate. Calibrated areas on no floor with nodes come last, to clear."""
+        on it to calibrate; every Home Assistant floor is there, with nodes or not, so a plan can
+        wait for its nodes. Calibrated areas on no floor with nodes come last, to clear."""
         engine = self.engine
         now = self.hub.clock()
         nodes_in: dict[str, int] = {}
@@ -487,8 +493,15 @@ class RoomPresence:
             if node.area:
                 nodes_in[node.area] = nodes_in.get(node.area, 0) + 1
         all_areas = ar.async_get(self.hass).async_list_areas()
+        floor_reg = fr.async_get(self.hass)
+        registry_floors = sorted(floor_reg.async_list_floors(), key=lambda f: (f.level is None, f.level or 0, f.name))
+        shown_floors = dict(self.floors)
+        for entry in registry_floors:
+            shown_floors.setdefault(entry.floor_id, Floor(entry.floor_id, entry.name, entry.level))
+        order = {f.floor_id: i for i, f in enumerate(registry_floors)}
+        floor_names = {f.floor_id: f.name for f in registry_floors}
         floors = []
-        for key, floor in self.floors.items():
+        for key, floor in sorted(shown_floors.items(), key=lambda kv: (kv[0] == NO_FLOOR, order.get(kv[0], 0))):
             decision = engine.decisions.get(key)
             run = engine.runs.get(key)
             shown = {area for area in nodes_in if self.area_floor(area) == key} | set(self.floor_areas(key))
@@ -533,11 +546,15 @@ class RoomPresence:
         elsewhere = [
             {"area": area, "name": self.area_name(area), "samples": len(samples)}
             for area, samples in engine.areas.items()
-            if self.area_floor(area) not in self.floors
+            if self.area_floor(area) not in shown_floors
         ]
         return {
             "floors": floors,
             "elsewhere": sorted(elsewhere, key=lambda a: a["name"].casefold()),
+            "areas": [  # every area, for the node area pickers: by floor, then name
+                {"area": a.id, "name": a.name, "floor": a.floor_id, "floor_name": floor_names.get(a.floor_id)}
+                for a in sorted(all_areas, key=lambda a: (order.get(a.floor_id, len(order)), a.name.casefold()))
+            ],
             "min_samples": engine.min_samples,
         }
 

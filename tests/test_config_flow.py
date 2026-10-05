@@ -16,6 +16,7 @@ from homeassistant.helpers.device_registry import CONNECTION_NETWORK_MAC
 from homeassistant.helpers.service_info.zeroconf import ZeroconfServiceInfo
 from homeassistant.loader import async_get_zeroconf
 
+from custom_components.wisp.hub import node_devices
 from custom_components.wisp.const import DOMAIN, PROJECT_NAME
 from custom_components.wisp.hub import ProbeError
 
@@ -251,10 +252,10 @@ async def test_node_area(hass: HomeAssistant, udp: FakeUdp) -> None:
         ar.async_get(hass).async_create(name)
     entry = await setup_hub(hass, HALL)
     await add_node(hass, entry, {"host": IP_B, "area": "office"})
-    assert nodes(entry)[NODE_B] == {
-        "mac": NODE_B, "host": IP_B, "name": "Wisp 535002", "area": "office", "title": "Wisp 535002"
-    }
+    # The area moves onto the node's devices, where Home Assistant keeps areas
+    assert nodes(entry)[NODE_B] == {"mac": NODE_B, "host": IP_B, "name": "Wisp 535002", "title": "Wisp 535002"}
     assert entry.runtime_data.nodes[NODE_B].area == "office"
+    assert {d.area_id for d in node_devices(hass, NODE_B)} == {"office"}
     assert entry.runtime_data.presence.floors[""].nodes == {NODE_A, NODE_B}  # areas without a floor share one
 
     # Hall has no area yet: the form suggests the area of its ESPHome device
@@ -275,13 +276,15 @@ async def test_node_area(hass: HomeAssistant, udp: FakeUdp) -> None:
     )
     await hass.async_block_till_done()
     assert result["reason"] == "reconfigure_successful"
-    assert nodes(entry)[NODE_A]["area"] == "kitchen" and entry.runtime_data.nodes[NODE_A].area == "kitchen"
+    assert "area" not in nodes(entry)[NODE_A] and entry.runtime_data.nodes[NODE_A].area == "kitchen"
+    assert {d.area_id for d in node_devices(hass, NODE_A)} == {"kitchen"}
 
     # Cleared: the node goes back to the hub's own floor
     result, _ = await reconfigure(hass, entry, {"host": IP_A, "name": "Hall"})
     assert result["reason"] == "reconfigure_successful"
     assert nodes(entry)[NODE_A] == {"mac": NODE_A, "host": IP_A, "name": "Hall", "title": "Hall"}
     assert entry.runtime_data.nodes[NODE_A].area is None
+    assert {d.area_id for d in node_devices(hass, NODE_A)} == {None}
 
 
 async def test_options_set_the_presence_hold(hass: HomeAssistant, udp: FakeUdp) -> None:

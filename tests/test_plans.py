@@ -3,14 +3,18 @@ panel feeds, and someone moving placed in plan metres."""
 from __future__ import annotations
 
 import logging
+import re
 
+import aiohttp
 import pytest
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
 from homeassistant.core import HomeAssistant
-from homeassistant.helpers import area_registry as ar, floor_registry as fr
+from homeassistant.helpers import area_registry as ar, device_registry as dr, floor_registry as fr
+from homeassistant.setup import async_setup_component
 
 from custom_components.wisp.const import DOMAIN
+from custom_components.wisp.hub import node_devices
 
 from .conftest import AP, IP_A, IP_B, NODE_A, NODE_B, FakeClock, FakeUdp
 from .fake_node import encode_hive_report, encode_report
@@ -148,11 +152,11 @@ async def test_commands_check_their_input(hass: HomeAssistant, udp: FakeUdp, has
     client = await hass_ws_client(hass)
     plan = {"type": "wisp/floor/set_plan", "floor": "ground_floor", "url": URL, "width": 10, "height": 6}
 
-    for bad in ("javascript:alert(1)", "ftp://nas/plan.png", "local/plan.png", "", "/local/my plan.png", "https://"):
+    for bad in ("javascript:alert(1)", "ftp://nas/plan.png", "local/plan.png", "/local/my plan.png", "https://"):
         assert (await error(client, **(plan | {"url": bad})))[0] == "invalid_format", bad
     for bad in ({"width": 0}, {"height": 501}, {"width": "wide"}, {"height": None}):
         assert (await error(client, **(plan | bad)))[0] == "invalid_format", bad
-    assert await error(client, **(plan | {"floor": "cellar"})) == ("not_found", "No Wisp node is on the floor cellar.")
+    assert await error(client, **(plan | {"floor": "cellar"})) == ("not_found", "Home Assistant has no floor cellar.")
     assert await error(client, **(plan | {"floor": None})) == ("not_found", "No Wisp node is without a floor.")
     place = {"type": "wisp/floor/place", "floor": "ground_floor"}
     assert await error(client, **place, nodes={NODE_A: [1, 1]}) == ("not_found", "This floor has no plan yet.")
@@ -248,3 +252,94 @@ async def test_unreadable_plans_start_clean(
         await hass.async_block_till_done()
     assert "Discarding the stored floor plans" in caplog.text
     assert entry.runtime_data.presence.plans.floors == {}
+
+
+async def test_every_floor_can_have_a_plan_and_nodes_take_their_area_from_devices(
+    hass: HomeAssistant, udp: FakeUdp, hass_ws_client
+) -> None:
+    """Three floors in Home Assistant, nodes on one: every floor is in the panel and can get a
+    plan (a blank grid here) before its nodes; a node's area, set from the panel, is its device's."""
+    floors, areas = fr.async_get(hass), ar.async_get(hass)
+    ground = floors.async_create("Ground floor", level=0)
+    floors.async_create("Upstairs", level=1)
+    attic = floors.async_create("Attic", level=2)
+    areas.async_create("Kitchen", floor_id=ground.floor_id)
+    areas.async_create("Loft", floor_id=attic.floor_id)
+    entry = await setup_with_areas(hass, (*HALL, "kitchen"), OFFICE)
+    hub = entry.runtime_data
+    client = await hass_ws_client(hass)
+    sub = await subscribe_panel(client)
+    panel = (await client.receive_json())["event"]
+    assert [(f["floor"], f["name"], f["nodes"]) for f in panel["floors"]] == [
+        ("ground_floor", "Ground floor", [NODE_A]), ("upstairs", "Upstairs", []), ("attic", "Attic", []),
+        (None, "Wisp", [NODE_B]),  # Office has no area yet
+    ]
+    assert [(a["name"], a["floor_name"]) for a in panel["areas"]] == [("Kitchen", "Ground floor"), ("Loft", "Attic")]
+
+    view = await ok(client, type="wisp/floor/set_plan", floor="attic", url="", width=8, height=5)  # a blank grid
+    assert view["plan"] == {"url": "", "width": 8.0, "height": 5.0} and view["positions"] == {}
+
+    await ok(client, type="wisp/node/set_area", mac=NODE_B, area="loft")
+    await hass.async_block_till_done()
+    assert hub.nodes[NODE_B].area == "loft" and hub.presence.floors["attic"].nodes == {NODE_B}
+    assert {d.area_id for d in node_devices(hass, NODE_B)} == {"loft"}
+    attic_view = next(f for f in hub.panel_snapshot()["floors"] if f["floor"] == "attic")
+    assert attic_view["nodes"] == [NODE_B] and attic_view["plan"]["url"] == ""
+
+    # Moving the device to another area in Home Assistant moves the node with it
+    device = node_devices(hass, NODE_B)[0]
+    dr.async_get(hass).async_update_device(device.id, area_id="kitchen")
+    await hass.async_block_till_done()
+    assert hub.nodes[NODE_B].area == "kitchen" and hub.presence.floors["ground_floor"].nodes == {NODE_A, NODE_B}
+
+    assert await error(client, type="wisp/node/set_area", mac=NODE_B, area="garage") == ("not_found", "No area garage.")
+    assert await error(client, type="wisp/node/set_area", mac="02:00:00:00:00:09", area=None) == (
+        "not_found", "No Wisp node 02:00:00:00:00:09."
+    )
+    await ok(client, type="wisp/node/set_area", mac=NODE_B, area=None)
+    await hass.async_block_till_done()
+    assert hub.nodes[NODE_B].area is None and "" in hub.presence.floors
+    assert sub
+
+
+PNG = b"\x89PNG\r\n\x1a\n" + b"\x00" * 64
+
+
+async def test_plan_images_are_uploaded_served_and_cleaned_up(
+    hass: HomeAssistant, udp: FakeUdp, hass_client, hass_client_no_auth, hass_ws_client, hass_read_only_access_token
+) -> None:
+    # Routes first, clients after: a test server freezes its routes when it starts (Home Assistant
+    # itself keeps them open, so Wisp can be added at any time)
+    assert await async_setup_component(hass, "http", {})
+    await setup_hub(hass, HALL)
+    ws_client = await hass_ws_client(hass)
+    client = await hass_client()
+
+    async def upload(data: bytes, http=client):
+        form = aiohttp.FormData()
+        form.add_field("file", data, filename="plan.png", content_type="image/png")
+        return await http.post("/api/wisp/plan_image", data=form)
+
+    reply = await upload(PNG)
+    assert reply.status == 200
+    url = (await reply.json())["url"]
+    assert re.fullmatch(r"/api/wisp/plan_image/[0-9a-f]{32}\.png", url)
+    served = await client.get(url)
+    assert served.status == 200 and await served.read() == PNG and served.headers["Content-Type"] == "image/png"
+    anonymous = await hass_client_no_auth()
+    assert (await anonymous.get(url)).status == 200  # <img> sends no token: the 128-bit name is the secret
+    assert (await upload(PNG, anonymous)).status == 401  # uploading needs a login
+
+    assert (await upload(b"<svg onload=alert(1)>")).status == 415  # images only, judged by their bytes
+    assert (await client.get("/api/wisp/plan_image/../../secrets.yaml")).status == 404
+    reader = await hass_client(hass_read_only_access_token)
+    assert (await upload(PNG, reader)).status == 403
+
+    await ok(ws_client, type="wisp/floor/set_plan", url=url, width=10, height=6)
+    reply = await upload(PNG)
+    second = (await reply.json())["url"]
+    await ok(ws_client, type="wisp/floor/set_plan", url=second, width=10, height=6)  # the first goes
+    assert (await client.get(url)).status == 404 and (await client.get(second)).status == 200
+    await ok(ws_client, type="wisp/floor/clear")
+    assert (await client.get(second)).status == 404
+
