@@ -29,9 +29,9 @@ CALIBRATION = "sensor.wisp_calibration"
 KITCHEN = "binary_sensor.wisp_kitchen_presence"
 OFFICE_PRESENCE = "binary_sensor.wisp_office_presence"
 # Scores x100 while someone moves in a room: (Hall hears AP, Office), (Office hears AP, Hall)
-SCORES = {
-    "kitchen": ((320, 230), (105, 110)),
-    "office": ((105, 120), (310, 260)),
+SCORES = {  # someone walking reaches the link between the nodes both ways, as on real walks
+    "kitchen": ((320, 230), (105, 215)),
+    "office": ((105, 220), (310, 260)),
     None: ((104, 102), (103, 106)),
     "restless": ((192, 185), (104, 102)),  # the Kitchen's links busy, all under the motion threshold
     "upstairs": ((104, 215), (103, 225)),  # someone on the floor above: two links flag motion, no room's pattern
@@ -222,6 +222,69 @@ async def test_sitting_presence_from_the_walk_and_activity(hass: HomeAssistant, 
         await house.seconds(50, None)
         house.udp.receive(encode_report(house.seq + 1, NODE_A, [(NODE_B, 1, -60, 230, 150, 10, 1)], uptime=60), IP_A)
     assert state(hass, OFFICE_PRESENCE) == "off"
+
+
+async def test_activity_on_a_floor_of_two_nodes(hass: HomeAssistant, house: House) -> None:
+    """Two nodes have no third to confirm a pair: there a link moving both ways is activity, with
+    node firmware that confirms (0.1.6 and later) or not."""
+    hub = house.entry.runtime_data
+    presence = hub.presence
+    (floor,) = presence.floors
+    seq = 0
+
+    def send(a_flags: int, b_flags: int) -> None:
+        nonlocal seq
+        seq += 1
+        house.udp.receive(encode_report(seq, NODE_A, [(NODE_B, 1, -60, 300, 150, 10, a_flags)], uptime=60, pairs=[]), IP_A)
+        house.udp.receive(encode_report(seq, NODE_B, [(NODE_A, 1, -61, 300, 150, 10, b_flags)], uptime=60, pairs=[]), IP_B)
+
+    def active(step: float = 1.0) -> bool:
+        house.clock.now += step
+        now = hub.clock()
+        return presence._active(floor, presence.moving(floor, now), now)
+
+    send(1, 0)
+    assert not active()  # one way: a node's own noise
+    send(1, 1)
+    assert active()
+    send(0, 0)
+    assert not active(2.5)
+
+
+async def test_activity_confirmed_by_a_third_node(hass: HomeAssistant, udp: FakeUdp) -> None:
+    """Three nodes: a pair moving both ways is activity only when the third node sees motion on a
+    link to either of them, from the nodes' own confirmation (firmware 0.1.6 and later, every node
+    of the floor on it) or from the check here (older firmware)."""
+    node_c, ip_c = "02:57:49:53:50:03", "192.168.1.52"
+    entry = await setup_hub(hass, HALL, OFFICE, (node_c, ip_c, "Kitchen"))
+    hub = entry.runtime_data
+    clock = hub.clock = FakeClock()
+    presence = hub.presence
+    (floor,) = presence.floors
+    seq = 0
+
+    def send(node: str, ip: str, links: list[tuple[str, int]], confirms: bool) -> None:
+        nonlocal seq
+        seq += 1
+        rows = [(tx, 1, -60, 300 if flags else 100, 150, 10, flags) for tx, flags in links]
+        udp.receive(encode_report(seq, node, rows, uptime=60, pairs=[] if confirms else None), ip)
+
+    def second(a: list, b: list, c: list, confirms: bool) -> bool:
+        clock.now += 3.0  # the earlier seconds' flags and confirmations are out of their windows
+        send(NODE_A, IP_A, a, confirms)
+        send(NODE_B, IP_B, b, confirms)
+        send(node_c, ip_c, c, confirms)
+        now = hub.clock()
+        return presence._active(floor, presence.moving(floor, now), now)
+
+    for confirms in (False, True):  # the check here, then the nodes' own
+        # Hall and Office move both ways, Kitchen sees nothing: noise, or someone too far to tell
+        assert not second([(NODE_B, 1), (node_c, 0)], [(NODE_A, 1), (node_c, 0)], [(NODE_A, 0), (NODE_B, 0)], confirms)
+    # The check here: Kitchen sees motion on its link from Hall too, so the pair is confirmed
+    assert second([(NODE_B, 1), (node_c, 0)], [(NODE_A, 1), (node_c, 0)], [(NODE_A, 1), (NODE_B, 0)], False)
+    # The nodes' own: their confirmed bit (0x02) is the activity, whatever the flags look like here
+    assert second([(NODE_B, 3), (node_c, 0)], [(NODE_A, 1), (node_c, 0)], [(NODE_A, 0), (NODE_B, 0)], True)
+    assert not second([(NODE_B, 1), (node_c, 0)], [(NODE_A, 1), (node_c, 0)], [(NODE_A, 1), (NODE_B, 0)], True)
 
 
 async def test_still_calibration_and_separation(hass: HomeAssistant, house: House, hass_storage: dict) -> None:

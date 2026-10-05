@@ -12,6 +12,7 @@
 #include "freertos/queue.h"
 #include "freertos/task.h"
 
+#include "core_confirm.h"
 #include "core_grid.h"
 #include "core_hive.h"
 #include "core_layout.h"
@@ -39,6 +40,7 @@ class WispComponent : public Component {
   void set_csi_dropped_sensor(sensor::Sensor *s) { this->csi_dropped_sensor_ = s; }
   void set_ap_motion_score_sensor(sensor::Sensor *s) { this->ap_motion_score_sensor_ = s; }
   void set_ap_motion_binary_sensor(binary_sensor::BinarySensor *s) { this->ap_motion_binary_sensor_ = s; }
+  void set_motion_binary_sensor(binary_sensor::BinarySensor *s) { this->motion_binary_sensor_ = s; }
   void set_grid_nodes_sensor(sensor::Sensor *s) { this->grid_nodes_sensor_ = s; }
   void set_channel_sensor(sensor::Sensor *s) { this->channel_sensor_ = s; }
   void set_ap_distance_sensor(sensor::Sensor *s) { this->ap_distance_sensor_ = s; }
@@ -85,6 +87,7 @@ class WispComponent : public Component {
   sensor::Sensor *csi_dropped_sensor_{nullptr};
   sensor::Sensor *ap_motion_score_sensor_{nullptr};
   binary_sensor::BinarySensor *ap_motion_binary_sensor_{nullptr};
+  binary_sensor::BinarySensor *motion_binary_sensor_{nullptr};
   sensor::Sensor *grid_nodes_sensor_{nullptr};
   sensor::Sensor *channel_sensor_{nullptr};
   sensor::Sensor *ap_distance_sensor_{nullptr};
@@ -111,6 +114,8 @@ class WispComponent : public Component {
   wisp_core::Grid grid_{wisp_core::Mac{}};
   wisp_core::LinkTable links_;
   wisp_core::Hive hive_{wisp_core::Mac{}};
+  wisp_core::MotionConfirm confirm_{wisp_core::Mac{}};
+  wisp_core::PairList pairs_{};  // confirmed pairs, for the link reports
   wisp_core::LayoutWorkspace layout_ws_;
   wisp_core::LayoutPoint layout_[wisp_core::MAX_POINTS]{};
   int layout_count_{0};
@@ -137,6 +142,8 @@ class WispComponent : public Component {
   std::atomic<float> motion_threshold_{2.0f};
   std::atomic<float> ap_score_{NAN};
   std::atomic<bool> ap_active_{false};
+  std::atomic<bool> motion_{false};         // one of this node's links is confirmed
+  std::atomic<bool> motion_latched_{false};  // ... at some second since the main loop last looked
   std::atomic<int> grid_nodes_{1};
   std::atomic<bool> hive_in_sync_{false};
   std::atomic<uint32_t> ap_frames_{0};

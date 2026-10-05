@@ -67,7 +67,7 @@ Everything one node measured in the last report interval (default 200 ms, so 5 a
 | 8 | 4 | sequence number |
 | 12 | 6 | node MAC (receiver of every link below) |
 | 18 | 1 | number of links |
-| 19 | 1 | flags (reserved, 0) |
+| 19 | 1 | flags: bit 0 hive confirmation (node firmware 0.1.6 and later): links carry bit 1 of their flags, and the confirmed pairs follow the links; bit 1 more pairs were confirmed than the report lists |
 | 20 | 4 | node uptime, seconds |
 | 24 | 14 × n | links |
 
@@ -81,9 +81,27 @@ Each link:
 | 8 | 2 | motion score × 100 (uint16); 65535 = unknown. 100 means as quiet as usual |
 | 10 | 2 | spread × 100 (uint16), percent: how much the signal shape moves right now |
 | 12 | 1 | frames received in the interval (uint8, capped at 255) |
-| 13 | 1 | flags: bit 0 motion detected on this link |
+| 13 | 1 | flags: bit 0 motion detected on this link, bit 1 the hive confirms that motion (see below; only bit 0 before firmware 0.1.6) |
 
 A link is identified by (transmitter, receiver). The same pair seen from the other end is a separate link: node A hearing B and node B hearing A are both reported.
+
+With header flag bit 0, the node pairs the hive confirms follow the links:
+
+| Offset | Size | Field |
+|---|---|---|
+| 0 | 1 | confirmed pairs p (at most 16) |
+| 1 | 12 × p | pairs: node MAC a, node MAC b, a below b in MAC order |
+
+Older readers stop after the links and never see them.
+
+### Hive-confirmed motion
+
+A body changes a link both ways and the links around it; one node's own noise shows only on what it sends or receives. Every node works out, each second, which pairs of nodes (A, B) are confirmed:
+
+1. Both ways: one direction (A hearing B, or B hearing A) reports motion now, the other did within 2 s.
+2. A node nearby agrees: of the K = min(6, live nodes - 2) other nodes nearest the pair, at least 1 (K up to 4) or 2 (K from 5) saw motion on a link to A or to B, either direction, within the same 2 s. Nearest by the hive's layout (distance to the segment A-B); a node without a layout position goes by its signal strength to the nearer of A and B. Ties go by MAC.
+
+What each node hears comes from the scores in the beacons it hears directly (below), at most 1.5 s old, judged as each receiver's own motion flag would be at this node's threshold (on at it, off halfway back to 1); for its own links a node uses its own flags. So every node that hears the same beacons holds the same pairs, with no extra traffic. A node's link from another node carries bit 1 while it reports motion and that pair is confirmed; its link from the access point (no reverse direction) while it reports motion and a pair with this node was confirmed within 2 s. Two nodes alone never confirm: there is no third. See "Shared grid knowledge: the hive" in ARCHITECTURE.md for the numbers behind the rule.
 
 ## Type 3: hive report
 
@@ -105,5 +123,5 @@ Rows include access points as neighbours; layout points are nodes only.
 
 ## ESP-NOW frames between nodes
 
-Not for computers, listed for completeness. Defined in `core_grid.h` (beacon, type 1) and `core_hive.h` (hive row, type 2), magic `WG`, grid protocol version 3. Every node broadcasts one beacon per 100 ms round in its slot, carrying its own hive row, then one relayed row from another node, with how long ago that row's origin was last heard directly.
+Not for computers, listed for completeness. Defined in `core_grid.h` (beacon, type 1) and `core_hive.h` (hive row, type 2), magic `WG`, grid protocol version 3. Every node broadcasts one beacon per 100 ms round in its slot, carrying its own hive row with its live motion score (× 10) for each neighbour, then one relayed row from another node (no scores), with how long ago that row's origin was last heard directly. The scores are what hive-confirmed motion is worked out from.
 

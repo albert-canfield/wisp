@@ -24,6 +24,9 @@ KIND_NODE = 1
 SCORE_UNKNOWN = 0xFFFF
 RSSI_NO_FRAMES = -128
 LINK_FLAG_MOTION = 0x01
+LINK_FLAG_CONFIRMED = 0x02  # the hive confirms its motion (node firmware 0.1.6+)
+REPORT_FLAG_CONFIRMS = 0x01  # links carry LINK_FLAG_CONFIRMED, the confirmed pairs follow them
+REPORT_FLAG_PAIRS_TRUNCATED = 0x02
 HIVE_FLAG_IN_SYNC = 0x01
 HIVE_FLAG_ROWS_TRUNCATED = 0x02
 
@@ -31,6 +34,7 @@ _HEADER = struct.Struct("<4sBBH")  # magic, version, packet type, header length
 _RAW = struct.Struct("<I6s6sIbbBBBBBBH")  # raw CSI fields at offset 8
 _REPORT = struct.Struct("<I6sBBI")  # link report fields at offset 8
 _LINK = struct.Struct("<6sBbHHBB")  # one link, 14 bytes
+_PAIR = struct.Struct("<6s6s")  # a confirmed pair of nodes, 12 bytes
 _HIVE = struct.Struct("<I6sIBBBB")  # hive report fields at offset 8
 _POINT = struct.Struct("<6shh")  # layout point: node, x and y in cm, 10 bytes
 _ROW = struct.Struct("<6sHB")  # row head: origin, version, entries, 9 bytes
@@ -70,6 +74,11 @@ class Link:
     def motion(self) -> bool:
         return bool(self.flags & LINK_FLAG_MOTION)
 
+    @property
+    def confirmed(self) -> bool:
+        """Motion the hive confirms: both ways and a node nearby (see docs/PROTOCOL.md)."""
+        return bool(self.flags & LINK_FLAG_CONFIRMED)
+
 
 @dataclass(frozen=True, slots=True)
 class LinkReport:
@@ -78,6 +87,16 @@ class LinkReport:
     flags: int
     uptime: int  # seconds
     links: tuple[Link, ...]
+    pairs: tuple[tuple[str, str], ...] = ()  # node pairs the sender's hive confirms, in MAC order
+
+    @property
+    def confirms(self) -> bool:
+        """The node's firmware confirms motion: its links carry the confirmed flag."""
+        return bool(self.flags & REPORT_FLAG_CONFIRMS)
+
+    @property
+    def pairs_truncated(self) -> bool:
+        return bool(self.flags & REPORT_FLAG_PAIRS_TRUNCATED)
 
 
 @dataclass(frozen=True, slots=True)
@@ -175,7 +194,17 @@ def parse_link_report(data: bytes, header: Header | None = None) -> LinkReport:
     links = tuple(
         _link(*_LINK.unpack_from(data, offset)) for offset in range(header.header_len, end, LINK_LEN)
     )
-    return LinkReport(seq, format_mac(node), flags, uptime, links)
+    pairs: tuple[tuple[str, str], ...] = ()
+    if flags & REPORT_FLAG_CONFIRMS:  # the confirmed pairs follow the links
+        count = data[end] if len(data) > end else 0
+        stop = end + 1 + count * _PAIR.size
+        if len(data) < stop:
+            raise ProtocolError(f"{count} confirmed pairs need {stop} bytes, got {len(data)}")
+        pairs = tuple(
+            (format_mac(a), format_mac(b))
+            for a, b in (_PAIR.unpack_from(data, offset) for offset in range(end + 1, stop, _PAIR.size))
+        )
+    return LinkReport(seq, format_mac(node), flags, uptime, links, pairs)
 
 
 def parse_hive_report(data: bytes, header: Header | None = None) -> HiveReport:

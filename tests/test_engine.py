@@ -150,8 +150,28 @@ def test_trailing_bytes_are_ignored():
     assert len(parse_packet(report(links=LINKS) + b"\x00\x01").links) == 3
 
 
+def test_link_report_with_confirmation():
+    """Node firmware 0.1.6 and later: report flag bit 0 says the links carry the confirmed bit (1),
+    and the node pairs the hive confirms follow the links."""
+    links = [(AP, KIND_AP, -55, 310, 900, 20, 3), (OTHER, KIND_NODE, -60, 290, 800, 10, 1)]
+    r = parse_packet(report(links=links, flags=1) + bytes([1]) + mac(NODE) + mac(OTHER))
+    assert r.confirms and not r.pairs_truncated and r.pairs == ((NODE, OTHER),)
+    assert [(link.motion, link.confirmed) for link in r.links] == [(True, True), (True, False)]
+    assert parse_packet(report(links=links, flags=1) + b"\x00").pairs == ()
+    assert parse_packet(report(flags=3) + b"\x00").pairs_truncated
+    old = parse_packet(report(links=LINKS) + b"\x01\x02")  # older firmware: trailing bytes mean nothing
+    assert not old.confirms and old.pairs == () and not any(link.confirmed for link in old.links)
+    with pytest.raises(ProtocolError):
+        parse_link_report(report(links=links, flags=1))  # no pair count
+    with pytest.raises(ProtocolError):
+        parse_link_report(report(links=links, flags=1) + bytes([2]) + mac(NODE) + mac(OTHER))  # a pair short
+
+
 def test_fake_node_encoder_matches_spec():
     assert encode_report(7, NODE, LINKS, uptime=42) == report(links=LINKS)
+    assert encode_report(7, NODE, LINKS, uptime=42, pairs=[(NODE, OTHER)]) == (
+        report(links=LINKS, flags=1) + bytes([1]) + mac(NODE) + mac(OTHER)
+    )
     node = FakeNode()
     r = parse_packet(node.report(node.started + 1))
     assert r.node == NODE and len(r.links) == 3 and r.links[0].kind == KIND_AP
@@ -303,6 +323,19 @@ def test_table_tracks_new_and_updated_links():
     assert (link.score, link.rssi, link.motion, link.updated, link.fresh) == (1.23, -55, False, 0.2, True)
     node = table.nodes[NODE]
     assert (node.seq, node.reports, node.address, node.last_report.seq) == (2, 2, "192.168.1.50", 2)
+
+
+def test_table_keeps_confirmation():
+    table = LinkTable(timeout=10)
+    confirmed = [(OTHER, KIND_NODE, -60, 300, 800, 10, 3)]
+    table.apply(parse_link_report(report(seq=1, links=confirmed, flags=1) + b"\x00"), now=100.0)
+    link = table.links[(OTHER, NODE)]
+    assert link.motion and link.confirmed and link.confirmed_at == 100.0 and table.nodes[NODE].confirms
+    moving = [(OTHER, KIND_NODE, -60, 300, 800, 10, 1)]
+    table.apply(parse_link_report(report(seq=2, links=moving, flags=1) + b"\x00"), now=100.2)
+    assert not link.confirmed and link.confirmed_at == 100.0  # when it last was
+    table.apply(parse_link_report(report(seq=3, links=moving)), now=100.4)  # older firmware again
+    assert not table.nodes[NODE].confirms
 
 
 def test_table_drops_duplicates_and_counts_gaps():

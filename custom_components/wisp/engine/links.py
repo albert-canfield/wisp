@@ -18,6 +18,8 @@ class LinkState:
     spread: float = 0.0
     frames: int = 0
     motion: bool = False
+    confirmed: bool = False  # the hive confirms its motion (node firmware 0.1.6+)
+    confirmed_at: float | None = None  # the latest report that said so
     updated: float = 0.0
     fresh: bool = True  # a report arrived within the timeout
 
@@ -31,6 +33,7 @@ class NodeState:
     address: str | None = None  # where its reports come from
     reports: int = 0
     lost: int = 0  # gaps in the sequence numbers
+    confirms: bool = False  # its firmware flags the links the hive confirms
     last_report: LinkReport | None = None
 
 
@@ -54,6 +57,7 @@ class LinkTable:
                 return None
             node.lost += report.seq - node.seq - 1
         node.seq, node.uptime, node.updated, node.last_report = report.seq, report.uptime, now, report
+        node.confirms = report.confirms
         node.reports += 1
         if address:
             node.address = address
@@ -68,7 +72,9 @@ class LinkTable:
                 new.append(key)
             state.kind = link.kind
             state.rssi, state.score, state.spread = link.rssi, link.score, link.spread
-            state.frames, state.motion = link.frames, link.motion
+            state.frames, state.motion, state.confirmed = link.frames, link.motion, link.confirmed
+            if link.confirmed:
+                state.confirmed_at = now
             state.updated, state.fresh = now, True
             keys.append(key)
         return keys, new

@@ -451,11 +451,13 @@ class Rooms:
         now: float,
         moving: bool | None = None,
         signal: Mapping[LinkKey, float | None] | None = None,
-        active: bool = False,
+        active: bool | None = None,
     ) -> Run | None:
         """One second of one floor: record for its run, then decide (moving: see decide; signal: RSSI
-        per live link this second; active: a link's motion backed by another link within seconds,
-        someone working or shifting in a chair). Returns its run if it just ended."""
+        per live link this second; active: whether the nodes confirm motion this second, a link
+        moving both ways with a nearby node agreeing; None when unknown). A walking second counts
+        only when the nodes confirm motion: every second of the owner's real walks was, and a
+        node's own noise is not. Returns its run if it just ended."""
         areas = list(areas)
         if active:
             self.active_at[floor] = now
@@ -475,7 +477,10 @@ class Rooms:
             return ended
         decision = decide(scores, self.models(floor, areas), self.quiet, moving)
         self.decisions[floor] = decision
-        walks = decision is not None and decision.room is not None and decision.confidence >= self.confidence
+        walks = (
+            decision is not None and decision.room is not None and decision.confidence >= self.confidence
+            and active is not False
+        )
         if walks:
             # A walk: confident walking seconds with short gaps. Once it lasts move_seconds each of
             # its seconds counts for its room, the last one included (someone who sits down a

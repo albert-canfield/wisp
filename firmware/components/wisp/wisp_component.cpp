@@ -65,8 +65,10 @@ void WispComponent::setup() {
   esp_read_mac(this->self_.b, ESP_MAC_WIFI_STA);
   this->grid_.reset(this->self_);
   this->hive_.reset(this->self_);
+  this->confirm_.reset(this->self_);
   this->threshold_applied_ = this->motion_threshold_.load();
   this->links_.set_threshold(this->threshold_applied_);
+  this->confirm_.set_threshold(this->threshold_applied_);
   this->csi_queue_ = xQueueCreate(CSI_QUEUE_DEPTH, sizeof(wisp_core::CsiRecord));
   this->espnow_queue_ = xQueueCreate(ESPNOW_QUEUE_DEPTH, sizeof(wisp_platform::EspNowFrame));
   if (this->csi_queue_ == nullptr || this->espnow_queue_ == nullptr) {
@@ -151,6 +153,9 @@ void WispComponent::loop() {
     this->ap_motion_score_sensor_->publish_state(this->ap_score_.load());
   if (this->ap_motion_binary_sensor_ != nullptr)
     this->ap_motion_binary_sensor_->publish_state(this->ap_active_.load());
+  const bool latched = this->motion_latched_.exchange(false);  // a second confirmed in between counts too
+  if (this->motion_binary_sensor_ != nullptr)
+    this->motion_binary_sensor_->publish_state(this->motion_.load() || latched);
   if (this->channel_sensor_ != nullptr) {
     const float channel = static_cast<float>(this->grid_channel_.load());
     if (channel > 0 && this->channel_sensor_->get_raw_state() != channel)
@@ -503,7 +508,7 @@ void WispComponent::handle_csi_(const wisp_core::CsiRecord &rec, uint32_t now, u
   }
 }
 
-// Beacons (membership plus the sender's own hive row) and relayed hive rows.
+// Beacons (membership, the sender's own hive row and its live scores) and relayed hive rows.
 void WispComponent::handle_espnow_(const wisp_platform::EspNowFrame &f, uint32_t now) {
   const wisp_core::Mac from = wisp_core::Mac::from(f.src);
   wisp_core::HiveEntry entries[wisp_core::MAX_ROW];
@@ -529,6 +534,14 @@ void WispComponent::handle_espnow_(const wisp_platform::EspNowFrame &f, uint32_t
   for (int i = 0; i < b.row_len; i++)
     entries[i] = wisp_core::HiveEntry{b.row[i].mac, b.row[i].rssi};
   this->hive_.on_row(from, b.row_version, entries, b.row_len, now);
+  // Its live scores of the nodes it hears, for the confirmation: access points left out.
+  int n = 0;
+  for (int i = 0; i < b.row_len; i++) {
+    const wisp_core::Mac &m = b.row[i].mac;
+    if (m == this->self_ || this->grid_.is_member(m) || this->hive_.find(m) != nullptr)
+      b.row[n++] = b.row[i];
+  }
+  this->confirm_.on_beacon(from, b.row, n, now);
 }
 
 // Every round: lifecycle, this node's slot, and the beacon it sends in that slot.
@@ -669,7 +682,8 @@ void WispComponent::send_report_(uint32_t now) {
   uint8_t buf[wisp_core::LINK_REPORT_MAX];
   const uint32_t uptime = static_cast<uint32_t>(esp_timer_get_time() / 1000000);
   // Always encode, so every report covers exactly one interval even after a quiet spell.
-  const size_t n = this->links_.encode_report(this->self_, this->report_seq_++, uptime, buf, sizeof(buf));
+  const size_t n =
+      this->links_.encode_report(this->self_, this->report_seq_++, uptime, buf, sizeof(buf), &this->pairs_);
   if (n > 0 && (this->live_streams_ & wisp_core::STREAM_LINKS))
     this->stream_.send(wisp_core::STREAM_LINKS, buf, n, now);
 }
@@ -679,8 +693,15 @@ void WispComponent::core_second_(uint32_t now) {
   if (threshold != this->threshold_applied_) {  // changed from Home Assistant
     this->threshold_applied_ = threshold;
     this->links_.set_threshold(threshold);
+    this->confirm_.set_threshold(threshold);
   }
   this->links_.tick_second(now);
+  // The hive's confirmation: this node's flags, the scores in the beacons it hears, the layout.
+  const bool motion = this->confirm_.update(this->links_, now, this->layout_, this->layout_count_, &this->hive_);
+  this->confirm_.pairs(this->pairs_);
+  this->motion_.store(motion);
+  if (motion)
+    this->motion_latched_.store(true);
   wisp_core::Mac bssid;
   const wisp_core::Link *ap = this->home_bssid_(bssid) ? this->links_.find(bssid) : nullptr;
   this->ap_score_.store(ap != nullptr ? ap->score : NAN);
@@ -706,6 +727,7 @@ void WispComponent::dump_config() {
   LOG_SENSOR("  ", "CSI dropped", this->csi_dropped_sensor_);
   LOG_SENSOR("  ", "AP motion score", this->ap_motion_score_sensor_);
   LOG_BINARY_SENSOR("  ", "AP motion", this->ap_motion_binary_sensor_);
+  LOG_BINARY_SENSOR("  ", "Motion", this->motion_binary_sensor_);
   LOG_SENSOR("  ", "Grid nodes", this->grid_nodes_sensor_);
   LOG_SENSOR("  ", "Grid channel", this->channel_sensor_);
   LOG_BINARY_SENSOR("  ", "Hive in sync", this->hive_sync_binary_sensor_);

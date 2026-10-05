@@ -47,10 +47,17 @@ def encode_link(transmitter: str, kind: int, rssi: int, score: int, spread: int,
     return _LINK.pack(mac_bytes(transmitter), kind, rssi, score, spread, frames, flags)
 
 
-def encode_report(seq: int, node: str, links: list[tuple], uptime: int = 0, flags: int = 0) -> bytes:
-    """links: (transmitter, kind, rssi, score x100, spread x100, frames, flags) each."""
+def encode_report(seq: int, node: str, links: list[tuple], uptime: int = 0, flags: int = 0,
+                  pairs: list[tuple[str, str]] | None = None) -> bytes:
+    """links: (transmitter, kind, rssi, score x100, spread x100, frames, flags) each. pairs: the node
+    pairs the hive confirms, as firmware 0.1.6 and later sends them (with report flag bit 0)."""
+    if pairs is not None:
+        flags |= 0x01
     head = _REPORT_HEAD.pack(b"WISP", 1, 2, _REPORT_HEAD.size, seq, mac_bytes(node), len(links), flags, uptime)
-    return head + b"".join(encode_link(*link) for link in links)
+    body = b"".join(encode_link(*link) for link in links)
+    if pairs is not None:
+        body += bytes([len(pairs)]) + b"".join(mac_bytes(a) + mac_bytes(b) for a, b in pairs)
+    return head + body
 
 
 def encode_hive_report(seq: int, node: str, hive_hash: int, layout: list[tuple], rows: list[tuple],

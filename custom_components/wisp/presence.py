@@ -35,6 +35,7 @@ from .const import (
 )
 from .engine import Decision, HiveState, LinkKey, Rooms, Run, access_points
 from .engine.floor import FloorFix, FloorModel
+from .engine.imaging import line_distance
 from .engine.rooms import HOLD, SIGNAL_VAR_FLOOR, SIGNAL_WINDOW, STILL_FIT, Separation, separation
 from .plans import FloorPlans
 
@@ -46,6 +47,13 @@ NONE = "none"  # the room while nobody moves, and the empty class among the prob
 EMPTY = "empty"  # the empty class in calibration
 STILL = "still"  # a room's still class in calibration, after its name
 ACTIVE_WITHIN = 2.0  # s: a link moving both ways within this is activity (someone working, shifting in a chair)
+CONFIRMED_WITHIN = 1.0  # s: a link the nodes confirmed in any report since the last tick
+# The nodes' own confirmation rule (firmware core_confirm.h), for floors with older firmware:
+CONFIRM_SUPPORT_NEAREST = 6  # nodes nearest a pair that may confirm it
+CONFIRM_SUPPORT_FEW = 4  # up to this many candidates, CONFIRM_SUPPORT_FEW_NEED must agree, else MANY
+CONFIRM_SUPPORT_FEW_NEED = 1
+CONFIRM_SUPPORT_MANY_NEED = 2
+CONFIRM_RANK_ABOVE = 8  # nodes on a floor above which only the nearest count
 
 
 def store_key(entry_id: str) -> str:
@@ -329,13 +337,54 @@ class RoomPresence:
         """Activity this second: a link moving in both directions within ACTIVE_WITHIN s (someone
         working, shifting in a chair). A body changes a link both ways; a node's own noise shows
         on what it sends or receives. On the owner's empty floor any two links together came 10
-        to 17 times in 3 minutes, a link and its reverse never, against 3 or more at a quiet desk."""
+        to 17 times in 3 minutes, a link and its reverse never, against 3 or more at a quiet desk.
+
+        Node firmware 0.1.6 and later confirms motion itself, from the scores in each other's
+        beacons (ten a second, none lost on the way here), and flags the links it confirms (see
+        docs/PROTOCOL.md). A floor whose live links all come from such nodes is active while one of
+        them is confirmed; with a node on older firmware (its reports say so) the check here runs too."""
         seen = self._flags.setdefault(floor, deque())
         seen.append((now, frozenset(moving)))
         while seen and now - seen[0][0] > ACTIVE_WITHIN:
             seen.popleft()
+        floor_nodes = self.floors[floor].nodes
+        live = [link for _, link in self._live_links(floor, now)]
+        if len(floor_nodes) >= MIN_FLOOR_NODES:  # fewer nodes: no third one to confirm, see below
+            if any(link.confirmed_at is not None and now - link.confirmed_at <= CONFIRMED_WITHIN for link in live):
+                return True
+            nodes = self.hub.table.nodes
+            if live and all((node := nodes.get(link.receiver)) is not None and node.confirms for link in live):
+                return False
         links = set().union(*(m for _, m in seen))
-        return any((key[1], key[0]) in links for key in moving)
+        for a, b in moving:
+            if a not in floor_nodes or (b, a) not in links:
+                continue
+            # The pair moves both ways; a nearby third node must see motion on a link to a or b, as
+            # the nodes' own check does (firmware core_confirm.h). With no third node: the pair alone
+            others = floor_nodes - {a, b}
+            if not others:
+                return True
+            nearby = self._nearest(floor, a, b, others)
+            support = {c for key in links for c in key if c in nearby and {a, b} & set(key)}
+            if len(support) >= (CONFIRM_SUPPORT_FEW_NEED if len(nearby) <= CONFIRM_SUPPORT_FEW else CONFIRM_SUPPORT_MANY_NEED):
+                return True
+        return False
+
+    def _nearest(self, floor: str, a: str, b: str, others: set[str]) -> set[str]:
+        """The nodes that may confirm the pair a, b: all of them on small floors, else the
+        CONFIRM_SUPPORT_NEAREST nearest the pair on the floor's layout (far ones add only noise)."""
+        if len(others) + 2 <= CONFIRM_RANK_ABOVE:
+            return others
+        positions = self.models[floor].positions if floor in self.models else {}
+        pa, pb = positions.get(a), positions.get(b)
+        if pa is None or pb is None:
+            return others
+
+        def away(c: str) -> tuple[float, str]:
+            pc = positions.get(c)
+            return (math.inf if pc is None else line_distance(pc, pa, pb), c)
+
+        return set(sorted(others, key=away)[:CONFIRM_SUPPORT_NEAREST])
 
     def presence_room(self, floor: str, now: float) -> str | None:
         """The floor's room whose presence won last, while it holds: where someone is when room

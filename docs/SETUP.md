@@ -103,6 +103,7 @@ On each node's page (or in Home Assistant):
 | AP CSI rate | about 20 to 30 Hz |
 | CSI dropped | 0, or slowly growing at most |
 | AP motion score | about 1 in a still room, higher when someone moves |
+| Motion | off on an empty floor; on while you move near the node (needs 3 nodes or more) |
 
 Then run the guided walk test from a computer on the same network:
 

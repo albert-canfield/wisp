@@ -3,7 +3,7 @@
 substitutions:
   name: wisp
   friendly_name: Wisp
-  project_version: "0.1.5"
+  project_version: "0.1.6"
   motion_threshold: "2.0" # default; then the Motion threshold entity, kept across reboots
 
 esphome:
@@ -35,6 +35,8 @@ wisp:
           - throttle: 10s
   ap_motion:
     name: AP motion
+  motion: # on while the hive confirms motion on one of this node's links: both ways and a third node
+    name: Motion
   grid_nodes:
     name: Grid nodes
   channel:

@@ -1,7 +1,7 @@
 #pragma once
 // wisp-core: every link this node receives on (from access points and other nodes), each with
 // its own motion score, and the link report that carries them to Home Assistant
-// (type 2 in docs/PROTOCOL.md).
+// (type 2 in docs/PROTOCOL.md), with the node pairs the hive confirms (core_confirm.h).
 
 #include <cmath>
 #include <cstddef>
@@ -19,10 +19,25 @@ constexpr int MAX_LINKS = 20;  // access points plus up to 16 other nodes
 constexpr uint8_t PACKET_LINK_REPORT = 2;
 constexpr size_t LINK_REPORT_HEADER_BYTES = 24;
 constexpr size_t LINK_REPORT_ENTRY_BYTES = 14;
-constexpr size_t LINK_REPORT_MAX = LINK_REPORT_HEADER_BYTES + LINK_REPORT_ENTRY_BYTES * MAX_LINKS;
 constexpr uint32_t LINK_EXPIRE_MS = 10 * 60 * 1000;  // a link silent this long frees its entry
+constexpr uint8_t LINK_FLAG_MOTION = 0x01;
+constexpr uint8_t LINK_FLAG_CONFIRMED = 0x02;  // the hive confirms its motion
+constexpr uint8_t REPORT_FLAG_CONFIRMS = 0x01;  // links carry LINK_FLAG_CONFIRMED, confirmed pairs follow
+constexpr uint8_t REPORT_FLAG_PAIRS_TRUNCATED = 0x02;
+constexpr int MAX_REPORT_PAIRS = 16;
+constexpr size_t LINK_REPORT_PAIR_BYTES = 12;
+constexpr size_t LINK_REPORT_MAX = LINK_REPORT_HEADER_BYTES + LINK_REPORT_ENTRY_BYTES * MAX_LINKS + 1 +
+                                   LINK_REPORT_PAIR_BYTES * MAX_REPORT_PAIRS;
 
 enum class LinkKind : uint8_t { ACCESS_POINT = 0, NODE = 1 };
+
+// Node pairs the hive confirms, for the link report: a and b in MAC order.
+struct PairList {
+  Mac a[MAX_REPORT_PAIRS];
+  Mac b[MAX_REPORT_PAIRS];
+  int n{0};
+  bool truncated{false};  // more were confirmed than fit
+};
 
 struct Link {
   Mac source;
@@ -31,6 +46,7 @@ struct Link {
   MotionDetector detector{};
   float score{NAN};
   bool active{false};
+  bool confirmed{false};  // set after each tick_second() by core_confirm.h
   uint32_t last_frame_ms{0};
   int32_t rssi_sum{0};  // since the last report
   uint16_t frames{0};   // since the last report
@@ -68,6 +84,7 @@ class LinkTable {
         continue;
       }
       l.score = l.motion.tick();
+      l.confirmed = false;
       if (std::isnan(l.score)) {
         l.detector.reset();  // a silent link reports no motion, it does not keep the last state
         l.active = false;
@@ -79,8 +96,12 @@ class LinkTable {
   }
 
   // Writes a link report and starts a new interval. Returns its length, or 0 if it does not fit.
-  size_t encode_report(const Mac &self, uint32_t seq, uint32_t uptime_s, uint8_t *out, size_t cap) {
-    const size_t len = LINK_REPORT_HEADER_BYTES + LINK_REPORT_ENTRY_BYTES * static_cast<size_t>(this->count_);
+  // With pairs, the report says the links carry confirmation and lists the pairs after them.
+  size_t encode_report(const Mac &self, uint32_t seq, uint32_t uptime_s, uint8_t *out, size_t cap,
+                       const PairList *pairs = nullptr) {
+    const int n_pairs = pairs == nullptr ? 0 : (pairs->n < MAX_REPORT_PAIRS ? pairs->n : MAX_REPORT_PAIRS);
+    const size_t links_end = LINK_REPORT_HEADER_BYTES + LINK_REPORT_ENTRY_BYTES * static_cast<size_t>(this->count_);
+    const size_t len = links_end + (pairs == nullptr ? 0 : 1 + LINK_REPORT_PAIR_BYTES * static_cast<size_t>(n_pairs));
     if (len > cap)
       return 0;
     memcpy(out, "WISP", 4);
@@ -90,7 +111,7 @@ class LinkTable {
     put_u32(out + 8, seq);
     memcpy(out + 12, self.b, 6);
     out[18] = static_cast<uint8_t>(this->count_);
-    out[19] = 0;
+    out[19] = pairs == nullptr ? 0 : REPORT_FLAG_CONFIRMS | (pairs->truncated ? REPORT_FLAG_PAIRS_TRUNCATED : 0);
     put_u32(out + 20, uptime_s);
     for (int i = 0; i < this->count_; i++) {
       Link &l = this->links_[i];
@@ -101,9 +122,17 @@ class LinkTable {
       put_u16(e + 8, to_u16_(l.score * 100.0f));
       put_u16(e + 10, to_u16_(l.motion.spread() * 100.0f));
       e[12] = static_cast<uint8_t>(l.frames > 255 ? 255 : l.frames);
-      e[13] = l.active ? 1 : 0;
+      e[13] = static_cast<uint8_t>((l.active ? LINK_FLAG_MOTION : 0) | (l.confirmed ? LINK_FLAG_CONFIRMED : 0));
       l.rssi_sum = 0;
       l.frames = 0;
+    }
+    if (pairs != nullptr) {
+      uint8_t *p = out + links_end;
+      *p++ = static_cast<uint8_t>(n_pairs);
+      for (int i = 0; i < n_pairs; i++, p += LINK_REPORT_PAIR_BYTES) {
+        memcpy(p, pairs->a[i].b, 6);
+        memcpy(p + 6, pairs->b[i].b, 6);
+      }
     }
     return len;
   }
@@ -117,6 +146,7 @@ class LinkTable {
   }
   int count() const { return this->count_; }
   const Link &link(int i) const { return this->links_[i]; }
+  void set_confirmed(int i, bool c) { this->links_[i].confirmed = c && this->links_[i].active; }
 
  protected:
   static uint16_t to_u16_(float v) {

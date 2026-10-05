@@ -30,6 +30,7 @@ CONF_AP_CSI_RATE = "ap_csi_rate"
 CONF_CSI_DROPPED = "csi_dropped"
 CONF_AP_MOTION_SCORE = "ap_motion_score"
 CONF_AP_MOTION = "ap_motion"
+CONF_MOTION = "motion"
 CONF_MOTION_THRESHOLD = "motion_threshold"
 CONF_REPORT_INTERVAL = "report_interval"
 CONF_GRID_NODES = "grid_nodes"
@@ -98,6 +99,10 @@ CONFIG_SCHEMA = cv.Schema(
         cv.Optional(CONF_AP_MOTION): binary_sensor.binary_sensor_schema(
             device_class=DEVICE_CLASS_MOTION,
         ),
+        # On while the hive confirms motion on one of this node's links (core_confirm.h)
+        cv.Optional(CONF_MOTION): binary_sensor.binary_sensor_schema(
+            device_class=DEVICE_CLASS_MOTION,
+        ),
         cv.Optional(CONF_AP_CSI_RATE): sensor.sensor_schema(
             unit_of_measurement="Hz",
             icon="mdi:access-point",
@@ -164,6 +169,9 @@ async def to_code(config):
     if CONF_AP_MOTION in config:
         bs = await binary_sensor.new_binary_sensor(config[CONF_AP_MOTION])
         cg.add(var.set_ap_motion_binary_sensor(bs))
+    if CONF_MOTION in config:
+        bs = await binary_sensor.new_binary_sensor(config[CONF_MOTION])
+        cg.add(var.set_motion_binary_sensor(bs))
     if CONF_AP_CSI_RATE in config:
         sens = await sensor.new_sensor(config[CONF_AP_CSI_RATE])
         cg.add(var.set_ap_csi_rate_sensor(sens))
