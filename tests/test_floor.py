@@ -202,3 +202,22 @@ def test_a_link_alone_is_not_someone() -> None:
     scores[("bb:00", "aa:00")] = 3.0  # the reverse direction agrees a second later
     assert floor.update(scores, now=5.0, moving={lonely}) is None
     assert floor.update(scores, now=6.0, moving={("bb:00", "aa:00")}) is not None
+
+
+def test_the_fit_is_searched_for_in_the_room_presence_names() -> None:
+    """Links crossing several rooms make the best fit on the whole floor land next door: with
+    room presence naming the room, the fit is the best one inside it, and without walking it is
+    shown still."""
+    office, hall = [(0.0, 0.0, 3.0, 5.0)], [(3.0, 0.0, 3.5, 5.0)]
+    placed = {mac: (p[0] + 0.5, p[1] + 0.25) for mac, p in NODES.items()}
+    links = [(t, r) for t in placed for r in NODES if t != r]
+    person = (4.8, 2.5)  # in the hall, by the links along it
+    for room, expect in ((None, "hall"), ("office", "office")):
+        floor = FloorModel(min_streak=1, still_min=1, walk_min=2)
+        floor.set_layout(hive_state(), placed, plan=(6.5, 5.0), nodes=set(NODES), rooms={"office": office, "hall": hall})
+        scores = {k: score(person, *k, floor.positions) for k in links}
+        fixes = [floor.update(scores, now=float(i), moving=set(links), room=room, walking=room is None) for i in range(3)]
+        fix = fixes[-1]
+        assert fix is not None and (fix.raw_x <= 3.0) == (expect == "office"), (room, fix)
+        if room is not None:
+            assert all(f.walking is False for f in fixes if f is not None)
