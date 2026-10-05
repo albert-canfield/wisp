@@ -13,6 +13,8 @@
  *   flip: false     # optional, mirror left to right
  *   plan_photo: false # optional, the floor plan is a photo: dimmed, not inverted, in dark mode
  *   motion_text: true # optional, the line under the map naming the room and links with motion
+ *   labels: true    # optional, the names of the nodes and access points
+ *   lines: true     # optional, the links between nodes and to the access points
  */
 
 const W = 360; // viewBox width; the height follows the drawing
@@ -438,9 +440,10 @@ function draw(map, config, floor, trails = new Map(), now = Date.now()) {
   const where = occupied.length ? `${occupied.length > 1 ? "Rooms" : "Room"}: ${occupied.join(", ")}. ` : "";
   const motion = where + (moving.length ? `Motion: ${moving.join(", ")}` : "All quiet");
   return {
-    svg: `<svg viewBox="0 0 ${W} ${h}" role="img" aria-label="${esc(`Map of ${summary}. ${motion}.`)}">${rooms ? `<g class="rooms${plan.url ? "" : " bare"}">${rooms.shapes}</g>` : ""}${plan ? planLayer(frame, !plan.url) : ""}${rooms?.names ? `<g class="room-names">${rooms.names}</g>` : ""}<g class="lines">${lines}</g><g class="steps">${steps}</g><g class="marks">${marks}${walkers}</g><g class="labels">${labels}</g></svg>`,
+    svg: `<svg viewBox="0 0 ${W} ${h}" role="img" aria-label="${esc(`Map of ${summary}. ${motion}.`)}">${rooms ? `<g class="rooms${plan.url ? "" : " bare"}">${rooms.shapes}</g>` : ""}${plan ? planLayer(frame, !plan.url) : ""}${rooms?.names ? `<g class="room-names">${rooms.names}</g>` : ""}${config.lines === false ? "" : `<g class="lines">${lines}</g>`}<g class="steps">${steps}</g><g class="marks">${marks}${walkers}</g>${config.labels === false ? "" : `<g class="labels">${labels}</g>`}</svg>`,
     summary,
     motion,
+    ratio: W / h, // its width for a height: a page can keep it from growing too tall
     // Where the plan's image goes, in shares of the drawing: unturned, centred on the frame, then
     // turned and mirrored about its centre to lie as the frame does
     plan: plan && {
@@ -458,7 +461,7 @@ const EMPTY_FEET = `<svg class="feet" viewBox="-22 -18 44 36" aria-hidden="true"
 
 class WispMapCard extends HTMLElement {
   static getStubConfig() {
-    return { title: "Wisp", rotate: 0, flip: false };
+    return { title: "Wisp", rotate: 0, flip: false, labels: true, lines: true };
   }
 
   static getConfigForm() {
@@ -469,14 +472,18 @@ class WispMapCard extends HTMLElement {
         { name: "rotate", selector: { number: { min: 0, max: 359, step: 1, mode: "slider", unit_of_measurement: "°" } } },
         { name: "flip", selector: { boolean: {} } },
         { name: "plan_photo", selector: { boolean: {} } },
+        { name: "labels", selector: { boolean: {} } },
+        { name: "lines", selector: { boolean: {} } },
         { name: "motion_text", selector: { boolean: {} } },
       ],
-      computeLabel: (s) => ({ title: "Title", floor: "Floor", rotate: "Rotate", flip: "Mirror", plan_photo: "Photo floor plan", motion_text: "Motion text" })[s.name],
+      computeLabel: (s) => ({ title: "Title", floor: "Floor", rotate: "Rotate", flip: "Mirror", plan_photo: "Photo floor plan", labels: "Names", lines: "Links", motion_text: "Motion text" })[s.name],
       computeHelper: (s) => ({
         floor: "Name or id of the floor to show, in a home with several. Empty: the first floor with nodes",
         rotate: "Degrees clockwise, to match the drawing to your home. A floor plan turns in steps of 90°",
         flip: "Mirror left to right",
         plan_photo: "The floor plan is a photo: dim it in dark mode instead of inverting it",
+        labels: "The names of the nodes and access points",
+        lines: "The links between the nodes and to the access points, which redden with motion",
         motion_text: "The line under the map naming the room someone moves in and the links that see motion",
       })[s.name],
     };
@@ -622,14 +629,16 @@ class WispMapCard extends HTMLElement {
           : pick.missing != null
             ? ["No such floor", `Wisp has no floor “${pick.missing}” with nodes. Its floors: ${pick.floors.map((f) => f.name).join(", ")}.`]
             : ["Nothing to draw yet", "The map needs two or more Wisp nodes. Add them under Settings, Devices and services, Wisp."];
+      root.querySelector(".map").style.removeProperty("--wisp-ratio");
       root.querySelector(".draw").innerHTML = `<div class="empty">${EMPTY_FEET}<p class="lead">${esc(lead)}</p>${text ? `<p>${esc(text)}</p>` : ""}</div>`;
       foot.hidden = true;
       return;
     }
     const now = Date.now();
     this._prune(now);
-    const { svg, summary, motion, plan } = draw(pick.map, this._config, pick.floor, this._trails, now);
+    const { svg, summary, motion, ratio, plan } = draw(pick.map, this._config, pick.floor, this._trails, now);
     root.querySelector(".draw").innerHTML = svg;
+    root.querySelector(".map").style.setProperty("--wisp-ratio", ratio.toFixed(4));
     if (plan?.url) {  // a plan without an image is a grid, drawn in the svg
       if (img.getAttribute("src") !== plan.url) img.setAttribute("src", plan.url);
       const pct = (v) => `${(100 * v).toFixed(3)}%`;
@@ -673,7 +682,9 @@ const STYLE = `
   .note:empty::before { display: none; }
   .note.sync::before { background: currentColor; }
   .note.wait::before { animation: wisp-blink 1.6s ease-in-out infinite; }
-  .map { position: relative; margin: 4px 14px 0; border: 1.5px solid color-mix(in srgb, var(--wisp-ink) 55%, transparent);
+  /* As wide as the card; with --wisp-map-max-height set (the panel's full width map), no taller than that, centred */
+  .map { position: relative; box-sizing: border-box; width: min(100% - 28px, var(--wisp-map-max-height, 100000px) * var(--wisp-ratio, 1));
+         margin: 4px auto 0; border: 1.5px solid color-mix(in srgb, var(--wisp-ink) 55%, transparent);
          outline: 1px solid color-mix(in srgb, var(--wisp-ink) 25%, transparent); outline-offset: 3px; }
   .map svg { display: block; width: 100%; height: auto; }
   .draw { position: relative; }

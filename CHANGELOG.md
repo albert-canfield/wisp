@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.1.6 (unreleased)
+## 0.1.7 (unreleased)
 Versions count up with each round of changes until the first release.
 
 First working version: the grid, the hive and motion per link, with the Home Assistant integration and the map card.
@@ -55,6 +55,10 @@ First working version: the grid, the hive and motion per link, with the Home Ass
 - Someone moving is placed only near a link that could see them (within 0.6 m of its line), and on the busy link rather than at its fringe: the fit's free scale let a spot far from every link, or at a link's end, fit as well as one on it. The position shown stays in the room room presence is sure of, as each fit already did. Access points are placed with the nodes' indoor path-loss model (exponent 4.0, was 2.7), which put them too far out.
 - A hub set up again takes every Wisp node Home Assistant has as an ESPHome device, not only the node that created it: Home Assistant rediscovers only that one after a hub is removed, and the other nodes stayed out until they restarted.
 - Add floor plan asks first how: Draw it (the default: a grid of metres, and the rooms editor opens right after Save) or Use an image (upload or address). A new image plan goes on to placing the nodes, as before.
+- Renaming a node's device in Home Assistant renames the node in Wisp: map, panel, Nodes online and messages (they kept the name it was found with).
+- The map card can hide the names of nodes and access points (`labels: false`) and the links (`lines: false`); the panel has Names and Links buttons for it.
+- The panel takes the Home Assistant theme's colours outside the map (headings, buttons, online dots, warnings), and its rows are more compact: each node on two lines (name, area, ESPHome; then only what needs attention, floor, address and WiFi), the hive on one, shorter hints. Who is where shows in the rooms list only. The WiFi channel row shows on every floor with nodes again.
+- The map can take the panel's full width (Full width, remembered per browser), kept within the window's height. Place nodes draws the floor's rooms under the nodes, as a guide.
 - Position sensors: on a floor with a plan, x and y of someone moving in the plan's metres (from its top left corner), with the fit's quality as an attribute; unknown while nobody moves.
 
 ### Tools

@@ -9,7 +9,7 @@
 const DURATIONS = [30, 60, 90, 120, 180, 300]; // s to record
 const DURATION = 60; // s, as the services
 const LEAVE_S = 30; // s to leave the floor before the empty floor records
-const PREFS = "wisp-panel"; // this browser's duration, map turn, mirror and floor
+const PREFS = "wisp-panel"; // this browser's duration, map turn, mirror, names, links, width and floor
 const PW = 360; // viewBox width of the drawing to place nodes and draw rooms on
 const PPAD = 28; // room around the plan for a mark on its edge: its touch circle and its name
 const PMAX_H = 480;
@@ -84,7 +84,7 @@ function showState(el, state) {
   if (el.dataset.key === key) return;
   el.dataset.key = key;
   el.hidden = !state;
-  el.className = `state${el.classList.contains("mini") ? " mini" : ""}${state ? ` ${state[0]}` : ""}`;
+  el.className = state ? `state ${state[0]}` : "state";
   el.innerHTML = state ? state[1] : "";
   if (state) {
     el.setAttribute("role", "img");
@@ -191,11 +191,14 @@ class WispPanel extends HTMLElement {
           <div class="message"></div>
           <main hidden>
             <section class="map-col" aria-label="Map">
-              <div class="tabs" role="group" aria-label="Floor on the map" hidden></div>
+              <div class="tabs paper" role="group" aria-label="Floor on the map" hidden></div>
               <div class="map"></div>
-              <div class="map-tools">
+              <div class="map-tools paper" role="group" aria-label="Map">
+                <button data-act="names" aria-pressed="true" title="Names of the nodes and access points">Names</button>
+                <button data-act="links" aria-pressed="true" title="Lines between the nodes">Links</button>
                 <button data-act="turn">Turn 90°</button>
                 <button data-act="mirror" aria-pressed="false">Mirror</button>
+                <button class="wide-act" data-act="wide" aria-pressed="false">Full width</button>
               </div>
               <section class="sheet placer" aria-labelledby="wisp-placer" hidden>
                 <div class="head"><h2 id="wisp-placer">Place nodes</h2><span class="note placer-note"></span></div>
@@ -208,7 +211,7 @@ class WispPanel extends HTMLElement {
               <div class="head"><h2 id="wisp-nodes">Nodes</h2><span class="note nodes-note"></span></div>
               <div class="nodes"></div>
               <div class="foot">
-                <p>A node's floor comes with its area. Areas and floors are set up in Home Assistant's settings.</p>
+                <p>A node's floor follows its area. Areas and floors are set in Home Assistant.</p>
                 <button data-act="settings">Wisp settings</button>
               </div>
             </section>
@@ -232,7 +235,7 @@ class WispPanel extends HTMLElement {
     root.addEventListener("touchstart", (e) => {
       if (e.target.closest?.(".placer .item, .placer.rooms .plan-draw svg")) e.preventDefault();
     }, { passive: false });
-    this._mirrorButton();
+    this._mapButtons();
     this._loadCard();
     this._render();
   }
@@ -262,12 +265,23 @@ class WispPanel extends HTMLElement {
   _mapConfig() {
     const f = this._shownFloor();
     this._cardFloor = f ? f.floor ?? f.name : ""; // the card takes a floor id, or the hub's own floor by name
-    // Motion and presence show in the rooms and nodes lists here, not as a line under the map
-    return { title: "Map", rotate: Number(this._prefs.rotate) || 0, flip: !!this._prefs.flip, floor: this._cardFloor, motion_text: false };
+    // Motion and presence show in the rooms list here, not as a line under the map
+    const p = this._prefs;
+    return {
+      title: "Map", rotate: Number(p.rotate) || 0, flip: !!p.flip, floor: this._cardFloor, motion_text: false,
+      labels: p.labels !== false, lines: p.lines !== false, // names and links shown unless turned off
+    };
   }
 
-  _mirrorButton() {
-    this.shadowRoot.querySelector("[data-act=mirror]").setAttribute("aria-pressed", String(!!this._prefs.flip));
+  /* Names, Links, Mirror and Full width as chosen in this browser. Full width puts the map over
+     both columns, the other cards under it; a phone has one column, the map full width already. */
+  _mapButtons() {
+    const root = this.shadowRoot;
+    root.querySelector("[data-act=names]").setAttribute("aria-pressed", String(this._prefs.labels !== false));
+    root.querySelector("[data-act=links]").setAttribute("aria-pressed", String(this._prefs.lines !== false));
+    root.querySelector("[data-act=mirror]").setAttribute("aria-pressed", String(!!this._prefs.flip));
+    root.querySelector("[data-act=wide]").setAttribute("aria-pressed", String(!!this._prefs.wide));
+    root.querySelector("main").classList.toggle("wide", !!this._prefs.wide);
   }
 
   /* The sidebar's button where Home Assistant hides the sidebar: on a phone, or when set to hidden. */
@@ -384,12 +398,19 @@ class WispPanel extends HTMLElement {
       this._prefs.mapFloor = target;
       savePrefs(this._prefs);
       this._render();
-    } else if (act === "turn" || act === "mirror") {
-      if (act === "turn") this._prefs.rotate = ((Number(this._prefs.rotate) || 0) + 90) % 360;
-      else this._prefs.flip = !this._prefs.flip;
+    } else if (["turn", "mirror", "names", "links"].includes(act)) {
+      const p = this._prefs;
+      if (act === "turn") p.rotate = ((Number(p.rotate) || 0) + 90) % 360;
+      else if (act === "mirror") p.flip = !p.flip;
+      else if (act === "names") p.labels = p.labels === false;
+      else p.lines = p.lines === false;
       savePrefs(this._prefs);
-      this._mirrorButton();
+      this._mapButtons();
       this._card?.setConfig(this._mapConfig());
+    } else if (act === "wide") {
+      this._prefs.wide = !this._prefs.wide;
+      savePrefs(this._prefs);
+      this._mapButtons();
     }
   }
 
@@ -1093,12 +1114,11 @@ class WispPanel extends HTMLElement {
     const added = d.nodes.filter((n) => n.added);
     root.querySelector(".nodes-note").textContent = `${added.filter((n) => n.online).length} of ${added.length} online`;
     const rows = patch(root.querySelector(".nodes"), d.nodes.map((n) => [n.mac, this._node(n, d)]));
-    // The signal changes every second: its line changes alone, so the row's area list stays open
+    // The signal changes every second: its words change alone, so the row's area list stays open
     for (const n of d.nodes) {
       const el = rows.get(n.mac).querySelector(".wifi"), text = this._wifi(n);
       if (el.textContent !== text) el.textContent = text;
       el.hidden = !text;
-      showState(rows.get(n.mac).querySelector(".state"), n.motion ? ["hot", WALKING, `Links of ${n.name} see motion`] : null);
     }
     const note = root.querySelector(".hive-note");
     note.textContent = d.hive ? (d.hive.in_sync ? "in sync" : "syncing") : "";
@@ -1181,6 +1201,7 @@ class WispPanel extends HTMLElement {
     const items = this._placing ? this._items(f, d) : null;
     const { svg, frame } = items ? this._placerSvg(f, items) : this._roomsSvg(f);
     this._frame = frame;
+    root.querySelector(".plan-box").style.setProperty("--wisp-ratio", (PW / frame.vh).toFixed(4)); // its width for a height, at full width
     const draw = root.querySelector(".plan-draw"), info = root.querySelector(".placer-info");
     if (draw._html !== svg || this._redraw) {
       draw.innerHTML = svg;
@@ -1241,8 +1262,35 @@ class WispPanel extends HTMLElement {
       return `<g class="${cls}" data-id="${esc(i.id)}" transform="translate(${n1(x)} ${n1(y)})" tabindex="0" role="button" aria-label="${esc(label)}"><circle class="hit" r="22"/>${i.kind === "ap" ? AP_MARK : NODE_MARK}<text y="24">${esc(i.name)}</text></g>`;
     }).join("");
     const below = tray.length ? `<text class="tray" x="${PW / 2}" y="${n1(frame.y + frame.h + 13)}">Not on the plan yet: drag onto it</text>` : "";
-    const svg = `<svg viewBox="0 0 ${PW} ${frame.vh}" role="group" aria-label="The plan of ${esc(floorPhrase(f))}, ${n1(plan.width)} by ${n1(plan.height)} m">${this._planBase(frame)}${below}${marks}</svg>`;
+    const svg = `<svg viewBox="0 0 ${PW} ${frame.vh}" role="group" aria-label="The plan of ${esc(floorPhrase(f))}, ${n1(plan.width)} by ${n1(plan.height)} m">${this._planBase(frame)}${this._roomsUnder(f, frame)}${below}${marks}</svg>`;
     return { svg, frame };
+  }
+
+  /* The rooms drawn on the floor, under the nodes: where each room is, to place its node in it.
+     Only to see; a press goes through them to the plan. */
+  _roomsUnder(f, frame) {
+    const rects = (f.rooms ?? []).flatMap((room) => room.rects.map(([x, y, w, h]) => ({ area: room.area, x, y, w, h })));
+    if (!rects.length) return "";
+    const s = frame.s;
+    const shapes = rects.map((q) => `<rect x="${n1(frame.x + q.x * s)}" y="${n1(frame.y + q.y * s)}" width="${n1(q.w * s)}" height="${n1(q.h * s)}" style="--hue:${hue(q.area)}"/>`).join("");
+    return `<g class="room-ref" aria-hidden="true">${shapes}${this._roomLabels(f, frame, rects)}</g>`;
+  }
+
+  /* Each room's name in the corner of its largest rectangle, where it fits. */
+  _roomLabels(f, frame, rects) {
+    const names = new Map(this._roomAreas(f).map((a) => [a.area, a.name]));
+    const largest = new Map();
+    for (const q of rects) {
+      const big = largest.get(q.area);
+      if (!big || q.w * q.h > big.w * big.h) largest.set(q.area, q);
+    }
+    let labels = "";
+    for (const [area, q] of largest) {
+      const w = q.w * frame.s, h = q.h * frame.s;
+      const fit = Math.floor((w - 10) / 5.6); // characters of 11 px italic
+      if (fit >= 3 && h >= 18) labels += `<text class="room-name" x="${n1(frame.x + q.x * frame.s + 5)}" y="${n1(frame.y + q.y * frame.s + 14)}">${esc(short(names.get(area) ?? area, fit))}</text>`;
+    }
+    return labels;
   }
 
   _placerInfo(f, items) {
@@ -1285,19 +1333,14 @@ class WispPanel extends HTMLElement {
     const box = (q) => ({ x: frame.x + q.x * s, y: frame.y + q.y * s, w: q.w * s, h: q.h * s });
     const names = new Map(this._roomAreas(f).map((a) => [a.area, a.name]));
     const sel = r.rects.find((q) => q.id === r.selected);
-    const largest = new Map();
-    let shapes = "", labels = "", handles = "";
-    for (const q of [...r.rects.filter((x) => x !== sel), ...(sel ? [sel] : [])]) {
+    const order = [...r.rects.filter((x) => x !== sel), ...(sel ? [sel] : [])];
+    let shapes = "", handles = "";
+    for (const q of order) {
       const b = box(q), name = names.get(q.area) ?? q.area;
       const tip = `${name}, ${size(q)}, ${metres(q.x)} m from the left and ${metres(q.y)} m from the top. Drag it or move it with the arrow keys; Delete takes it away.`;
       shapes += `<g class="room${q === sel ? " sel" : ""}" data-id="${q.id}" style="--hue:${hue(q.area)}" tabindex="0" role="button" aria-label="${esc(tip)}"><rect x="${n1(b.x)}" y="${n1(b.y)}" width="${n1(b.w)}" height="${n1(b.h)}"/></g>`;
-      const big = largest.get(q.area);
-      if (!big || q.w * q.h > big.q.w * big.q.h) largest.set(q.area, { q, b });
     }
-    for (const [area, { b }] of largest) {
-      const fit = Math.floor((b.w - 10) / 5.6); // characters of 11 px italic
-      if (fit >= 3 && b.h >= 18) labels += `<text class="room-name" x="${n1(b.x + 5)}" y="${n1(b.y + 14)}">${esc(short(names.get(area) ?? area, fit))}</text>`;
-    }
+    const labels = this._roomLabels(f, frame, order);
     if (sel && this._drag?.mode !== "draw") {
       const b = box(sel);
       handles = [["nw", b.x, b.y], ["ne", b.x + b.w, b.y], ["sw", b.x, b.y + b.h], ["se", b.x + b.w, b.y + b.h]]
@@ -1341,7 +1384,7 @@ class WispPanel extends HTMLElement {
     const rooms = f.rooms?.length ? `, ${plural(f.rooms.length, "room", "rooms")} drawn` : "";
     const meta = plan
       ? `${kind}${metres(plan.width)} by ${metres(plan.height)} m, ${f.nodes.length ? `${placed} of ${plural(f.nodes.length, "node", "nodes")} placed` : "no nodes on this floor yet"}${rooms}`
-      : "none yet: draw it, or use an image";
+      : "none yet";
     const placing = this._placing?.floor === key, drawing = this._roomEdit?.floor === key;
     const acts = plan
       ? `<button data-act="place"${attr("floor", key)}${placing || form || removing || !f.nodes.length ? " disabled" : ""}>Place nodes</button>
@@ -1424,27 +1467,18 @@ class WispPanel extends HTMLElement {
     } else if (!f.areas.length && !f.other_areas.length) {
       rows.push(["hint", `<p class="hint">No rooms on this floor yet. Give each node the area it stands in, under Nodes.</p>`]);
     } else if (!f.areas.some((a) => a.samples >= d.min_samples)) {
-      rows.push(["hint", `<p class="hint">Teach Wisp each room: stand in it, tap Calibrate, and walk around (or sit still) until the countdown ends. A room counts from ${d.min_samples} samples.</p>`]);
+      rows.push(["hint", `<p class="hint">Calibrate each room: stand in it, tap Calibrate and keep at it until the countdown ends. A room counts from ${d.min_samples} samples.</p>`]);
     }
     for (const a of f.areas) rows.push([`area:${a.area}`, this._area(f, a, d)]);
     if (f.other_areas.length && f.nodes.length) rows.push(["other", this._other(f, d)]);
     if (f.nodes.length) rows.push(["empty", this._empty(f)]);
     rows.push(["plan", this._planRow(f)]);
-    if (f.nodes.length && this._channelShown(f, d)) rows.push(["channel", this._channelRow(f, d)]);
+    if (f.nodes.length) rows.push(["channel", this._channelRow(f, d)]);
     return rows.map(([k, html]) => [`${key}:${k}`, html]);
   }
 
-  /* The WiFi channel setting only where it helps: several floors, several access points, or a
-     channel already chosen. One router, or a router with extenders on one floor, needs no choice. */
-  _channelShown(f, d) {
-    const aps = new Set(d.nodes.map((n) => n.wifi?.ap).filter(Boolean));
-    const levels = d.floors.filter((x) => x.nodes.length).length;
-    const chosen = d.nodes.some((n) => f.nodes.includes(n.mac) && n.wifi?.fixed);
-    return levels > 1 || aps.size > 1 || chosen || this._channelChoice?.floor === (f.floor ?? "");
-  }
-
   /* The WiFi channel the floor's nodes form their grid on, one setting for all of them, and the
-     channels they are on now. */
+     channels they are on now. On every floor with nodes, a flat with one router too. */
   _channelRow(f, d) {
     const key = f.floor ?? "";
     let choice = this._channelChoice?.floor === key ? this._channelChoice : null;
@@ -1466,7 +1500,7 @@ class WispPanel extends HTMLElement {
         <label class="what" for="${id}"><b>WiFi channel</b>${meta ? `<small>${esc(meta)}</small>` : ""}</label>
         <select id="${id}" data-act="channel"${attr("floor", key)}${choice?.busy ? " disabled" : ""}>${placeholder}${options}</select>
       </div>
-      <p class="about">The nodes form their grid on this channel. Automatic follows the strongest access point; when nodes pick up another floor's access point, choose the channel of this floor's.</p>
+      <p class="about">Automatic follows the strongest access point${oneLevel(f, d.floors) ? "." : "; when floors share one network, pick this floor's access point channel."}</p>
       ${failures}
     </div>`;
   }
@@ -1474,19 +1508,17 @@ class WispPanel extends HTMLElement {
   _area(f, a, d) {
     const key = f.floor ?? "";
     const recording = f.run?.area === a.area;
-    const meta = [];
-    if (a.nodes) meta.push(plural(a.nodes, "node", "nodes"));
     // Walking samples, then still ones: "40 walking, 12 of 20 still samples", or one kind alone
     const min = d.min_samples, still = a.still_samples || 0;
     const count = (n) => (n < min ? `${n} of ${min}` : `${n}`);
     const kinds = [a.samples ? `${count(a.samples)} walking` : "", still ? `${count(still)} still` : ""].filter(Boolean);
     const one = kinds.length === 1 && (a.samples || still) === 1 && min <= 1 ? "sample" : "samples";
-    meta.push(kinds.length ? `${kinds.join(", ")} ${one}` : "not calibrated");
+    const meta = kinds.length ? `${kinds.join(", ")} ${one}` : "not calibrated";
     const chip = recording ? `<span class="chip rec">recording</span>` : `<span class="state" hidden></span>`; // filled after each update
     const asking = this._isOpen("room", key, a.area) ? this._askRoom(f, a.area, a.name) : this._isOpen("clear", key, a.area) ? this._askClear(key, a) : "";
     return `<div class="row">
       <div class="line">
-        <div class="what"><b>${esc(a.name)}</b><small>${esc(meta.join(", "))}</small></div>
+        <div class="what"><b>${esc(a.name)}</b><small>${esc(meta)}</small></div>
         ${chip}
         <div class="acts">
           <button data-act="ask-room"${attr("floor", key)}${attr("area", a.area)}${asking || recording || !f.nodes.length ? " disabled" : ""}>Calibrate</button>
@@ -1515,12 +1547,13 @@ class WispPanel extends HTMLElement {
     const key = f.floor ?? "";
     const asking = this._isOpen("empty", key);
     const run = f.run && !f.run.area ? f.run : null;
-    const meta = f.empty_samples ? plural(f.empty_samples, "sample", "samples") : "needed to find someone keeping still; also helps against fans and access points that change power";
+    const meta = f.empty_samples ? plural(f.empty_samples, "sample", "samples") : "needed to find someone keeping still";
+    const name = emptyName(f, this._data.floors);
     return `<div class="row">
       <div class="line">
-        <div class="what"><b>Empty ${emptyName(f, this._data.floors)}</b><small>${esc(meta)}</small></div>
+        <div class="what"><b>Empty ${name}</b><small>${esc(meta)}</small></div>
         ${run ? `<span class="chip rec">${run.starts_in ? "starting" : "recording"}</span>` : ""}
-        <div class="acts"><button data-act="ask-empty"${attr("floor", key)}${asking || run ? " disabled" : ""}>Calibrate empty ${emptyName(f, this._data.floors)}</button></div>
+        <div class="acts"><button data-act="ask-empty"${attr("floor", key)} aria-label="Calibrate the empty ${name}"${asking || run ? " disabled" : ""}>Calibrate</button></div>
       </div>
       ${asking ? this._askEmpty(f) : ""}
     </div>`;
@@ -1589,7 +1622,7 @@ class WispPanel extends HTMLElement {
     }).join("");
     return `<section class="sheet" aria-labelledby="wisp-elsewhere">
       <div class="head"><h2 id="wisp-elsewhere">Other calibrations</h2></div>
-      <p class="hint">Rooms calibrated on a floor without Wisp nodes now, or no longer in Home Assistant.</p>
+      <p class="hint">Rooms on a floor without Wisp nodes now, or gone from Home Assistant.</p>
       ${rows}
     </section>`;
   }
@@ -1602,30 +1635,35 @@ class WispPanel extends HTMLElement {
     </div></div>`;
   }
 
+  /* A node: its dot says online, one line under its name what is wrong (offline, not placed),
+     where it is and its WiFi; its area beside it. */
   _node(n, d) {
     const floor = n.added ? d.floors.find((f) => f.floor === n.floor) : null;
-    const where = [floor && !oneLevel(floor, d.floors) ? floorLabel(floor, d.floors) : null, n.host].filter(Boolean).join(", ");
     const onPlan = floor?.plan ? !!floor.positions?.[n.mac]?.placed : null;
-    const chips = [
-      `<span class="chip${n.online ? " up" : ""}">${n.online ? "online" : "offline"}</span>`,
-      `<span class="chip">${n.placed ? "on the layout" : "not placed yet"}</span>`,
-      onPlan == null ? "" : `<span class="chip${onPlan ? "" : " todo"}">${onPlan ? "placed on the plan" : "not placed on the plan"}</span>`,
-      n.added ? "" : `<span class="chip">not added to Wisp</span>`,
-    ].join("");
-    return `<div class="row">
-      <div class="line">
-        <span class="dot${n.online ? " up" : ""}" aria-hidden="true"></span>
-        <div class="what"><b>${esc(n.name)}<span class="state mini" hidden></span></b>${where ? `<small>${esc(where)}</small>` : ""}<small class="wifi" hidden></small><span class="chips">${chips}</span></div>
-        ${n.device_id ? `<div class="acts"><button data-act="device"${attr("device", n.device_id)} aria-label="Open the ESPHome device of ${esc(n.name)}">ESPHome</button></div>` : ""}
-      </div>
+    const flags = [
+      n.added ? "" : "not added to Wisp",
+      n.online ? "" : "offline",
+      n.online && !n.placed ? "not on the layout yet" : "",
+      onPlan === false ? "not on the plan" : "",
+    ].filter(Boolean).map((t) => `<span class="flag">${t}</span>`);
+    const where = [floor && !oneLevel(floor, d.floors) ? floorLabel(floor, d.floors) : null, n.host].filter(Boolean).map((t) => `<span>${esc(t)}</span>`);
+    const status = n.online ? "Online" : "Offline";
+    return `<div class="row node">
+      <span class="dot${n.online ? " up" : ""}" role="img" aria-label="${status}" title="${status}"></span>
+      <b class="name">${esc(n.name)}</b>
       ${n.added ? this._nodeArea(n, d) : ""}
+      ${n.device_id ? `<button class="device" data-act="device"${attr("device", n.device_id)} aria-label="Open the ESPHome device of ${esc(n.name)}">ESPHome</button>` : ""}
+      <small class="meta">${[...flags, ...where].join("&nbsp;· ")}<span class="wifi" hidden></span></small>
+      ${this._areaFailure?.mac === n.mac ? `<p class="fail" role="alert">${esc(this._areaFailure.message)}</p>` : ""}
     </div>`;
   }
 
-  /* The node's grid channel, the access point it hears and how strongly: "Channel 11 · AP 6d:70 · -52 dBm". */
+  /* The node's grid channel, the access point it hears and how strongly: "Channel 11 · AP 6d:70 · -52 dBm",
+     each part kept on one line. */
   _wifi(n) {
     const w = n.wifi ?? {};
-    return [w.channel != null ? `Channel ${w.channel}` : "", w.ap ? apLabel(w.ap) : "", w.rssi != null ? `${w.rssi} dBm` : ""].filter(Boolean).join(" · ");
+    const parts = [w.channel != null ? `Channel ${w.channel}` : "", w.ap ? apLabel(w.ap) : "", w.rssi != null ? `${w.rssi} dBm` : ""];
+    return parts.filter(Boolean).map((t) => t.replace(/ /g, "\u00a0")).join("\u00a0· ");
   }
 
   /* The area the node stands in: Home Assistant's areas by floor. Setting it moves the node to
@@ -1642,37 +1680,53 @@ class WispPanel extends HTMLElement {
     }
     const options = [...groups].map(([floor, list]) => `<optgroup label="${esc(floor)}">${list.map((a) => `<option value="${esc(a.area)}"${a.area === current ? " selected" : ""}>${esc(a.name)}</option>`).join("")}</optgroup>`).join("");
     const id = `wisp-area-${n.mac.replace(/:/g, "")}`;
-    const failed = this._areaFailure?.mac === n.mac ? `<p class="fail" role="alert">${esc(this._areaFailure.message)}</p>` : "";
-    return `<div class="node-area"><label for="${id}">Area</label><select id="${id}" data-act="node-area"${attr("mac", n.mac)}${choice?.busy ? " disabled" : ""}><option value=""${current ? "" : " selected"}>No area</option>${options}</select></div>${failed}`;
+    return `<div class="node-area"><label for="${id}">Area</label><select id="${id}" data-act="node-area"${attr("mac", n.mac)}${choice?.busy ? " disabled" : ""}><option value=""${current ? "" : " selected"}>No area</option>${options}</select></div>`;
   }
 
+  /* One line: its status is in the head already. */
   _hive(d) {
     const h = d.hive;
     if (!h) return `<p class="hint">No hive report yet. Nodes send one every 5 s once they see each other.</p>`;
-    return `<dl>
-      <div><dt>Hash</dt><dd><code>${esc(h.hash)}</code></dd></div>
-      <div><dt>Status</dt><dd>${h.in_sync ? "in sync" : "syncing"}</dd></div>
-      <div><dt>Nodes</dt><dd>${h.nodes}</dd></div>
-      <div><dt>Heard</dt><dd class="age">${this._age()}</dd></div>
-    </dl>`;
+    return `<p class="hive-line">${plural(h.nodes, "node", "nodes")} · hash <code>${esc(h.hash)}</code> · heard <span class="age">${this._age()}</span></p>`;
   }
 }
 
 const STYLE = `
   :host { display: block; height: 100%; }
   .page {
+    /* The map's parchment: under the map, its buttons and a plan's drawing */
     --wisp-paper-1: #f6e9c4; --wisp-paper-2: #ead39c; --wisp-paper-3: #c9a464;
     --wisp-ink: #4b2e16; --wisp-hot: #a3301f; --wisp-mark: #f3e3b7; --wisp-on-hot: #fff6e4;
     --wisp-burn: rgba(122, 77, 31, .32); --wisp-edge: rgba(107, 67, 32, .38);
     --wisp-serif: "Iowan Old Style", "Palatino Linotype", Palatino, "Book Antiqua", Georgia, serif;
-    display: flex; flex-direction: column; height: 100%; color-scheme: light;
-    background: var(--primary-background-color); color: var(--primary-text-color);
+    /* The other cards follow the Home Assistant theme, light or dark */
+    --wisp-card: var(--ha-card-background, var(--card-background-color, #fff));
+    --wisp-text: var(--primary-text-color, #212121);
+    --wisp-muted: var(--secondary-text-color, #727272);
+    --wisp-line: var(--divider-color, rgba(0, 0, 0, .12));
+    --wisp-primary: var(--primary-color, #03a9f4);
+    --wisp-on-primary: var(--text-primary-color, #fff);
+    --wisp-accent: color-mix(in srgb, var(--wisp-primary) 65%, var(--wisp-text)); /* the theme's colour, readable as words */
+    --wisp-ok: var(--success-color, #43a047);
+    --wisp-warn: color-mix(in srgb, var(--warning-color, #ffa600) 55%, var(--wisp-text));
+    --wisp-bad: var(--error-color, #db4437);
+    --wisp-bad-text: color-mix(in srgb, var(--wisp-bad) 80%, var(--wisp-text));
+    --wisp-font: var(--ha-font-family-body, Roboto, "Noto Sans", sans-serif);
+    --wisp-btn-bg: transparent; --wisp-btn-line: color-mix(in srgb, var(--wisp-accent) 40%, transparent);
+    display: flex; flex-direction: column; height: 100%; color-scheme: light; font-family: var(--wisp-font);
+    background: var(--primary-background-color); color: var(--wisp-text);
   }
   .page.dark {
     --wisp-paper-1: #43362a; --wisp-paper-2: #33291e; --wisp-paper-3: #211a13;
     --wisp-ink: #ead6ab; --wisp-hot: #f0905e; --wisp-mark: #3b2f22; --wisp-on-hot: #2a1d12;
     --wisp-burn: rgba(0, 0, 0, .5); --wisp-edge: rgba(234, 214, 171, .2);
     color-scheme: dark; /* checkboxes and the lists of the selects in the dark too */
+  }
+  /* The map's own buttons, in its ink on its parchment */
+  .paper {
+    --wisp-text: var(--wisp-ink); --wisp-accent: var(--wisp-ink); --wisp-primary: var(--wisp-ink); --wisp-on-primary: var(--wisp-paper-1);
+    --wisp-btn-bg: color-mix(in srgb, var(--wisp-mark) 80%, transparent); --wisp-btn-line: color-mix(in srgb, var(--wisp-ink) 55%, transparent);
+    color: var(--wisp-ink); font-family: var(--wisp-serif);
   }
   .toolbar {
     display: flex; align-items: center; flex: none; box-sizing: border-box; height: var(--header-height, 56px); padding: 0 12px;
@@ -1691,39 +1745,44 @@ const STYLE = `
     display: grid; gap: 16px; box-sizing: border-box; max-width: 1200px; margin: 0 auto; padding: 16px;
     grid-template-columns: minmax(0, 1fr); grid-template-areas: "map" "rooms" "nodes" "hive";
   }
+  .wide-act { display: none; } /* one column: the map is full width already */
   @container (min-width: 760px) {
     main { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); grid-template-areas: "map rooms" "nodes rooms" "hive rooms";
            grid-template-rows: auto auto 1fr; align-items: start; }
+    /* Full width: the map over both columns, no taller than the window, centred; the cards under it */
+    main.wide { grid-template-areas: "map map" "nodes rooms" "hive rooms"; }
+    main.wide .map-col { --wisp-map-max-height: max(300px, 100vh - 250px); }
+    main.wide .plan-box { box-sizing: border-box; width: min(100% - 32px, var(--wisp-map-max-height) * var(--wisp-ratio, 1)); margin-inline: auto; }
+    .wide-act { display: inline-block; }
   }
   .map-col { grid-area: map; }
   .rooms-col { grid-area: rooms; display: grid; gap: 16px; }
   .nodes-col { grid-area: nodes; }
   .hive-col { grid-area: hive; }
-  .map-tools { display: flex; justify-content: flex-end; gap: 8px; margin-top: 8px; color: var(--wisp-ink); font-family: var(--wisp-serif); }
-  .map-tools button { min-height: 34px; font-size: .875rem; }
-  .map-tools button[aria-pressed="true"] { background: var(--wisp-ink); color: var(--wisp-paper-1); }
-  .tabs { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 8px; color: var(--wisp-ink); font-family: var(--wisp-serif); }
-  .tabs button { min-height: 34px; font-size: .875rem; }
-  .tabs button[aria-pressed="true"] { background: var(--wisp-ink); color: var(--wisp-paper-1); }
+  .map-tools { display: flex; justify-content: flex-end; flex-wrap: wrap; gap: 8px; margin-top: 8px; }
+  .tabs { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 8px; }
+  .tabs button, .map-tools button { min-height: 34px; padding-inline: 12px; font-size: .875rem; font-weight: 400; }
 
-  .plan-box { position: relative; margin: 4px 14px 0; border: 1.5px solid color-mix(in srgb, var(--wisp-ink) 55%, transparent); }
-  /* The plan inked onto the parchment, as on the map */
+  /* A plan's drawing on parchment, as on the map */
+  .plan-box { position: relative; margin: 4px 16px 0; overflow: hidden; color: var(--wisp-ink);
+              border: 1px solid color-mix(in srgb, var(--wisp-ink) 45%, transparent); border-radius: 6px;
+              background: radial-gradient(ellipse at 50% 40%, var(--wisp-paper-1) 0%, var(--wisp-paper-2) 80%, var(--wisp-paper-3) 160%);
+              box-shadow: inset 0 0 28px var(--wisp-burn); }
   .plan-img { position: absolute; display: block; object-fit: fill; pointer-events: none; mix-blend-mode: multiply; opacity: .9; }
   .page.dark .plan-img { filter: invert(1) hue-rotate(180deg); mix-blend-mode: screen; opacity: .7; }
   .plan-draw { position: relative; }
   .plan-draw svg { display: block; width: 100%; height: auto; user-select: none; -webkit-user-select: none; -webkit-touch-callout: none; }
   .plan-draw .edge { fill: none; stroke: var(--wisp-ink); stroke-width: 1; opacity: .35; }
   .plan-draw .grid { fill: none; stroke: var(--wisp-ink); stroke-width: .6; opacity: .16; }
-  .upload-line { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin: 8px 0; }
+  .upload-line { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin: 4px 0; }
   .plan-form .image-only[hidden] { display: none; }
   .plan-form .modes { margin-bottom: 4px; }
-  .upload-line small { opacity: .7; }
-  .node-area { display: flex; align-items: center; gap: 8px; margin: 6px 0 2px 25px; } /* under the name: dot and gap */
-  .node-area label { font-size: .85em; opacity: .8; }
-  .node-area select { flex: 1; min-width: 0; max-width: 280px; }
-  .node-area + .fail { margin: 6px 0 0 25px; font-size: .9rem; font-style: italic; line-height: 1.45; color: var(--wisp-hot); }
-  .channel .about { margin: 6px 0 0; font-size: .85rem; font-style: italic; line-height: 1.45; opacity: .8; }
-  .channel .fail { margin: 6px 0 0; font-size: .9rem; font-style: italic; line-height: 1.45; color: var(--wisp-hot); }
+  .upload-line small { font-size: .8125rem; color: var(--wisp-muted); }
+  .node-area { display: flex; align-items: center; gap: 6px; min-width: 0; }
+  .node-area label { font-size: .8125rem; color: var(--wisp-muted); }
+  .node-area select { width: 11rem; }
+  .fail { margin: 6px 0 0; font-size: .8125rem; line-height: 1.45; color: var(--wisp-bad-text); }
+  .channel .about { margin: 2px 0 0; font-size: .8125rem; line-height: 1.4; color: var(--wisp-muted); }
   .plan-draw text { font-family: var(--wisp-serif); fill: var(--wisp-ink); text-anchor: middle;
                     paint-order: stroke; stroke: var(--wisp-paper-1); stroke-width: 3.5px; stroke-linejoin: round; }
   .plan-draw .tray { font-size: 11px; font-style: italic; opacity: .8; }
@@ -1737,12 +1796,12 @@ const STYLE = `
   .item text { font-size: 12px; font-weight: 600; }
   .item:not(.placed) text { font-weight: 400; font-style: italic; }
   .item.sel .hit, .item:focus-visible .hit { fill: color-mix(in srgb, var(--wisp-hot) 16%, transparent); stroke: var(--wisp-hot); stroke-width: 1.5; }
-  .placer-info { display: grid; gap: 8px; padding: 12px 18px 14px; }
-  .placer-info p { margin: 0; line-height: 1.45; }
-  .placer-info .say { font-size: .9rem; font-style: italic; opacity: .85; }
-  .placer-info .fail { color: var(--wisp-hot); font-style: italic; }
-  .unplaced b { color: var(--wisp-hot); }
-  .unplaced.done { font-style: italic; }
+  .placer-info { display: grid; gap: 8px; padding: 10px 16px 12px; }
+  .placer-info p { margin: 0; font-size: .875rem; line-height: 1.45; }
+  .placer-info .say { font-size: .8125rem; color: var(--wisp-muted); }
+  .placer-info .fail, .ask .fail { margin: 0; }
+  .unplaced b { font-weight: 500; color: var(--wisp-warn); }
+  .unplaced.done { color: var(--wisp-muted); }
   .sel-line { display: flex; align-items: center; flex-wrap: wrap; gap: 4px 12px; }
   .sel-line p { flex: 1 1 12rem; }
   .sel-buttons { display: flex; flex-wrap: wrap; gap: 4px 12px; }
@@ -1755,157 +1814,170 @@ const STYLE = `
   .page.dark .room rect { fill: hsl(var(--hue) 50% 62% / .18); stroke: hsl(var(--hue) 55% 74% / .8); }
   .page.dark .room.sel rect { fill: hsl(var(--hue) 50% 62% / .3); stroke: hsl(var(--hue) 60% 80%); }
   .page .room:focus-visible:not(.sel) rect { stroke: var(--wisp-hot); stroke-width: 2.2; } /* the selected one shows already */
+  /* Placing nodes: the rooms drawn, lighter, only to see */
+  .room-ref { pointer-events: none; }
+  .room-ref rect { fill: hsl(var(--hue) 45% 52% / .13); stroke: hsl(var(--hue) 40% 32% / .5); stroke-width: 1.2; }
+  .page.dark .room-ref rect { fill: hsl(var(--hue) 50% 62% / .13); stroke: hsl(var(--hue) 55% 74% / .5); }
   .plan-draw .room-name { font-size: 11px; font-style: italic; text-anchor: start; pointer-events: none; }
+  .plan-draw .room-ref .room-name { opacity: .75; }
   .handle .hit { fill: transparent; }
   .handle .knob { fill: var(--wisp-paper-1); stroke: var(--wisp-ink); stroke-width: 1.5; }
   .handle[data-corner=nw], .handle[data-corner=se] { cursor: nwse-resize; }
   .handle[data-corner=ne], .handle[data-corner=sw] { cursor: nesw-resize; }
   .room-picks { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
-  .picks-label { font-size: .9rem; font-style: italic; opacity: .85; margin-right: 2px; }
-  .room-picks button { display: inline-flex; align-items: center; gap: 7px; min-height: 34px; padding: 4px 12px 4px 9px; font-size: .9rem; }
-  .room-picks button[aria-pressed="true"] { background: var(--wisp-ink); color: var(--wisp-paper-1); }
+  .picks-label { font-size: .8125rem; color: var(--wisp-muted); margin-right: 2px; }
+  .room-picks button { display: inline-flex; align-items: center; gap: 7px; min-height: 32px; padding: 2px 12px 2px 9px; }
   .room-picks i { flex: none; box-sizing: border-box; width: 12px; height: 12px; border-radius: 3px;
                   background: hsl(var(--hue) 55% 55% / .55); border: 1.5px solid hsl(var(--hue) 45% 30%); }
   .page.dark .room-picks i { background: hsl(var(--hue) 50% 62% / .55); border-color: hsl(var(--hue) 55% 74%); }
-  .page .room-picks [aria-pressed="true"] i { border-color: var(--wisp-paper-1); }
+  .page .room-picks [aria-pressed="true"] i { border-color: var(--wisp-on-primary); }
   .page .room-picks i.none { background: transparent; border-style: dashed; }
 
   .ask .field { display: grid; gap: 4px; flex: 1 1 8rem; }
-  .field span { font-size: .85rem; font-style: italic; opacity: .85; }
+  .field span { font-size: .8125rem; color: var(--wisp-muted); }
   .fields { display: flex; flex-wrap: wrap; gap: 8px 12px; }
   input[type=text], input[type=number] {
-    font: inherit; font-size: 16px; color: var(--wisp-ink); box-sizing: border-box; width: 100%; min-height: 40px; padding: 6px 10px;
-    border-radius: 8px; border: 1.5px solid color-mix(in srgb, var(--wisp-ink) 55%, transparent);
-    background: color-mix(in srgb, var(--wisp-paper-1) 85%, transparent);
+    font: inherit; font-size: 16px; color: var(--wisp-text); box-sizing: border-box; width: 100%; min-height: 38px; padding: 6px 10px;
+    border-radius: 8px; border: 1px solid color-mix(in srgb, var(--wisp-text) 30%, transparent); background: var(--wisp-card);
   }
   input:disabled { opacity: .6; }
-  input:focus-visible { outline: 2px solid var(--wisp-hot); outline-offset: 2px; }
+  input:focus-visible { outline: 2px solid var(--wisp-primary); outline-offset: 1px; }
   .ask .check { justify-self: start; }
   .ask .check:has(:disabled) { opacity: .6; }
   .check input:disabled { opacity: 1; }
-  .check input { width: 18px; height: 18px; margin: 0; accent-color: var(--wisp-ink); }
-  .plan-status { font-size: .9rem; font-style: italic; }
+  .check input { width: 18px; height: 18px; margin: 0; accent-color: var(--wisp-primary); }
+  .plan-status { font-size: .8125rem; color: var(--wisp-muted); }
   .plan-status:empty { display: none; }
-  .plan-status.bad { color: var(--wisp-hot); }
-  .preview { justify-self: start; max-width: 100%; max-height: 120px; border: 1px solid var(--wisp-edge); border-radius: 4px; background: #fff; }
-  .chip.todo { border-style: dashed; }
+  .ask .plan-status.bad { color: var(--wisp-bad-text); }
+  .preview { justify-self: start; max-width: 100%; max-height: 120px; border: 1px solid var(--wisp-line); border-radius: 4px; background: #fff; }
 
   .sheet {
-    position: relative; overflow: hidden; color: var(--wisp-ink); font-family: var(--wisp-serif);
-    border: 1px solid var(--wisp-edge); border-radius: var(--ha-card-border-radius, 12px);
-    background: radial-gradient(ellipse at 50% 30%, var(--wisp-paper-1) 0%, var(--wisp-paper-2) 70%, var(--wisp-paper-3) 160%);
-    box-shadow: var(--ha-card-box-shadow, none), inset 0 0 42px var(--wisp-burn);
+    position: relative; overflow: hidden; color: var(--wisp-text); font-family: var(--wisp-font); background: var(--wisp-card);
+    border: var(--ha-card-border-width, 1px) solid var(--ha-card-border-color, var(--wisp-line));
+    border-radius: var(--ha-card-border-radius, 12px); box-shadow: var(--ha-card-box-shadow, none);
   }
-  .head { display: flex; align-items: baseline; justify-content: space-between; gap: 4px 12px; flex-wrap: wrap; padding: 14px 18px 8px; }
-  h2 { margin: 0; font: 600 1.4rem/1.2 var(--wisp-serif); letter-spacing: .03em; font-variant: small-caps; }
-  .note { font-style: italic; font-size: .875rem; opacity: .85; }
+  .head { display: flex; align-items: baseline; justify-content: space-between; gap: 2px 12px; flex-wrap: wrap; padding: 12px 16px 8px; }
+  h2 { margin: 0; font: 600 1.25rem/1.2 var(--wisp-serif); letter-spacing: .03em; font-variant: small-caps; color: var(--wisp-accent); }
+  .note { font-size: .8125rem; color: var(--wisp-muted); }
   .hive-note { display: inline-flex; align-items: center; gap: 6px; }
-  .hive-note::before { content: ""; width: 7px; height: 7px; border-radius: 50%; border: 1.5px solid currentColor; }
+  .hive-note::before { content: ""; box-sizing: border-box; width: 8px; height: 8px; border-radius: 50%; border: 1.5px solid currentColor; }
   .hive-note:empty::before { display: none; }
-  .hive-note.sync::before { background: currentColor; }
+  .hive-note.sync::before { background: var(--wisp-ok); border-color: var(--wisp-ok); }
   .hive-note.wait::before { animation: wisp-blink 1.6s ease-in-out infinite; }
-  .hint { margin: 0; padding: 0 18px 12px; font-size: .9rem; font-style: italic; line-height: 1.45; opacity: .85; }
-  .row { padding: 10px 18px; border-top: 1px solid color-mix(in srgb, var(--wisp-ink) 14%, transparent); }
-  .line { display: flex; align-items: center; flex-wrap: wrap; gap: 8px 12px; }
-  .what { flex: 1 1 9rem; min-width: 0; display: grid; gap: 2px; }
-  .what b { font-size: 1.05rem; font-weight: 600; overflow-wrap: anywhere; }
-  .what small { font-size: .85rem; font-style: italic; opacity: .8; overflow-wrap: anywhere; }
-  .acts { display: flex; flex-wrap: wrap; gap: 8px; }
-  .chips { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 4px; }
-  .chip { font-size: .8rem; font-style: italic; line-height: 1.5; padding: 0 8px; border-radius: 999px; white-space: nowrap;
-          border: 1px solid color-mix(in srgb, var(--wisp-ink) 35%, transparent); }
-  .chip.on { background: var(--wisp-hot); border-color: var(--wisp-hot); color: var(--wisp-on-hot); font-style: normal; }
-  .state { display: inline-grid; place-items: center; width: 30px; height: 30px; border-radius: 50%; flex: none;
+  .hint { margin: 0; padding: 0 16px 10px; font-size: .8125rem; line-height: 1.45; color: var(--wisp-muted); }
+  .row { padding: 8px 16px; border-top: 1px solid var(--wisp-line); }
+  .line { display: flex; align-items: center; flex-wrap: wrap; gap: 6px 8px; }
+  .what { flex: 1 1 8rem; min-width: 0; display: grid; }
+  .what b { font-size: .975rem; font-weight: 500; line-height: 1.35; overflow-wrap: anywhere; }
+  .what small { font-size: .8125rem; line-height: 1.35; color: var(--wisp-muted); overflow-wrap: anywhere; }
+  .acts { display: flex; flex-wrap: wrap; gap: 6px; }
+  /* A node: name, area and ESPHome on a line, what is wrong, where and its WiFi under them; the area
+     goes under on a narrow card */
+  .nodes-col { container-type: inline-size; }
+  .nodes { display: grid; grid-template-columns: 26px minmax(0, 1fr) auto; column-gap: 10px; } /* 26px: a row's padding and its dot */
+  .node { grid-column: 1 / -1; display: grid; grid-template-columns: 10px minmax(0, 1fr) auto; grid-template-columns: subgrid; /* the rows' areas in line */
+          grid-template-areas: "dot name device" ". meta meta" ". area area"; align-items: center; row-gap: 2px; }
+  @container (min-width: 460px) {
+    .nodes { grid-template-columns: 26px minmax(0, 1fr) auto auto; }
+    .node { grid-template-columns: 10px minmax(0, 1fr) auto auto; grid-template-columns: subgrid; grid-template-areas: "dot name area device" ". meta meta meta"; }
+  }
+  .node .dot { grid-area: dot; }
+  .node .name { grid-area: name; font-size: .975rem; font-weight: 500; line-height: 1.35; overflow-wrap: anywhere; }
+  .node .node-area { grid-area: area; justify-self: start; }
+  .node .device { grid-area: device; }
+  .node .meta { grid-area: meta; font-size: .8125rem; line-height: 1.4; color: var(--wisp-muted); }
+  .node .meta > span:not(.wifi) { white-space: nowrap; }
+  .node .fail { grid-column: 2 / -1; }
+  .flag { color: var(--wisp-warn); }
+  .wifi:not(:first-child)::before { content: "\\a0· "; }
+  .chip { font-size: .75rem; line-height: 1.6; padding: 0 8px; border-radius: 999px; white-space: nowrap; color: var(--wisp-hot);
+          border: 1px solid color-mix(in srgb, var(--wisp-hot) 45%, transparent); }
+  .chip.rec::before { content: ""; display: inline-block; width: 7px; height: 7px; margin-right: 5px; border-radius: 50%;
+                      background: var(--wisp-hot); animation: wisp-blink 1.6s ease-in-out infinite; }
+  .state { display: inline-grid; place-items: center; box-sizing: border-box; width: 28px; height: 28px; border-radius: 50%; flex: none;
     border: 1.5px solid var(--wisp-hot); color: var(--wisp-hot); }
   .state[hidden] { display: none; }
   .state.hot { background: var(--wisp-hot); color: var(--wisp-on-hot); }
-  .state.mini { width: 22px; height: 22px; margin-left: 6px; vertical-align: -4px; }
-  .fig { width: 20px; height: 20px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+  .fig { width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
   .fig circle { fill: currentColor; stroke: none; }
-  .state.mini .fig { width: 15px; height: 15px; }
-  .chip.up { border-color: currentColor; font-style: normal; }
-  .chip.rec::before { content: ""; display: inline-block; width: 7px; height: 7px; margin-right: 5px; border-radius: 50%;
-                      background: var(--wisp-hot); animation: wisp-blink 1.6s ease-in-out infinite; }
-  .dot { flex: none; width: 10px; height: 10px; border-radius: 50%; border: 1.5px dashed var(--wisp-ink); opacity: .6; }
-  .dot.up { background: var(--wisp-ink); border-style: solid; opacity: 1; }
-  .foot { display: flex; align-items: center; flex-wrap: wrap; gap: 8px 12px; padding: 12px 18px 14px;
-          border-top: 1px solid color-mix(in srgb, var(--wisp-ink) 14%, transparent); }
-  .foot p { flex: 1 1 14rem; margin: 0; font-size: .875rem; font-style: italic; line-height: 1.45; opacity: .85; }
+  .dot { flex: none; box-sizing: border-box; width: 10px; height: 10px; border-radius: 50%; border: 1.5px dashed var(--wisp-muted); }
+  .dot.up { background: var(--wisp-ok); border: none; }
+  .foot { display: flex; align-items: center; flex-wrap: wrap; gap: 6px 12px; padding: 10px 16px 12px; border-top: 1px solid var(--wisp-line); }
+  .foot p { flex: 1 1 14rem; margin: 0; font-size: .8125rem; line-height: 1.45; color: var(--wisp-muted); }
+  .hive-line { margin: 0; padding: 0 16px 12px; font-size: .875rem; color: var(--wisp-muted); font-variant-numeric: tabular-nums; }
+  code { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: .85em; color: var(--wisp-text); }
 
   button, select {
-    font: inherit; font-size: .95rem; color: var(--wisp-ink); min-height: 40px; padding: 6px 14px; border-radius: 8px;
-    border: 1.5px solid color-mix(in srgb, var(--wisp-ink) 55%, transparent);
-    background: color-mix(in srgb, var(--wisp-mark) 80%, transparent);
+    font: inherit; font-size: .875rem; font-weight: 500; color: var(--wisp-accent); min-height: 36px; padding: 4px 14px; border-radius: 8px;
+    border: 1px solid var(--wisp-btn-line); background: var(--wisp-btn-bg);
     cursor: pointer; touch-action: manipulation; -webkit-tap-highlight-color: transparent;
   }
-  select { font-size: 16px; padding-inline: 10px; max-width: 100%; } /* 16px: no zoom on focus on a phone */
-  button.primary { background: var(--wisp-ink); border-color: var(--wisp-ink); color: var(--wisp-paper-1); font-weight: 600; }
-  button.danger { background: var(--wisp-hot); border-color: var(--wisp-hot); color: var(--wisp-on-hot); font-weight: 600; }
-  button.quiet { background: transparent; border-color: transparent; text-decoration: underline; text-underline-offset: 3px; padding-inline: 8px; }
+  select { font-size: 16px; font-weight: 400; color: var(--wisp-text); padding-inline: 8px; max-width: 100%; background: var(--wisp-card);
+           border-color: color-mix(in srgb, var(--wisp-text) 30%, transparent); } /* 16px: no zoom on focus on a phone */
+  @media (pointer: fine) { select { font-size: .875rem; } }
+  @media (pointer: coarse) { button, select { min-height: 40px; } }
+  button[aria-pressed="true"] { background: var(--wisp-primary); border-color: var(--wisp-primary); color: var(--wisp-on-primary); }
+  button.primary { background: var(--wisp-primary); border-color: var(--wisp-primary); color: var(--wisp-on-primary); }
+  button.danger { background: var(--wisp-bad); border-color: var(--wisp-bad); color: #fff; }
+  button.quiet { background: transparent; border-color: transparent; color: var(--wisp-muted); font-weight: 400;
+                 text-decoration: underline; text-underline-offset: 3px; padding-inline: 8px; }
   button:disabled { opacity: .45; cursor: default; }
-  button:focus-visible, select:focus-visible { outline: 2px solid var(--wisp-hot); outline-offset: 2px; }
+  button:focus-visible, select:focus-visible { outline: 2px solid var(--wisp-primary); outline-offset: 2px; }
   button:not(:disabled):active { transform: translateY(1px); }
   @media (hover: hover) {
-    button:not(:disabled):hover { background: color-mix(in srgb, var(--wisp-ink) 12%, var(--wisp-mark)); }
-    button.primary:not(:disabled):hover { background: color-mix(in srgb, var(--wisp-ink) 85%, var(--wisp-hot)); }
-    button.danger:not(:disabled):hover { background: color-mix(in srgb, var(--wisp-hot) 85%, var(--wisp-ink)); }
-    button.quiet:not(:disabled):hover { background: transparent; text-decoration-thickness: 2px; }
+    button:not(:disabled):hover { background: color-mix(in srgb, var(--wisp-accent) 10%, var(--wisp-btn-bg)); }
+    button.primary:not(:disabled):hover, button[aria-pressed="true"]:not(:disabled):hover { background: color-mix(in srgb, var(--wisp-primary) 85%, var(--wisp-text)); }
+    button.danger:not(:disabled):hover { background: color-mix(in srgb, var(--wisp-bad) 85%, var(--wisp-text)); }
+    button.quiet:not(:disabled):hover { background: transparent; color: var(--wisp-text); }
     .toolbar .menu:not(:disabled):hover { background: color-mix(in srgb, currentColor 12%, transparent); }
   }
 
-  .ask { display: grid; gap: 10px; margin-top: 10px; padding: 12px 14px; border-radius: 10px;
-         border: 1px dashed color-mix(in srgb, var(--wisp-ink) 45%, transparent); background: color-mix(in srgb, var(--wisp-mark) 60%, transparent); }
-  .ask.danger { border: 1.5px solid var(--wisp-hot); }
-  .ask p { margin: 0; line-height: 1.45; }
-  .ask .warn, .ask .fail { font-style: italic; }
-  .ask .fail { color: var(--wisp-hot); }
-  .ask label { display: inline-flex; align-items: center; gap: 8px; }
+  .ask { display: grid; gap: 10px; margin-top: 8px; padding: 10px 12px; border-radius: 10px;
+         border: 1px solid color-mix(in srgb, var(--wisp-primary) 30%, transparent); background: color-mix(in srgb, var(--wisp-primary) 6%, var(--wisp-card)); }
+  .ask.danger { border-color: color-mix(in srgb, var(--wisp-bad) 50%, transparent); background: color-mix(in srgb, var(--wisp-bad) 5%, var(--wisp-card)); }
+  .ask p { margin: 0; font-size: .875rem; line-height: 1.45; }
+  .ask .warn { color: var(--wisp-warn); }
+  .ask label { display: inline-flex; align-items: center; gap: 8px; font-size: .875rem; }
   /* A room's two ways to calibrate, side by side where they fit */
   .modes { display: flex; flex-wrap: wrap; gap: 8px; }
   .ask .mode { flex: 1 1 13rem; display: grid; grid-template-columns: auto minmax(0, 1fr); align-items: start; gap: 10px;
-               padding: 8px 12px; border-radius: 8px; cursor: pointer; border: 1.5px solid color-mix(in srgb, var(--wisp-ink) 25%, transparent); }
-  .ask .mode:has(:checked) { border-color: var(--wisp-ink); background: color-mix(in srgb, var(--wisp-paper-1) 70%, transparent); }
-  .mode input { width: 18px; height: 18px; margin: 2px 0 0; accent-color: var(--wisp-ink); }
-  .mode input:focus-visible { outline: 2px solid var(--wisp-hot); outline-offset: 2px; }
+               padding: 8px 12px; border-radius: 8px; cursor: pointer; border: 1px solid var(--wisp-line); background: var(--wisp-card); }
+  .ask .mode:has(:checked) { border-color: var(--wisp-primary); background: color-mix(in srgb, var(--wisp-primary) 8%, var(--wisp-card)); }
+  .mode input { width: 18px; height: 18px; margin: 1px 0 0; accent-color: var(--wisp-primary); }
+  .mode input:focus-visible { outline: 2px solid var(--wisp-primary); outline-offset: 2px; }
   .mode span { display: grid; gap: 2px; }
-  .mode small { font-size: .85rem; font-style: italic; line-height: 1.4; opacity: .85; }
+  .mode b { font-weight: 500; }
+  .mode small { font-size: .8125rem; line-height: 1.4; color: var(--wisp-muted); }
   .ask-line { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }
   .ask-buttons { display: flex; gap: 8px; margin-left: auto; }
-  .clear-all { display: grid; justify-items: end; color: var(--wisp-ink); font-family: var(--wisp-serif); }
+  .clear-all { display: grid; justify-items: end; }
   .clear-all .ask { justify-self: stretch; margin: 0; }
 
   .runs { position: sticky; top: 0; z-index: 2; display: grid; gap: 8px; padding: 12px 16px 4px; background: var(--primary-background-color); }
   .runs:empty { display: none; }
   .run {
     display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 8px 16px; box-sizing: border-box;
-    width: 100%; max-width: 1168px; margin: 0 auto; padding: 12px 16px; color: var(--wisp-ink); font-family: var(--wisp-serif);
-    border: 1px solid var(--wisp-edge); border-left: 4px solid var(--wisp-hot); border-radius: var(--ha-card-border-radius, 12px);
-    background: radial-gradient(ellipse at 50% 40%, var(--wisp-paper-1), var(--wisp-paper-2));
-    box-shadow: 0 2px 10px rgba(0, 0, 0, .15), inset 0 0 24px var(--wisp-burn);
+    width: 100%; max-width: 1168px; margin: 0 auto; padding: 10px 16px; color: var(--wisp-text); background: var(--wisp-card);
+    border: 1px solid var(--wisp-line); border-left: 4px solid var(--wisp-hot); border-radius: var(--ha-card-border-radius, 12px);
+    box-shadow: 0 2px 8px rgba(0, 0, 0, .12);
   }
-  .run.wait { border-left-color: var(--wisp-ink); }
+  .run.wait { border-left-color: var(--wisp-primary); }
   .run-text { display: grid; gap: 2px; }
   .run-side { display: flex; align-items: center; gap: 12px; }
-  .run-text b { font-size: 1.15rem; }
-  .run-text span { font-size: .9rem; font-style: italic; opacity: .85; }
-  .count { font: 600 2.2rem/1 var(--wisp-serif); font-variant-numeric: tabular-nums; color: var(--wisp-hot); }
-  .run.wait .count { color: var(--wisp-ink); }
-  .count small { margin-left: 2px; font-size: .9rem; font-weight: 400; }
-  .bar { grid-column: 1 / -1; height: 6px; border-radius: 3px; overflow: hidden; background: color-mix(in srgb, var(--wisp-ink) 15%, transparent); }
+  .run-text b { font-size: 1.05rem; font-weight: 500; }
+  .run-text span { font-size: .8125rem; color: var(--wisp-muted); }
+  .count { font-size: 2rem; font-weight: 500; line-height: 1; font-variant-numeric: tabular-nums; color: var(--wisp-hot); }
+  .run.wait .count { color: var(--wisp-accent); }
+  .count small { margin-left: 2px; font-size: .875rem; font-weight: 400; }
+  .bar { grid-column: 1 / -1; height: 4px; border-radius: 2px; overflow: hidden; background: var(--wisp-line); }
   .bar i { display: block; height: 100%; background: var(--wisp-hot); transition: width 1s linear; }
 
   .message { padding: 16px; max-width: 640px; margin: 0 auto; box-sizing: border-box; }
   .message:empty { display: none; }
   .empty { display: grid; justify-items: center; gap: 8px; padding: 28px 20px 30px; text-align: center; }
-  .empty .feet { width: 56px; height: 46px; fill: var(--wisp-ink); opacity: .55; }
-  .empty p { margin: 0; max-width: 40ch; font-size: .9rem; line-height: 1.45; opacity: .85; }
-  .empty .lead { font-size: 1.1rem; font-style: italic; opacity: 1; }
-
-  dl { display: grid; grid-template-columns: repeat(auto-fit, minmax(7rem, 1fr)); gap: 8px 16px; margin: 0; padding: 4px 18px 16px; }
-  dl div { display: grid; gap: 2px; }
-  dt { font-size: .8rem; font-style: italic; opacity: .75; }
-  dd { margin: 0; font-size: 1.05rem; font-variant-numeric: tabular-nums; }
-  code { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: .95rem; }
+  .empty .feet { width: 56px; height: 46px; fill: var(--wisp-accent); opacity: .7; }
+  .empty p { margin: 0; max-width: 40ch; font-size: .875rem; line-height: 1.45; color: var(--wisp-muted); }
+  .empty .lead { font-size: 1.1rem; color: var(--wisp-text); }
 
   @keyframes wisp-blink { 50% { opacity: .25; } }
   @media (prefers-reduced-motion: reduce) {
