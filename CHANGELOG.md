@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.1.11 (unreleased)
+## 0.1.12 (unreleased)
 Versions count up with each round of changes until the first release.
 
 First working version: the grid, the hive and motion per link, with the Home Assistant integration and the map card.
@@ -64,6 +64,8 @@ First working version: the grid, the hive and motion per link, with the Home Ass
 - Presence first on the map: with rooms calibrated, someone is shown only in a room with presence (the one someone walks in now, else the latest to win), the fit is searched for inside that room only, and footprints follow only while room presence says someone walks. Few links cross several rooms each, so the best fit on the whole floor often lay next door while room presence named the right room. Replayed on 5.5 minutes of the owner at the office desk: shown 32% of the time, in three rooms, with 14 jumps; now 99%, all in the office, no walking, no jumps.
 - Sitting and working counts as sitting: a still calibration keeps its seconds with small motion (typing, shifting in a chair), and when links flag motion that no room's walking explains, the still classification decides. A room's presence from walking needs two seconds in a row: one stray second lit a room for a minute.
 - Nobody changes room without walking: someone found keeping still is in the room they last walked in, and the still classification only says whether anyone is there (from the rooms' calibration only when nobody was seen walking, after a restart). Where someone sits shows in the signal only while their body shadows a link, and 30 cm make the difference: the owner, sat at the office desk off the links he shadowed while calibrating, was found still in the play room 77% of the time; now office presence 93%, no other room. On the map, someone still in a room with presence stays where they were last placed in it, or in its middle.
+- Someone sitting is held by activity, not by signal strength: after walking into a room people sit in (one with a still calibration), its presence holds while the floor shows two links moving together at least every 3 minutes (someone working, shifting in a chair). On the owner's floor signal strength drifted more with nobody there (11 dB on one link over an evening) than a seated person changes it, and the still classification found someone on the empty floor every second; the longest quiet gap while he sat was 136 s, the empty floor showed none for 218 s. A room nobody sits in (a hallway, no still calibration) keeps no one once the walk's hold ends. In a guided test (sit in the office, walk to the play room and sit, back, upstairs for 4 minutes, back): every room right, and nobody shown on the empty floor (before: the hallway held presence throughout).
+- A walk counts to its last room: once a walk lasts 2 s, each of its seconds counts for its room, so someone who sits down a second after stepping in is in that room (they were shown in the hallway). A room with presence but not drawn on the plan (often the hallway) is searched for in the space between the drawn rooms, the house being the whole plan, and marks stay 30 cm in from a room's walls.
 - Position sensors: on a floor with a plan, x and y of someone moving in the plan's metres (from its top left corner), with the fit's quality as an attribute; unknown while nobody moves.
 
 ### Tools

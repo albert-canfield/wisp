@@ -51,6 +51,7 @@ LinkKey = tuple[str, str]  # (transmitter, receiver)
 # The hive's y points up, as the map draws it, and a plan's down: when the placed nodes cannot
 # tell the mirror, the layout keeps the look it had on the map.
 PREFER_MIRROR = True
+INSET = 0.3  # m: a mark kept in a room stays this far in from its walls
 
 
 def inside(rects: Collection[Rect], x: float, y: float) -> Point:
@@ -169,7 +170,11 @@ class FloorModel:
             if not any(k in moving for k in usable):
                 return self._read(None, now, room, walking)
         values = {k: math.log(max(scores[k], 1.0)) for k in usable}
-        spot = self._locator.locate(values, self.min_disturbance, self.rooms.get(room or "") or None)
+        drawn = self.rooms.get(room or "")
+        # A room with presence but not drawn (often the hallway: the space between the drawn rooms)
+        # is searched for outside every drawn room
+        others = [r for rects in self.rooms.values() for r in rects] if room and not drawn else ()
+        spot = self._locator.locate(values, self.min_disturbance, drawn or None, others)
         raw: tuple[float, float, float] | None = None
         if spot is not None and spot.contrast >= self.min_quality:
             raw = (*self._keep_in(spot.x, spot.y, room), spot.contrast)
@@ -184,12 +189,14 @@ class FloorModel:
         return {k for k in moving if len(seen - {k}) >= 1}
 
     def _keep_in(self, x: float, y: float, room: str | None = None) -> Point:
-        """On a plan: inside it, and with rooms drawn inside the house (the sure room first)."""
+        """On a plan: inside it (the house: rooms not drawn, such as a hallway, are the space
+        between the drawn ones), and inside the room room presence names when it is drawn, a
+        little in from its walls so the mark shows in it rather than on its border."""
         if self._plan is None:
             return x, y
         x, y = min(max(x, 0.0), self._plan[0]), min(max(y, 0.0), self._plan[1])
-        house = [r for rects in self.rooms.values() for r in rects]
-        return inside(self.rooms.get(room or "") or house, x, y) if house else (x, y)
+        rects = self.rooms.get(room or "")
+        return inside([_inset(r) for r in rects], x, y) if rects else (x, y)
 
     def _read(
         self, raw: tuple[float, float, float] | None, now: float, room: str | None = None, walking: bool = True
@@ -239,6 +246,13 @@ class FloorModel:
             self.spots[room or ""] = (x, y)
         last = window[-1]
         return FloorFix(x, y, last[1], last[2], weight / len(window), walking=False)
+
+
+def _inset(rect: Rect, by: float = INSET) -> Rect:
+    """The rectangle shrunk by by on every side, to no less than its centre line."""
+    x, y, w, h = rect
+    dx, dy = min(by, w / 2), min(by, h / 2)
+    return (x + dx, y + dy, w - 2 * dx, h - 2 * dy)
 
 
 def _centre(fits: list[tuple[float, float, float, float]]) -> Point:

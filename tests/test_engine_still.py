@@ -9,6 +9,7 @@ from .test_engine_rooms import AP, FLOOR, N1, N2, N3, ROOMS, Floor, calibrated
 
 from engine import ClassModel, Rooms, features  # noqa: E402  (test_engine_rooms puts the integration on the path)
 from engine.rooms import (  # noqa: E402
+    ACTIVE_HOLD,
     CONFIDENCE,
     EMPTY,
     HOLD,
@@ -27,9 +28,11 @@ SITTING = 0.12  # a still person's scores: a little above quiet on the room's li
 
 
 def step(engine: Rooms, floor: Floor, now: float, room: str | None = None, walking: bool = False,
-         areas=ROOMS, **signal):
+         areas=ROOMS, active: bool = False, **signal):
+    """A second of the floor: someone walking in room, or sitting in it (active: working, two links
+    moving together now and then), or nobody (room None)."""
     scores = floor.scores(room, strength=1.0 if walking else SITTING)
-    return engine.step(FLOOR, list(areas), scores, now, signal=floor.signal(room, walking, **signal))
+    return engine.step(FLOOR, list(areas), scores, now, signal=floor.signal(room, walking, **signal), active=active or walking)
 
 
 def calibrate(floor: Floor, rooms=ROOMS, still=(), empty: bool = True, seconds: int = 60) -> Rooms:
@@ -55,7 +58,7 @@ def fresh(engine: Rooms, **kwargs) -> Rooms:
 
 @pytest.fixture(scope="module")
 def engine() -> Rooms:
-    return calibrate(Floor(seed=51))
+    return calibrate(Floor(seed=51), still=ROOMS)
 
 
 def test_signal_is_averaged_over_a_few_seconds():
@@ -89,40 +92,56 @@ def test_signal_variance_has_a_floor_and_kinds_are_summed():
     assert held[0] == pytest.approx(ClassModel(vectors[:3] + vectors[4:]).fit(vectors[3])[0])
 
 
-def test_someone_sitting_still_keeps_presence(engine: Rooms):
-    """Someone walks into the kitchen and sits down: the signal keeps the room on well past the hold."""
+def test_someone_sitting_and_working_keeps_presence(engine: Rooms):
+    """Someone walks into the kitchen and sits down to work: the room stays on well past the hold
+    while the floor shows activity now and then, the room they walked in, whatever the signal."""
     rooms, floor, now = fresh(engine), Floor(seed=53), 1000.0
     for _ in range(5):
         now += 1
         step(rooms, floor, now, "kitchen", walking=True)
     assert rooms.presence("kitchen", now) >= CONFIDENCE and not rooms.still_present("kitchen", now)
-    for _ in range(300):
+    for i in range(600):
         now += 1
-        step(rooms, floor, now, "kitchen")
+        step(rooms, floor, now, "kitchen", active=i % 120 == 0)  # a shift in the chair every 2 minutes
         assert rooms.presence("kitchen", now) is not None
-    assert rooms.decisions[FLOOR].room is None  # by motion, nobody moves
-    still = rooms.still_decisions[FLOOR]
-    assert (still.still, still.room) == (True, "kitchen") and still.confidence >= CONFIDENCE
-    assert set(still.probabilities) == {"kitchen", "office", "hall", None}
-    assert rooms.still_present("kitchen", now) and rooms.streaks[FLOOR] == ("kitchen", 300)
+    assert rooms.decisions[FLOOR].room is None  # by motion, nobody walks
+    assert rooms.still_present("kitchen", now) and rooms.walked[FLOOR] == "kitchen"
     assert rooms.presence("office", now) is None and rooms.presence("hall", now) is None
 
-    # Leaving: the signal comes back, the empty floor wins and the hold runs out as after motion
+    # No activity at all: after ACTIVE_HOLD the walk is forgotten, and the hold runs out
     on = []
-    for _ in range(int(HOLD) + 15):
+    for _ in range(int(ACTIVE_HOLD + HOLD) + 10):
         now += 1
-        step(rooms, floor, now, None)
+        step(rooms, floor, now, "kitchen")
         on.append(rooms.presence("kitchen", now) is not None)
-    assert all(on[: int(HOLD)]) and on.index(False) <= HOLD + SIGNAL_WINDOW and not any(on[on.index(False):])
-    assert rooms.still_decisions[FLOOR].room is None and FLOOR not in rooms.streaks
+    assert on.index(False) <= ACTIVE_HOLD + HOLD and not any(on[on.index(False):]) and FLOOR not in rooms.walked
+
+
+def test_a_room_nobody_sits_in_keeps_no_one(engine: Rooms):
+    """Walked into the hall and on, upstairs: activity from elsewhere keeps no presence there,
+    the hall having no still calibration. The walk's own hold runs out."""
+    rooms = fresh(engine)
+    rooms.still = {area: samples for area, samples in engine.still.items() if area != "hall"}
+    floor, now = Floor(seed=54), 1000.0
+    for _ in range(5):
+        now += 1
+        step(rooms, floor, now, "hall", walking=True)
+    on = []
+    for _ in range(int(HOLD) + 10):
+        now += 1
+        step(rooms, floor, now, None, active=True)  # people upstairs: links move together now and then
+        on.append(rooms.presence("hall", now) is not None)
+    assert on.index(False) <= HOLD + 1 and not any(on[on.index(False):])
+    assert not any(rooms.presence(area, now) for area in ROOMS)
 
 
 def test_still_presence_turns_on_after_seconds_in_a_row(engine: Rooms):
-    """Someone already sitting in the office when the hub starts: on after STILL_SECONDS, not before."""
+    """Someone already sitting and working in the office when the hub starts, no walk seen: the
+    still classification names the room after STILL_SECONDS, not before."""
     rooms, floor = fresh(engine), Floor(seed=57)
     first = None
     for t in range(1, 30):
-        step(rooms, floor, float(t), "office")
+        step(rooms, floor, float(t), "office", active=True)
         if first is None and rooms.presence("office", float(t)) is not None:
             first = t
     assert STILL_SECONDS <= first <= STILL_SECONDS + 3
@@ -131,10 +150,11 @@ def test_still_presence_turns_on_after_seconds_in_a_row(engine: Rooms):
 
 
 def test_each_room_is_told_by_its_own_drop(engine: Rooms):
+    """No walk seen (a restart): the still classification names the room, with activity."""
     for room in ROOMS:
         rooms, floor = fresh(engine), Floor(seed=59)
         for t in range(1, 61):
-            step(rooms, floor, float(t), room)
+            step(rooms, floor, float(t), room, active=True)
         assert {area for area in ROOMS if rooms.presence(area, 60.0) is not None} == {room}, room
 
 
@@ -204,7 +224,7 @@ def test_still_classes_decide_while_nobody_moves():
     for room in ROOMS:
         rooms, floor = fresh(engine), Floor(seed=89)
         for t in range(1, 41):
-            step(rooms, floor, float(t), room)
+            step(rooms, floor, float(t), room, active=True)
         assert {area for area in ROOMS if rooms.presence(area, 40.0) is not None} == {room}, room
     # Log scores without any signal: nothing to hold against the empty floor's
     assert decide_still(features(Floor(seed=97).scores("kitchen", strength=SITTING)), models) is None
@@ -235,10 +255,10 @@ def test_samples_from_before_signal_still_load_and_classify():
     while FLOOR in engine.runs:
         now += 1
         step(engine, floor, now, "office")
-    for _ in range(int(HOLD) + 30):
+    for i in range(int(HOLD) + 30):
         now += 1
-        step(engine, floor, now, "office")
-    assert engine.still_present("office", now)
+        step(engine, floor, now, "office", active=i % 30 == 0)
+    assert engine.still_present("office", now)  # sat down where the recording said, working
 
 
 def test_storage_keeps_signal_and_still_classes():

@@ -218,11 +218,16 @@ class Locator:
                 self._near.append(max(row, default=0.0) >= reach)
 
     def locate(
-        self, values: Mapping[LinkKey, float], min_disturbance: float = 0.3, within: Sequence[Rect] | None = None
+        self,
+        values: Mapping[LinkKey, float],
+        min_disturbance: float = 0.3,
+        within: Sequence[Rect] | None = None,
+        outside: Sequence[Rect] = (),
     ) -> Location | None:
         """values: disturbance per link (for example log(score)); missing links count as quiet.
         within: rectangles (x, y, width, height) the spot must lie in, for example the room room
-        presence puts someone in. Location.strength is the fitted scale, Location.contrast the
+        presence puts someone in; outside: rectangles it must not lie in (the drawn rooms, for a
+        room that is not drawn, such as a hallway left as the space between them). Location.strength is the fitted scale, Location.contrast the
         share of the observed pattern the fit explains (0 to 1)."""
         y = [max(0.0, values.get(k, 0.0)) for k in self.links]
         total = sum(y)
@@ -240,6 +245,8 @@ class Locator:
             if norm < 1e-9 or not self._near[i]:  # far from every link: only a huge scale would fit
                 continue
             if within is not None and not _in_rects(within, self.xs[i % nx], self.ys[i // nx]):
+                continue
+            if outside and _in_rects(outside, self.xs[i % nx], self.ys[i // nx]):
                 continue
             dot = sum(a * b for a, b in zip(row, y))
             if dot <= 0:

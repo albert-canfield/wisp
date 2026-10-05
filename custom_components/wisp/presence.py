@@ -10,6 +10,7 @@ floor named after the hub. A link belongs to the floor of the node that receives
 """
 from __future__ import annotations
 
+from collections import deque
 from collections.abc import Callable
 from dataclasses import dataclass, field
 import logging
@@ -44,6 +45,7 @@ _LOGGER = logging.getLogger(__name__)
 NONE = "none"  # the room while nobody moves, and the empty class among the probabilities
 EMPTY = "empty"  # the empty class in calibration
 STILL = "still"  # a room's still class in calibration, after its name
+ACTIVE_WITHIN = 2.0  # s: two links moving within this are activity (someone working, shifting in a chair)
 
 
 def store_key(entry_id: str) -> str:
@@ -77,6 +79,7 @@ class RoomPresence:
         self._separating: set[str] = set()  # floors being checked
         self.models: dict[str, FloorModel] = {}  # position per floor, on the hive's layout or the plan
         self.fixes: dict[str, FloorFix] = {}
+        self._flags: dict[str, deque[tuple[float, frozenset]]] = {}  # by floor: links moving, the last seconds
         self.plans = FloorPlans(self.hass, self.entry.entry_id)
         self._listeners: list[Callable[[], None]] = []
         self._entity_listeners: list[Callable[[], None]] = []
@@ -238,7 +241,8 @@ class RoomPresence:
             scores, moving = self.scores(floor, now), self.moving(floor, now)
             live[floor] = len(scores)
             signal = self.signal(floor, now)
-            ended.append(self.engine.step(floor, self.floor_areas(floor), scores, now, bool(moving), signal))
+            active = self._active(floor, moving, now)
+            ended.append(self.engine.step(floor, self.floor_areas(floor), scores, now, bool(moving), signal, active))
             # Room presence first: with rooms calibrated, the map shows someone only in a room with
             # presence (the one someone walks in now, else the latest to win), walking only while
             # room presence says so. The empty floor winning, or no room with presence, is nobody,
@@ -320,6 +324,16 @@ class RoomPresence:
             "mirror_guessed": fit.guessed,
             "error": round(fit.error, digits),
         }
+
+    def _active(self, floor: str, moving: set[LinkKey], now: float) -> bool:
+        """Activity this second: a link's motion backed by another link within ACTIVE_WITHIN s
+        (someone working, shifting in a chair); one link alone is often noise."""
+        seen = self._flags.setdefault(floor, deque())
+        seen.append((now, frozenset(moving)))
+        while seen and now - seen[0][0] > ACTIVE_WITHIN:
+            seen.popleft()
+        links = set().union(*(m for _, m in seen))
+        return any(links - {key} for key in moving)
 
     def presence_room(self, floor: str, now: float) -> str | None:
         """The floor's room whose presence won last, while it holds: where someone is when room
