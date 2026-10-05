@@ -13,7 +13,8 @@ from homeassistant.helpers import area_registry as ar, device_registry as dr, fl
 from homeassistant.helpers.device_registry import CONNECTION_NETWORK_MAC
 from homeassistant.setup import async_setup_component
 
-from custom_components.wisp.const import DOMAIN, VERSION
+from custom_components.wisp import _asset_versions
+from custom_components.wisp.const import DOMAIN
 from custom_components.wisp.websocket import EMPTY_PANEL
 
 from .conftest import IP_A, NODE_A, NODE_B, FakeUdp
@@ -49,13 +50,14 @@ async def test_panel_is_served_and_registered_once(hass: HomeAssistant, udp: Fak
         "wisp", "custom", "Wisp", "mdi:shoe-print"
     )
     assert response["require_admin"] is True
-    assert response["config"]["card"] == f"/wisp/wisp-map-card.js?v={VERSION}"
+    versions = _asset_versions()  # a short hash per file: an update gives browsers new addresses
+    assert response["config"]["card"] == f"/wisp/wisp-map-card.js?v={versions['wisp-map-card.js']}"
     custom = response["config"]["_panel_custom"]
     assert (custom["name"], custom["module_url"], custom["embed_iframe"]) == (
-        "wisp-panel", f"/wisp/wisp-panel.js?v={VERSION}", False
+        "wisp-panel", f"/wisp/wisp-panel.js?v={versions['wisp-panel.js']}", False
     )
     client = await hass_client()
-    resp = await client.get(f"/wisp/wisp-panel.js?v={VERSION}")
+    resp = await client.get(custom["module_url"])
     assert resp.status == 200
     assert 'customElements.define("wisp-panel"' in await resp.text()
     assert len(updates) == 1

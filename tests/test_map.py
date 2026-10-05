@@ -10,7 +10,7 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers import area_registry as ar
 from homeassistant.setup import async_setup_component
 
-from custom_components.wisp.const import VERSION
+from custom_components.wisp import _asset_versions
 from custom_components.wisp.engine.tracking import rssi_to_metres
 
 from .conftest import (
@@ -195,7 +195,7 @@ async def test_card_is_served_and_loaded_on_every_dashboard(hass: HomeAssistant,
     hass.config.components.add("frontend")  # stands in for the real frontend, not installed for tests
     hass.data[DATA_EXTRA_MODULE_URL] = urls = set()
     await setup_hub(hass, HALL)
-    assert urls == {f"/wisp/wisp-map-card.js?v={VERSION}"}
+    assert urls == {f"/wisp/wisp-map-card.js?v={_asset_versions()['wisp-map-card.js']}"}  # changes with the file
     resp = await (await hass_client()).get("/wisp/wisp-map-card.js")
     assert resp.status == 200
     assert 'customElements.define("wisp-map-card"' in await resp.text()

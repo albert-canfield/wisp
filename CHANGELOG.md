@@ -34,6 +34,7 @@ First working version: the grid, the hive and motion per link, with the Home Ass
 - Floors and areas from Home Assistant: a node's area is its device's area (set in the panel, on the device, or in Change node), and its floor follows; the panel lists every Home Assistant floor, with nodes or not, so a plan can be added before its nodes.
 - Floor plans: upload an image from the panel (stored by Wisp, deleted when no plan uses it), give an address, or use no image and place the nodes on a grid of metres.
 - Lighter on the recorder: a motion score, signal, spread or position that moved only a little is written at most once a minute (scores within 0.25, positions within 25 cm); bigger changes within a second, motion at once.
+- The map card and the panel are loaded with a hash of their contents in the address, so an update never leaves a browser with an old card next to a new panel.
 - Identify on each node's device: strobes the node's status LED for 10 s, a second press stops it (the node's own Identify, through ESPHome when Home Assistant has the node, else its web page).
 - Repairs: a warning per floor with fewer than 3 nodes (rooms and positions need them), gone once it has them.
 - Position sensors: on a floor with a plan, x and y of someone moving in the plan's metres (from its top left corner), with the fit's quality as an attribute; unknown while nobody moves.

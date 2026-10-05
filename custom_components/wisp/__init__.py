@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from contextlib import suppress
+import hashlib
 import logging
 from pathlib import Path
 import shutil
@@ -29,6 +30,16 @@ FRONTEND = Path(__file__).parent / "frontend"
 CARD_URL = f"/{DOMAIN}/wisp-map-card.js"
 PANEL_URL = f"/{DOMAIN}/wisp-panel.js"
 PANEL_PATH = DOMAIN  # the panel's address: /wisp
+DATA_ASSETS = f"{DOMAIN}_assets"  # file name: a short hash of its contents, for browser caches
+
+
+def _asset_versions() -> dict[str, str]:
+    """A short hash of each frontend file: its address changes with it, so a browser never keeps
+    an old map card next to a new panel (or the other way round) after an update."""
+    return {
+        name: hashlib.sha256((FRONTEND / name).read_bytes()).hexdigest()[:10]
+        for name in ("wisp-map-card.js", "wisp-panel.js")
+    }
 
 
 async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
@@ -46,11 +57,12 @@ async def _async_register_frontend(hass: HomeAssistant) -> None:
     if "frontend" not in hass.config.components:  # no dashboards to load it, as in tests
         return
     try:
+        versions = hass.data[DATA_ASSETS] = await hass.async_add_executor_job(_asset_versions)
         await hass.http.async_register_static_paths([
             StaticPathConfig(CARD_URL, str(FRONTEND / "wisp-map-card.js"), True),
             StaticPathConfig(PANEL_URL, str(FRONTEND / "wisp-panel.js"), True),
         ])
-        frontend.add_extra_js_url(hass, f"{CARD_URL}?v={VERSION}")
+        frontend.add_extra_js_url(hass, f"{CARD_URL}?v={versions['wisp-map-card.js']}")
     except Exception as err:  # noqa: BLE001
         _LOGGER.warning("Could not register the Wisp map card and panel automatically: %s", err)
 
@@ -59,6 +71,8 @@ async def _async_register_panel(hass: HomeAssistant) -> None:
     """The Wisp panel in the sidebar, for admins. Registered once, it stays while the hub reloads."""
     if "frontend" not in hass.config.components or PANEL_PATH in hass.data.get(frontend.DATA_PANELS, {}):
         return
+    versions = hass.data.get(DATA_ASSETS) or {}
+    card = f"{CARD_URL}?v={versions.get('wisp-map-card.js', VERSION)}"
     try:
         await panel_custom.async_register_panel(
             hass,
@@ -66,8 +80,8 @@ async def _async_register_panel(hass: HomeAssistant) -> None:
             webcomponent_name="wisp-panel",
             sidebar_title=TITLE,
             sidebar_icon="mdi:shoe-print",
-            module_url=f"{PANEL_URL}?v={VERSION}",
-            config={"card": f"{CARD_URL}?v={VERSION}"},  # the panel loads the card if no dashboard did
+            module_url=f"{PANEL_URL}?v={versions.get('wisp-panel.js', VERSION)}",
+            config={"card": card},  # the panel loads the card if no dashboard did
             require_admin=True,
         )
     except ValueError as err:  # another integration has /wisp
