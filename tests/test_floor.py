@@ -1,0 +1,74 @@
+"""A floor end to end: hive layout and rows, link scores, smoothed position (no Home Assistant)."""
+
+from __future__ import annotations
+
+import math
+import random
+
+from custom_components.wisp.engine.floor import FloorModel
+from custom_components.wisp.engine.hive import HiveState
+from custom_components.wisp.engine.protocol import HiveEntry, HiveRow
+from custom_components.wisp.engine.tracking import PATH_LOSS_EXPONENT, RSSI_AT_1M
+
+NODES = {"aa:00": (0.0, 0.0), "bb:00": (6.0, 0.0), "cc:00": (6.0, 4.5), "dd:00": (0.0, 4.5)}
+AP = ("ff:00", (3.0, 5.2))
+
+
+def rssi(a, b) -> int:
+    return round(RSSI_AT_1M - 10 * PATH_LOSS_EXPONENT * math.log10(max(math.dist(a, b), 0.3)))
+
+
+def hive_state() -> HiveState:
+    rows = {}
+    for origin, p in NODES.items():
+        entries = [HiveEntry(other, rssi(p, q)) for other, q in NODES.items() if other != origin]
+        entries.append(HiveEntry(AP[0], rssi(p, AP[1])))
+        rows[origin] = HiveRow(origin, 1, tuple(entries))
+    return HiveState(reporter="aa:00", seq=1, hash=1, in_sync=True, truncated=False, layout=dict(NODES), rows=rows, updated=0.0)
+
+
+def score(person, tx, rx, positions, sigma=0.45) -> float:
+    a, b = positions[tx], positions[rx]
+    dx, dy = b[0] - a[0], b[1] - a[1]
+    t = max(0.0, min(1.0, ((person[0] - a[0]) * dx + (person[1] - a[1]) * dy) / (dx * dx + dy * dy)))
+    d = math.hypot(person[0] - (a[0] + t * dx), person[1] - (a[1] + t * dy))
+    return math.exp(1.2 * math.exp(-(d * d) / (2 * sigma * sigma)))  # log(score) is the disturbance
+
+
+def test_access_point_is_placed_from_the_rows() -> None:
+    floor = FloorModel()
+    floor.set_layout(hive_state())
+    assert set(floor.positions) == {*NODES, AP[0]}
+    assert math.dist(floor.positions[AP[0]], AP[1]) < 1.0
+
+
+def test_user_placed_positions_win() -> None:
+    floor = FloorModel()
+    floor.set_layout(hive_state(), placed={"aa:00": (0.5, 0.5)})
+    assert floor.positions["aa:00"] == (0.5, 0.5)
+
+
+def test_follows_a_walk() -> None:
+    floor = FloorModel()
+    floor.set_layout(hive_state())
+    truth_positions = {**NODES, AP[0]: AP[1]}
+    links = [(t, r) for t in truth_positions for r in NODES if t != r]
+    rng = random.Random(8)
+    errors = []
+    for i in range(40):  # walking diagonally across the room, one reading a second
+        person = (0.8 + 0.11 * i, 0.8 + 0.07 * i)
+        scores = {k: score(person, *k, truth_positions) * rng.uniform(0.9, 1.1) for k in links}
+        fix = floor.update(scores, now=float(i))
+        assert fix is not None
+        if i >= 5:
+            errors.append(math.dist((fix.x, fix.y), person))
+    assert sum(errors) / len(errors) < 0.8, errors
+
+
+def test_quiet_floor_and_unknown_links() -> None:
+    floor = FloorModel()
+    floor.set_layout(hive_state())
+    links = [(t, r) for t in NODES for r in NODES if t != r]
+    assert floor.update({k: 1.0 for k in links}, now=0.0) is None  # all quiet
+    assert floor.update({k: None for k in links}, now=1.0) is None  # nothing scored yet
+    assert floor.update({("xx:00", "aa:00"): 3.0}, now=2.0) is None  # transmitter without a position
