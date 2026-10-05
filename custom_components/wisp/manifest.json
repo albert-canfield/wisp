@@ -4,7 +4,8 @@
   "after_dependencies": [
     "esphome",
     "frontend",
-    "http"
+    "http",
+    "panel_custom"
   ],
   "codeowners": [
     "@albert-canfield"

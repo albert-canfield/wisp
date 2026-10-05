@@ -23,6 +23,18 @@ calibrate_empty:
           min: 10
           max: 600
           unit_of_measurement: s
+    delay:
+      default: 0
+      selector:
+        number:
+          min: 0
+          max: 300
+          unit_of_measurement: s
+stop_calibration:
+  fields:
+    floor:
+      selector:
+        floor:
 clear_calibration:
   fields:
     area:

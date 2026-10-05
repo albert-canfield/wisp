@@ -86,6 +86,17 @@ Rooms are your Home Assistant areas and floors are your Home Assistant floors. G
 
 Each floor then gets a room sensor (the room someone moves in, `none` while nobody moves, with a confidence) and each calibrated room an occupancy sensor that stays on for 60 seconds after its last movement, since someone sitting still makes little signal. The hold time is in the Wisp options. Calibrate again after adding nodes: new links only count once the rooms have samples of them.
 
+## Wisp panel
+
+The integration adds a Wisp page to the sidebar for administrators, so calibration needs no Developer tools. It shows, live:
+
+- **The map**, the same as the card, with buttons to turn and mirror it (remembered per browser).
+- **Rooms per floor:** every area with a node or a calibration, its samples and whether it is occupied, and the room someone moves in now. Calibrate starts `wisp.calibrate_room` (60 seconds by default) and counts down with what to do; Calibrate empty floor gives 30 seconds to leave the floor before it records (`wisp.calibrate_empty` with `delay`); Clear asks first. Areas on a floor without a node can be picked and calibrated too.
+- **Nodes:** name, area, floor, online, whether the hive has placed it, and a link to its ESPHome device.
+- **The hive:** hash, in sync, nodes and when it was last heard.
+
+It works on a phone: take it along on the calibration walk, the screen stays on while a recording counts down. Nodes without a floor share one named after the hub, and `wisp.calibrate_empty` takes that name as its floor.
+
 ## Roadmap
 
 1. **Prove the signal (working).** Node firmware with the self-forming grid, the hive and per-link motion, the integration with link sensors, CI and the release pipeline.

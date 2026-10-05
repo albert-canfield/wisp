@@ -164,11 +164,15 @@
       "fields": {
         "floor": {
           "name": "Floor",
-          "description": "Optional. Without it, every floor with Wisp nodes records at once."
+          "description": "Optional. Without it, every floor with Wisp nodes records at once. Nodes without a floor share one named after the hub."
         },
         "duration": {
           "name": "Duration",
           "description": "Seconds to record."
+        },
+        "delay": {
+          "name": "Delay",
+          "description": "Seconds before recording starts, to leave the floor."
         }
       }
     },
@@ -179,6 +183,16 @@
         "area": {
           "name": "Area",
           "description": "Optional. Without it, all calibration is cleared."
+        }
+      }
+    },
+    "stop_calibration": {
+      "name": "Stop calibration",
+      "description": "Ends a recording before its time is up. What it recorded so far is kept.",
+      "fields": {
+        "floor": {
+          "name": "Floor",
+          "description": "Optional. Without it, every recording stops."
         }
       }
     }

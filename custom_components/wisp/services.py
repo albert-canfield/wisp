@@ -8,14 +8,16 @@ from homeassistant.core import HomeAssistant, ServiceCall, callback
 from homeassistant.exceptions import ServiceValidationError
 from homeassistant.helpers import area_registry as ar, config_validation as cv, floor_registry as fr
 
-from .const import CALIBRATION_SECONDS, CONF_AREA, CONF_DURATION, CONF_FLOOR, DOMAIN, NO_FLOOR
+from .const import CALIBRATION_SECONDS, CONF_AREA, CONF_DELAY, CONF_DURATION, CONF_FLOOR, DOMAIN, NO_FLOOR
 from .hub import WispHub
 
 SERVICE_CALIBRATE_ROOM = "calibrate_room"
 SERVICE_CALIBRATE_EMPTY = "calibrate_empty"
 SERVICE_CLEAR_CALIBRATION = "clear_calibration"
+SERVICE_STOP_CALIBRATION = "stop_calibration"
 
 DURATION = vol.All(vol.Coerce(int), vol.Range(min=10, max=600))  # seconds; 600 samples are kept per room
+DELAY = vol.All(vol.Coerce(int), vol.Range(min=0, max=300))  # seconds to leave the floor first
 
 
 @callback
@@ -36,7 +38,14 @@ def async_register(hass: HomeAssistant) -> None:
         vol.Schema({
             vol.Optional(CONF_FLOOR): cv.string,
             vol.Optional(CONF_DURATION, default=CALIBRATION_SECONDS): DURATION,
+            vol.Optional(CONF_DELAY, default=0): DELAY,
         }),
+    )
+    hass.services.async_register(
+        DOMAIN,
+        SERVICE_STOP_CALIBRATION,
+        _async_stop_calibration,
+        vol.Schema({vol.Optional(CONF_FLOOR): cv.string}),
     )
     hass.services.async_register(
         DOMAIN,
@@ -85,17 +94,34 @@ async def _async_calibrate_room(call: ServiceCall) -> None:
 
 async def _async_calibrate_empty(call: ServiceCall) -> None:
     hub = _hub(call.hass)
-    floors = list(hub.presence.floors)
-    if value := call.data.get(CONF_FLOOR):
-        registry = fr.async_get(call.hass)
-        floor = registry.async_get_floor(value) or registry.async_get_floor_by_name(value)
-        if floor is None:
-            raise _error("unknown_floor", floor=value)
-        if floor.floor_id not in hub.presence.floors:
-            raise _error("floor_without_nodes", floor=floor.name)
-        floors = [floor.floor_id]
-    for floor_id in floors:
-        hub.presence.async_calibrate(floor_id, None, call.data[CONF_DURATION])
+    value = call.data.get(CONF_FLOOR)
+    floors = [_floor(call.hass, hub, value)] if value else list(hub.presence.floors)
+    for floor in floors:
+        hub.presence.async_calibrate(floor, None, call.data[CONF_DURATION], call.data[CONF_DELAY])
+
+
+def _floor(hass: HomeAssistant, hub: WispHub, value: str) -> str:
+    """A floor with nodes by id, as the selector gives it; the hub's own floor by its name; or by name."""
+    registry = fr.async_get(hass)
+    floor = registry.async_get_floor(value)
+    own = hub.presence.floors.get(NO_FLOOR)
+    if floor is None and own is not None and value == own.name:
+        return NO_FLOOR
+    floor = floor or registry.async_get_floor_by_name(value)
+    if floor is None:
+        raise _error("unknown_floor", floor=value)
+    if floor.floor_id not in hub.presence.floors:
+        raise _error("floor_without_nodes", floor=floor.name)
+    return floor.floor_id
+
+
+async def _async_stop_calibration(call: ServiceCall) -> None:
+    """Ends a floor's recording early (or every floor's), keeping what it recorded."""
+    hub = _hub(call.hass, nodes=False)
+    value = call.data.get(CONF_FLOOR)
+    floors = [_floor(call.hass, hub, value)] if value else list(hub.presence.engine.runs)
+    for floor in floors:
+        hub.presence.async_stop_run(floor)
 
 
 async def _async_clear_calibration(call: ServiceCall) -> None:

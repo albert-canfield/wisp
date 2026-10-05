@@ -17,6 +17,7 @@ First working version: the grid, the hive and motion per link, with the Home Ass
 - Wisp hub: finds nodes through ESPHome's discovery, subscribes to their link and hive reports, and adds per link a motion score sensor and a motion binary sensor (signal and spread as diagnostics, disabled by default). Nodes are subentries; works with Home Assistant 2026.3 and the per-entry devices of 2026.9.
 - `wisp-map-card`: a parchment map of the nodes, access points and links, with footprints along a link while it sees motion, and a pair of footprints where someone moves (the engine's best fit on the hive's layout, first version).
 - Room presence (first version): calibrate rooms (Home Assistant areas) and the empty floor with services; a room sensor per floor and a presence sensor per room.
+- Wisp panel in the sidebar (admins): the live map, nodes with their ESPHome device, rooms per floor with Calibrate, Stop and Clear, a countdown with instructions while recording (an empty floor gives 30 s to leave first), and the hive's status. Services: calibrate_room, calibrate_empty (optional delay), stop_calibration, clear_calibration.
 
 ### Tools
 - `walk_test.py` (guided walk test per link), `csi_recorder.py` (live view), `csi_logger.py` (overnight recording), `replay.py` (the motion score offline).

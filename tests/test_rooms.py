@@ -223,6 +223,20 @@ async def test_a_run_cut_short_keeps_its_samples(hass: HomeAssistant, house: Hou
     assert len(store(hass_storage, house.entry)["data"]["areas"]["office"]["samples"]) == 5
 
 
+async def test_stop_calibration_keeps_what_was_recorded(hass: HomeAssistant, house: House, hass_storage: dict) -> None:
+    await hass.services.async_call(DOMAIN, "calibrate_room", {"area": "kitchen"}, blocking=True)
+    await house.seconds(25, "kitchen")
+    assert hass.states.get(CALIBRATION).attributes["recording"] == "Kitchen"
+    await hass.services.async_call(DOMAIN, "stop_calibration", {}, blocking=True)
+    await hass.async_block_till_done()
+    assert state(hass, CALIBRATION) == "idle" and hass.states.get(CALIBRATION).attributes["recording"] is None
+    assert len(store(hass_storage, house.entry)["data"]["areas"]["kitchen"]["samples"]) == 25
+    await house.seconds(5, "kitchen")  # nothing more is recorded
+    assert len(store(hass_storage, house.entry)["data"]["areas"]["kitchen"]["samples"]) == 25
+    # Stopping when nothing records, or a floor by the hub's name, is harmless
+    await hass.services.async_call(DOMAIN, "stop_calibration", {"floor": "Wisp"}, blocking=True)
+
+
 async def test_unreadable_storage_starts_clean(
     hass: HomeAssistant, udp: FakeUdp, hass_storage: dict, caplog: pytest.LogCaptureFixture
 ) -> None:

@@ -14,6 +14,7 @@ SUBENTRY_NODE = "node"  # node subentry data: mac, host, name, and area when set
 CONF_AREA = "area"  # the area a node stands in; its floor is the node's floor
 CONF_FLOOR = "floor"
 CONF_DURATION = "duration"
+CONF_DELAY = "delay"  # seconds before a calibration records
 CONF_PRESENCE_HOLD = "presence_hold"  # option, seconds
 
 NODE_PORT = 47010

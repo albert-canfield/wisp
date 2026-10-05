@@ -112,6 +112,7 @@ class Run:
     floor: str
     area: str | None  # None: the empty class
     ends: float
+    starts: float = -math.inf  # nothing is recorded until after it: time to leave the floor
     recorded: int = 0
     skipped: int = 0  # seconds left out: quiet while recording a room, or no live links
 
@@ -142,11 +143,11 @@ class Rooms:
 
     # Calibration
 
-    def start(self, floor: str, area: str | None, now: float, duration: float) -> Run | None:
-        """Record for an area, or the floor's empty class (None), until now + duration.
+    def start(self, floor: str, area: str | None, now: float, duration: float, delay: float = 0.0) -> Run | None:
+        """Record for an area, or the floor's empty class (None), for duration seconds after delay.
         Returns the floor's run it replaced."""
         previous = self.runs.get(floor)
-        self.runs[floor] = Run(floor, area, now + duration)
+        self.runs[floor] = Run(floor, area, now + delay + duration, now + delay if delay else -math.inf)
         return previous
 
     def stop(self, floor: str) -> Run | None:
@@ -214,7 +215,7 @@ class Rooms:
         ended = None
         run = self.runs.get(floor)
         if run is not None:
-            if now <= run.ends:
+            if run.starts < now <= run.ends:
                 vector = features(scores)
                 self._record(run, vector, max((s for s in scores.values() if s is not None), default=0.0))
             if now >= run.ends:

@@ -35,6 +35,7 @@ from .engine import (
     STREAM_HIVE_REPORTS,
     STREAM_LINK_REPORTS,
     HiveReport,
+    HiveState,
     HiveTracker,
     LinkKey,
     LinkReport,
@@ -350,18 +351,42 @@ class WispHub:
                 for bssid, heard in aps.items()
             ],
             "links": links,
-            "hive": {
-                "hash": f"{hive.hash:08x}",
-                "in_sync": hive.in_sync,
-                "nodes": len(hive.nodes),
-                "age": round(now - hive.updated),
-            } if hive else None,
+            "hive": _hive_summary(hive, now),
         }
         if (rooms := self.presence.snapshot()) is not None:
             snapshot["rooms"] = rooms
         if people := self.presence.people():
             snapshot["people"] = people
         return snapshot
+
+    # Panel
+
+    def panel_snapshot(self) -> dict[str, Any]:
+        """The panel: every node with its area, floor and ESPHome device, the floors with their rooms
+        and calibration, and the hive."""
+        now = self.clock()
+        hive = self.hive.current(now)
+        layout = hive.layout if hive else {}
+        presence = self.presence
+        floor_of = {mac: key for key, floor in presence.floors.items() for mac in floor.nodes}
+        nodes = []
+        for mac in sorted(set(self.nodes) | set(layout)):  # the layout may hold nodes not added yet
+            node = self.nodes.get(mac)
+            floor = floor_of.get(mac)
+            nodes.append({
+                "mac": mac,
+                "name": node.name if node else default_node_name(mac),
+                "added": node is not None,
+                "host": node.host if node else None,
+                "area": node.area if node else None,
+                "area_name": presence.area_name(node.area) if node and node.area else None,
+                "floor": floor or None,
+                "floor_name": None if floor is None else presence.floors[floor].name,
+                "online": node is not None and self.online(mac, now),
+                "placed": mac in layout,
+                "device_id": esphome_device_id(self.hass, mac),
+            })
+        return {"nodes": nodes, **presence.panel(), "hive": _hive_summary(hive, now)}
 
     # Diagnostics
 
@@ -419,6 +444,16 @@ class WispHub:
         }
 
 
+def _hive_summary(hive: HiveState | None, now: float) -> dict[str, Any] | None:
+    """The hive on the map and the panel; the frontend counts its age on between updates."""
+    return {
+        "hash": f"{hive.hash:08x}",
+        "in_sync": hive.in_sync,
+        "nodes": len(hive.nodes),
+        "age": round(now - hive.updated),
+    } if hive else None
+
+
 def ap_label(bssid: str) -> str:
     """Short map label: the last two bytes, the full BSSID is long on a phone."""
     return f"AP {bssid[-5:]}"
@@ -437,6 +472,16 @@ def node_devices(hass: HomeAssistant, mac: str) -> list[dr.DeviceEntry]:
         return dev_reg.async_get_devices(connections=connections)
     device = dev_reg.async_get_device(connections=connections)
     return [device] if device else []
+
+
+def esphome_device_id(hass: HomeAssistant, mac: str) -> str | None:
+    """The node's ESPHome device, for a link to its page."""
+    for device in node_devices(hass, mac):
+        for entry_id in device.config_entries:
+            entry = hass.config_entries.async_get_entry(entry_id)
+            if entry is not None and entry.domain == "esphome":
+                return device.id
+    return None
 
 
 def _ipv4(host: str) -> bool:

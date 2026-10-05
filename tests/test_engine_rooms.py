@@ -231,6 +231,16 @@ def test_room_runs_record_motion_only():
     assert (ended.recorded, ended.skipped) == (2, 1) and len(engine.empty[FLOOR]) == 2
 
 
+def test_a_delayed_run_records_after_its_delay():
+    floor = Floor()
+    engine = Rooms()
+    engine.start(FLOOR, None, 0.0, 3, delay=2)
+    assert (engine.runs[FLOOR].starts, engine.runs[FLOOR].ends) == (2.0, 5.0)
+    for t in range(1, 6):  # someone walks out for 2 s, then the floor is empty
+        ended = engine.step(FLOOR, [], floor.scores("kitchen" if t <= 2 else None), float(t))
+    assert (ended.recorded, ended.skipped) == (3, 0) and len(engine.empty[FLOOR]) == 3
+
+
 def test_new_run_replaces_the_floors_run_and_clear_stops_it():
     floor = Floor()
     engine = Rooms()

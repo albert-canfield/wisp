@@ -203,12 +203,23 @@ class RoomPresence:
     # Calibration
 
     @callback
-    def async_calibrate(self, floor: str, area: str | None, duration: float) -> None:
-        """Record for an area, or the floor's empty class (None). Replaces the floor's run."""
-        previous = self.engine.start(floor, area, self.hub.clock(), duration)
+    def async_calibrate(self, floor: str, area: str | None, duration: float, delay: float = 0.0) -> None:
+        """Record for an area, or the floor's empty class (None), after delay. Replaces the floor's run."""
+        previous = self.engine.start(floor, area, self.hub.clock(), duration, delay)
         if previous and previous.recorded:
             self._async_save()
         self._async_entities_changed()  # the first run on a floor brings its sensors
+        self._async_notify()
+
+    @callback
+    def async_stop_run(self, floor: str) -> None:
+        """End a floor's run now, keeping what it recorded."""
+        run = self.engine.stop(floor)
+        if run is None:
+            return
+        if run.recorded:
+            self._async_save()
+        self._async_entities_changed()  # a first calibration that ends early still makes its sensor
         self._async_notify()
 
     @callback
@@ -290,6 +301,10 @@ class RoomPresence:
     def seconds_left(self, run: Run) -> int:
         return max(0, math.ceil(run.ends - self.hub.clock()))
 
+    def starts_in(self, run: Run) -> int:
+        """Seconds until a delayed run records, 0 once it does."""
+        return math.ceil(max(0.0, run.starts - self.hub.clock()))
+
     # Map and diagnostics
 
     def snapshot(self) -> list[dict[str, Any]] | None:
@@ -327,6 +342,69 @@ class RoomPresence:
             for key, fix in self.fixes.items()
             if key in self.floors
         ]
+
+    def panel(self) -> dict[str, Any]:
+        """Per floor: its room, its run and every area with a node or samples, then the other areas
+        on it to calibrate. Calibrated areas on no floor with nodes come last, to clear."""
+        engine = self.engine
+        now = self.hub.clock()
+        nodes_in: dict[str, int] = {}
+        for node in self.hub.nodes.values():
+            if node.area:
+                nodes_in[node.area] = nodes_in.get(node.area, 0) + 1
+        all_areas = ar.async_get(self.hass).async_list_areas()
+        floors = []
+        for key, floor in self.floors.items():
+            decision = engine.decisions.get(key)
+            run = engine.runs.get(key)
+            shown = {area for area in nodes_in if self.area_floor(area) == key} | set(self.floor_areas(key))
+            if run and run.area:  # its first samples are on the way
+                shown.add(run.area)
+            areas = []
+            for area in shown:
+                win = engine.presence(area, now)
+                areas.append({
+                    "area": area,
+                    "name": self.area_name(area),
+                    "nodes": nodes_in.get(area, 0),
+                    "samples": len(engine.areas.get(area, ())),
+                    "presence": win is not None,
+                    "confidence": None if win is None else round(win, 2),
+                })
+            floors.append({
+                "floor": key or None,
+                "name": floor.name,
+                "nodes": sorted(floor.nodes),
+                "live_links": self.live.get(key, 0),
+                "room": self.room(key),
+                "area": decision.room if decision else None,
+                "confidence": None if decision is None or decision.confidence is None else round(decision.confidence, 2),
+                "empty_samples": len(engine.empty.get(key, ())),
+                "run": None if run is None else {
+                    "area": run.area,
+                    "name": None if run.area is None else self.area_name(run.area),
+                    "starts_in": self.starts_in(run),
+                    "seconds_left": self.seconds_left(run),
+                    "recorded": run.recorded,
+                    "skipped": run.skipped,
+                },
+                "areas": sorted(areas, key=lambda a: a["name"].casefold()),
+                "other_areas": [
+                    {"area": area.id, "name": area.name}
+                    for area in sorted(all_areas, key=lambda a: a.name.casefold())
+                    if (area.floor_id or NO_FLOOR) == key and area.id not in shown
+                ],
+            })
+        elsewhere = [
+            {"area": area, "name": self.area_name(area), "samples": len(samples)}
+            for area, samples in engine.areas.items()
+            if self.area_floor(area) not in self.floors
+        ]
+        return {
+            "floors": floors,
+            "elsewhere": sorted(elsewhere, key=lambda a: a["name"].casefold()),
+            "min_samples": engine.min_samples,
+        }
 
     def diagnostics(self) -> dict[str, Any]:
         engine = self.engine
