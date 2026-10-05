@@ -64,6 +64,7 @@ inline size_t encode_raw_csi(const CsiRecord &r, const uint8_t node_mac[6], uint
 
 constexpr uint8_t STREAM_RAW_CSI = 0x01;
 constexpr uint8_t STREAM_LINKS = 0x02;
+constexpr uint8_t STREAM_HIVE = 0x04;
 
 // The streams a subscription asks for (bit mask), or 0 if p is not a subscription.
 // A 5 byte request (version 1 recorders) means raw CSI only.

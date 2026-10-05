@@ -11,6 +11,7 @@
 #include "freertos/queue.h"
 
 #include "core_grid.h"
+#include "core_hive.h"
 
 namespace wisp_platform {
 
@@ -19,8 +20,9 @@ struct EspNowFrame {
   uint8_t src[6];
   int8_t rssi;
   uint8_t len;
-  uint8_t data[wisp_core::BEACON_MAX_BYTES];
+  uint8_t data[wisp_core::BEACON_MAX_BYTES];  // also fits a hive row frame
 };
+static_assert(wisp_core::ROW_FRAME_MAX_BYTES <= wisp_core::BEACON_MAX_BYTES, "row frames must fit");
 
 class EspNowRadio {
  public:
@@ -35,12 +37,13 @@ class EspNowRadio {
 };
 
 // Fires once per round at this node's slot, aligned to the access point's clock (TSF) when
-// connected, and sends the latest beacon the core task prepared.
+// connected, and sends the latest beacon the core task prepared, then one relayed hive row.
 class SlotScheduler {
  public:
   bool start(EspNowRadio *radio);
   void set_slot(int slot) { this->slot_.store(slot); }
   void set_beacon(const uint8_t *data, size_t len);
+  void set_relay(const uint8_t *data, size_t len);
   bool synced() const { return this->synced_.load(); }
   uint32_t sent() const { return this->sent_.load(); }
 
@@ -53,6 +56,8 @@ class SlotScheduler {
   portMUX_TYPE lock_ = portMUX_INITIALIZER_UNLOCKED;
   uint8_t buf_[wisp_core::BEACON_MAX_BYTES]{};
   size_t len_{0};
+  uint8_t relay_[wisp_core::ROW_FRAME_MAX_BYTES]{};
+  size_t relay_len_{0};
   std::atomic<int> slot_{-1};
   std::atomic<bool> synced_{false};
   std::atomic<uint32_t> sent_{0};

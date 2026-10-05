@@ -41,6 +41,8 @@ wisp:
     name: AP motion
   grid_nodes:
     name: Grid nodes
+  hive_in_sync:
+    name: Hive in sync
 
 logger:
 

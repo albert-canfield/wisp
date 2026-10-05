@@ -7,7 +7,8 @@ if grep -nE '#include "(esphome|esp_|freertos|lwip)|#include <(esp_|freertos|lwi
   exit 1
 fi
 mkdir -p test/build
-for t in test_core test_grid; do
-  ${CXX:-c++} -std=c++17 -O1 -Wall -Wextra -Werror -Icomponents/wisp test/$t.cpp -o test/build/$t
+for t in test_core test_grid test_hive; do
+  ${CXX:-c++} -std=c++17 -O1 -g -Wall -Wextra -Werror -fsanitize=address,undefined -fno-omit-frame-pointer \
+    -Icomponents/wisp test/$t.cpp -o test/build/$t
   test/build/$t
 done

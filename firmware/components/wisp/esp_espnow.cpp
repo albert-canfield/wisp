@@ -69,6 +69,15 @@ void SlotScheduler::set_beacon(const uint8_t *data, size_t len) {
   portEXIT_CRITICAL(&this->lock_);
 }
 
+void SlotScheduler::set_relay(const uint8_t *data, size_t len) {
+  if (len > sizeof(this->relay_))
+    return;
+  portENTER_CRITICAL(&this->lock_);
+  memcpy(this->relay_, data, len);
+  this->relay_len_ = len;
+  portEXIT_CRITICAL(&this->lock_);
+}
+
 // The shared clock: the access point's TSF while connected, otherwise the local clock.
 static uint64_t shared_clock_us(bool &synced) {
   const int64_t tsf = esp_wifi_get_tsf_time(WIFI_IF_STA);
@@ -91,13 +100,19 @@ void SlotScheduler::on_timer_(void *arg) {
   auto *self = static_cast<SlotScheduler *>(arg);
   if (self->slot_.load() >= 0) {
     uint8_t frame[wisp_core::BEACON_MAX_BYTES];
-    size_t len;
+    uint8_t relay[wisp_core::ROW_FRAME_MAX_BYTES];
+    size_t len, relay_len;
     portENTER_CRITICAL(&self->lock_);
     len = self->len_;
     memcpy(frame, self->buf_, len);
+    relay_len = self->relay_len_;
+    memcpy(relay, self->relay_, relay_len);
+    self->relay_len_ = 0;  // each relayed row goes out once
     portEXIT_CRITICAL(&self->lock_);
     if (len > 0 && self->radio_->send_broadcast(frame, len))
       self->sent_.fetch_add(1);
+    if (relay_len > 0)
+      self->radio_->send_broadcast(relay, relay_len);
   }
   self->arm_();
 }

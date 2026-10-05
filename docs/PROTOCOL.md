@@ -18,11 +18,11 @@ Sent by a computer or Home Assistant to a node's port 47010, at least every 5 se
 |---|---|---|
 | 0 | 4 | `WSUB` |
 | 4 | 1 | protocol version (1) |
-| 5 | 1 | streams wanted, bit mask: bit 0 raw CSI, bit 1 link reports. Optional: a 5 byte request means raw CSI only. |
+| 5 | 1 | streams wanted, bit mask: bit 0 raw CSI, bit 1 link reports, bit 2 hive reports. Optional: a 5 byte request means raw CSI only. |
 
 - A lease lasts 10 seconds after the last request.
 - A node serves up to 4 subscribers at once; a new address replaces the one closest to expiry.
-- Raw CSI only flows while the node's "Raw CSI stream" switch is on. Link reports always flow.
+- Raw CSI only flows while the node's "Raw CSI stream" switch is on. Link and hive reports always flow.
 
 ## Common header
 
@@ -32,7 +32,7 @@ Every packet a node sends starts with:
 |---|---|---|
 | 0 | 4 | `WISP` |
 | 4 | 1 | protocol version (1) |
-| 5 | 1 | packet type: 1 raw CSI, 2 link report |
+| 5 | 1 | packet type: 1 raw CSI, 2 link report, 3 hive report |
 | 6 | 2 | header length: offset of the payload, so readers skip fields they do not know |
 
 Readers ignore packets with an unknown version or type.
@@ -84,3 +84,26 @@ Each link:
 | 13 | 1 | flags: bit 0 motion detected on this link |
 
 A link is identified by (transmitter, receiver). The same pair seen from the other end is a separate link: node A hearing B and node B hearing A are both reported.
+
+## Type 3: hive report
+
+What one node knows about the whole grid (see "Shared grid knowledge: the hive" in ARCHITECTURE.md), every 5 seconds. Header length 26. At most 1400 bytes: rows that do not fit are left out and flagged.
+
+| Offset | Size | Field |
+|---|---|---|
+| 8 | 4 | sequence number |
+| 12 | 6 | node MAC (sender of this report) |
+| 18 | 4 | hive hash: equal on every node that holds the same rows |
+| 22 | 1 | flags: bit 0 in sync (every active member advertises the same hash), bit 1 rows truncated |
+| 23 | 1 | layout points p |
+| 24 | 1 | rows r |
+| 25 | 1 | reserved (0) |
+| 26 | 10 × p | layout: node MAC (6), x and y in centimetres (int16 each). Relative: rotation, mirror and scale come from anchors on the floor plan. |
+| ... | | r rows, each: origin MAC (6), row version (uint16), entries k (1), then k × (neighbour MAC (6), RSSI int8) |
+
+Rows include access points as neighbours; layout points are nodes only.
+
+## ESP-NOW frames between nodes
+
+Not for computers, listed for completeness. Defined in `core_grid.h` (beacon, type 1) and `core_hive.h` (hive row, type 2), magic `WG`, grid protocol version 2. Every node broadcasts one beacon per 100 ms round in its slot, carrying its own hive row, then one relayed row from another node.
+

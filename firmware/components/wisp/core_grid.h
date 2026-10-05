@@ -49,6 +49,7 @@ struct Member {
   uint16_t last_seq;
   uint8_t chip;
   uint32_t uptime_s;
+  uint32_t hive_hash;  // what it last said it knows
 };
 
 // Next transmit time on the shared clock for a slot, strictly after now_us plus a small lead.
@@ -74,7 +75,8 @@ class Grid {
   }
 
   // A beacon from another node. Returns true if that node is new to this grid.
-  bool on_beacon(const Mac &from, uint32_t now_ms, int8_t rssi, uint16_t seq, uint8_t chip, uint32_t uptime_s) {
+  bool on_beacon(const Mac &from, uint32_t now_ms, int8_t rssi, uint16_t seq, uint8_t chip, uint32_t uptime_s,
+                 uint32_t hive_hash = 0) {
     if (from == this->self_)
       return false;
     Member *m = this->find_(from);
@@ -83,7 +85,7 @@ class Grid {
       m = this->make_room_();
       if (m == nullptr)
         return false;  // table full of active members: this node cannot track more
-      *m = Member{from, MemberState::ACTIVE, now_ms, now_ms, static_cast<float>(rssi), seq, chip, uptime_s};
+      *m = Member{from, MemberState::ACTIVE, now_ms, now_ms, static_cast<float>(rssi), seq, chip, uptime_s, hive_hash};
       this->count_++;
       is_new = true;
       this->version_++;
@@ -98,6 +100,7 @@ class Grid {
       m->last_seq = seq;
       m->chip = chip;
       m->uptime_s = uptime_s;
+      m->hive_hash = hive_hash;
     }
     return is_new;
   }
@@ -188,23 +191,24 @@ class Grid {
   uint32_t version_{0};
 };
 
-// ---- ESP-NOW beacon, protocol version 1 -------------------------------------------------
+// ---- ESP-NOW beacon, protocol version 2 -------------------------------------------------
 //
 //  0  2  magic "WG"            12  1  chip (see CHIP_*)
 //  2  1  protocol version      13  1  active nodes the sender sees (itself included)
 //  3  1  type (1 beacon)       14  6  BSSID of the access point whose clock the sender follows
-//  4  2  sequence number       20  1  row entries n (up to MAX_ROW)
-//  6  1  flags (bit 0 synced)  21  8n row: neighbour MAC (6), mean RSSI (int8),
-//  7  1  slot                         motion score x 10 (uint8, 255 = unknown)
-//  8  4  uptime, seconds
+//  4  2  sequence number       20  4  hive hash: what the sender knows (see core_hive.h)
+//  6  1  flags (bit 0 synced)  24  2  version of the sender's own row
+//  7  1  slot                  26  1  row entries n (up to MAX_ROW)
+//  8  4  uptime, seconds       27  8n row: neighbour MAC (6), mean RSSI (int8),
+//                                     motion score x 10 (uint8, 255 = unknown)
 //
 // The row is what the sender hears from each neighbour (nodes and access points): the
 // sender's line of the shared matrix that every node keeps (the hive).
 
-constexpr uint8_t GRID_PROTOCOL_VERSION = 1;
+constexpr uint8_t GRID_PROTOCOL_VERSION = 2;
 constexpr uint8_t BEACON_TYPE = 1;
 constexpr int MAX_ROW = 24;
-constexpr size_t BEACON_HEADER_BYTES = 21;
+constexpr size_t BEACON_HEADER_BYTES = 27;
 constexpr size_t BEACON_MAX_BYTES = BEACON_HEADER_BYTES + 8 * MAX_ROW;
 constexpr uint8_t BEACON_FLAG_SYNCED = 0x01;
 constexpr uint8_t CHIP_ESP32 = 0, CHIP_ESP32S3 = 1, CHIP_ESP32C3 = 2, CHIP_ESP32C6 = 3, CHIP_OTHER = 255;
@@ -224,6 +228,8 @@ struct Beacon {
   uint8_t chip;
   uint8_t active;
   Mac clock_bssid;
+  uint32_t hive_hash;
+  uint16_t row_version;
   uint8_t row_len;
   RowEntry row[MAX_ROW];
 };
@@ -246,7 +252,11 @@ inline size_t encode_beacon(const Beacon &b, uint8_t *out, size_t cap) {
   out[12] = b.chip;
   out[13] = b.active;
   memcpy(out + 14, b.clock_bssid.b, 6);
-  out[20] = n;
+  for (int i = 0; i < 4; i++)
+    out[20 + i] = static_cast<uint8_t>(b.hive_hash >> (8 * i));
+  out[24] = static_cast<uint8_t>(b.row_version);
+  out[25] = static_cast<uint8_t>(b.row_version >> 8);
+  out[26] = n;
   for (int i = 0; i < n; i++) {
     uint8_t *e = out + BEACON_HEADER_BYTES + 8 * i;
     memcpy(e, b.row[i].mac.b, 6);
@@ -260,7 +270,7 @@ inline bool decode_beacon(const uint8_t *p, size_t len, Beacon &b) {
   if (len < BEACON_HEADER_BYTES || p[0] != 'W' || p[1] != 'G' || p[2] != GRID_PROTOCOL_VERSION ||
       p[3] != BEACON_TYPE)
     return false;
-  const uint8_t n = p[20];
+  const uint8_t n = p[26];
   if (n > MAX_ROW || len < BEACON_HEADER_BYTES + 8 * static_cast<size_t>(n))
     return false;
   b.seq = static_cast<uint16_t>(p[4] | (p[5] << 8));
@@ -271,6 +281,9 @@ inline bool decode_beacon(const uint8_t *p, size_t len, Beacon &b) {
   b.chip = p[12];
   b.active = p[13];
   memcpy(b.clock_bssid.b, p + 14, 6);
+  b.hive_hash = static_cast<uint32_t>(p[20]) | (static_cast<uint32_t>(p[21]) << 8) |
+                (static_cast<uint32_t>(p[22]) << 16) | (static_cast<uint32_t>(p[23]) << 24);
+  b.row_version = static_cast<uint16_t>(p[24] | (p[25] << 8));
   b.row_len = n;
   for (int i = 0; i < n; i++) {
     const uint8_t *e = p + BEACON_HEADER_BYTES + 8 * i;

@@ -12,6 +12,8 @@
 #include "freertos/task.h"
 
 #include "core_grid.h"
+#include "core_hive.h"
+#include "core_layout.h"
 #include "core_links.h"
 #include "core_wifi_plan.h"
 #include "esp_ap_csi.h"
@@ -36,6 +38,7 @@ class WispComponent : public Component {
   void set_ap_motion_score_sensor(sensor::Sensor *s) { this->ap_motion_score_sensor_ = s; }
   void set_ap_motion_binary_sensor(binary_sensor::BinarySensor *s) { this->ap_motion_binary_sensor_ = s; }
   void set_grid_nodes_sensor(sensor::Sensor *s) { this->grid_nodes_sensor_ = s; }
+  void set_hive_sync_binary_sensor(binary_sensor::BinarySensor *s) { this->hive_sync_binary_sensor_ = s; }
   void set_raw_stream_enabled(bool enabled) { this->raw_stream_enabled_.store(enabled); }
   void set_grid_channel(uint8_t channel) { this->grid_channel_cfg_ = channel; }
   void set_ap_min_rssi(int8_t rssi) { this->ap_min_rssi_ = rssi; }
@@ -44,7 +47,8 @@ class WispComponent : public Component {
   // Core task (owns grid_ and links_).
   static void core_task_(void *arg);
   void handle_csi_(const wisp_core::CsiRecord &rec, uint32_t now, uint8_t *packet);
-  void handle_beacon_(const wisp_platform::EspNowFrame &f, uint32_t now);
+  void handle_espnow_(const wisp_platform::EspNowFrame &f, uint32_t now);
+  void update_hive_(uint32_t now);
   void core_round_(uint32_t now);
   void core_second_(uint32_t now);
   void send_report_(uint32_t now);
@@ -66,6 +70,7 @@ class WispComponent : public Component {
   sensor::Sensor *ap_motion_score_sensor_{nullptr};
   binary_sensor::BinarySensor *ap_motion_binary_sensor_{nullptr};
   sensor::Sensor *grid_nodes_sensor_{nullptr};
+  binary_sensor::BinarySensor *hive_sync_binary_sensor_{nullptr};
 
   wisp_platform::CsiCapture capture_;
   wisp_platform::GatewayPinger pinger_;
@@ -81,6 +86,14 @@ class WispComponent : public Component {
   // Owned by the core task.
   wisp_core::Grid grid_{wisp_core::Mac{}};
   wisp_core::LinkTable links_;
+  wisp_core::Hive hive_{wisp_core::Mac{}};
+  wisp_core::LayoutWorkspace layout_ws_;
+  wisp_core::LayoutPoint layout_[wisp_core::MAX_POINTS]{};
+  int layout_count_{0};
+  uint32_t layout_hash_{0};
+  uint32_t hive_seq_{0};
+  uint16_t relay_seq_{0};
+  uint32_t last_hive_ms_{0};
   uint32_t sources_version_{0xFFFFFFFF};
   wisp_core::Mac sources_bssid_{};
   uint16_t beacon_seq_{0};
@@ -98,6 +111,7 @@ class WispComponent : public Component {
   std::atomic<float> ap_score_{NAN};
   std::atomic<bool> ap_active_{false};
   std::atomic<int> grid_nodes_{1};
+  std::atomic<bool> hive_in_sync_{false};
   std::atomic<uint32_t> ap_frames_{0};
 
   // Grid channel steering (main loop).

@@ -130,6 +130,8 @@ static void test_beacon_round_trip() {
   b.chip = CHIP_ESP32S3;
   b.active = 4;
   b.clock_bssid = mac_n(99);
+  b.hive_hash = 0xdeadbeef;
+  b.row_version = 0x1234;
   b.row_len = 2;
   b.row[0] = RowEntry{mac_n(1), -48, 12};
   b.row[1] = RowEntry{mac_n(2), -71, SCORE_UNKNOWN};
@@ -140,6 +142,7 @@ static void test_beacon_round_trip() {
   CHECK(decode_beacon(buf, n, d));
   CHECK(d.seq == 513 && d.flags == BEACON_FLAG_SYNCED && d.slot == 3 && d.uptime_s == 86401);
   CHECK(d.chip == CHIP_ESP32S3 && d.active == 4 && d.clock_bssid == mac_n(99));
+  CHECK(d.hive_hash == 0xdeadbeef && d.row_version == 0x1234);
   CHECK(d.row_len == 2 && d.row[0].mac == mac_n(1) && d.row[0].rssi == -48 && d.row[1].score10 == SCORE_UNKNOWN);
   CHECK(!decode_beacon(buf, n - 1, d));  // truncated row
   buf[2] = 9;

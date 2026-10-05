@@ -13,6 +13,7 @@
 #include "esphome/core/hal.h"
 #include "esphome/core/log.h"
 
+#include "core_hive_report.h"
 #include "core_raw_packet.h"
 
 namespace esphome::wisp {
@@ -24,6 +25,7 @@ static constexpr UBaseType_t ESPNOW_QUEUE_DEPTH = 8;
 static constexpr uint32_t CORE_TASK_STACK = 6144;
 static constexpr UBaseType_t CORE_TASK_PRIORITY = 5;
 static constexpr uint32_t STATS_INTERVAL_MS = 10000;
+static constexpr uint32_t HIVE_REPORT_INTERVAL_MS = 5000;
 
 #if defined(CONFIG_IDF_TARGET_ESP32S3)
 static constexpr uint8_t CHIP = wisp_core::CHIP_ESP32S3;
@@ -46,6 +48,7 @@ static void format_mac(const wisp_core::Mac &m, char *out) {
 void WispComponent::setup() {
   esp_read_mac(this->self_.b, ESP_MAC_WIFI_STA);
   this->grid_ = wisp_core::Grid(this->self_);
+  this->hive_ = wisp_core::Hive(this->self_);
   this->links_.set_threshold(this->motion_threshold_);
   this->csi_queue_ = xQueueCreate(CSI_QUEUE_DEPTH, sizeof(wisp_core::CsiRecord));
   this->espnow_queue_ = xQueueCreate(ESPNOW_QUEUE_DEPTH, sizeof(wisp_platform::EspNowFrame));
@@ -90,6 +93,8 @@ void WispComponent::loop() {
     this->ap_motion_score_sensor_->publish_state(this->ap_score_.load());
   if (this->ap_motion_binary_sensor_ != nullptr)
     this->ap_motion_binary_sensor_->publish_state(this->ap_active_.load());
+  if (this->hive_sync_binary_sensor_ != nullptr)
+    this->hive_sync_binary_sensor_->publish_state(this->hive_in_sync_.load());
   if (this->grid_nodes_sensor_ != nullptr) {
     const float nodes = static_cast<float>(this->grid_nodes_.load());
     if (this->grid_nodes_sensor_->get_raw_state() != nodes)
@@ -230,7 +235,7 @@ void WispComponent::core_task_(void *arg) {
       grid_started = true;
     }
     while (xQueueReceive(self->espnow_queue_, &frame, 0) == pdTRUE)
-      self->handle_beacon_(frame, now);
+      self->handle_espnow_(frame, now);
     self->live_streams_ = self->stream_open_ ? self->stream_.poll(now) : 0;
     if (got)
       self->handle_csi_(rec, now, packet);
@@ -269,16 +274,30 @@ void WispComponent::handle_csi_(const wisp_core::CsiRecord &rec, uint32_t now, u
   }
 }
 
-void WispComponent::handle_beacon_(const wisp_platform::EspNowFrame &f, uint32_t now) {
+// Beacons (membership plus the sender's own hive row) and relayed hive rows.
+void WispComponent::handle_espnow_(const wisp_platform::EspNowFrame &f, uint32_t now) {
+  const wisp_core::Mac from = wisp_core::Mac::from(f.src);
+  wisp_core::HiveEntry entries[wisp_core::MAX_ROW];
+  if (f.len >= 4 && f.data[3] == wisp_core::ROW_FRAME_TYPE) {
+    wisp_core::Mac origin;
+    uint16_t version;
+    int n;
+    // Only from members: a stranger's relays wait until its beacon makes it one.
+    if (this->grid_.is_member(from) && wisp_core::decode_row_frame(f.data, f.len, origin, version, entries, n))
+      this->hive_.on_row(origin, version, entries, n, now);
+    return;
+  }
   wisp_core::Beacon b;
   if (!wisp_core::decode_beacon(f.data, f.len, b))
     return;
-  const wisp_core::Mac from = wisp_core::Mac::from(f.src);
-  if (this->grid_.on_beacon(from, now, f.rssi, b.seq, b.chip, b.uptime_s)) {
+  if (this->grid_.on_beacon(from, now, f.rssi, b.seq, b.chip, b.uptime_s, b.hive_hash)) {
     char mac[18];
     format_mac(from, mac);
     ESP_LOGI(TAG, "Node %s joined the grid (%d active)", mac, this->grid_.active_count());
   }
+  for (int i = 0; i < b.row_len; i++)
+    entries[i] = wisp_core::HiveEntry{b.row[i].mac, b.row[i].rssi};
+  this->hive_.on_row(from, b.row_version, entries, b.row_len, now);
 }
 
 // Every round: lifecycle, this node's slot, and the beacon it sends in that slot.
@@ -319,11 +338,60 @@ void WispComponent::core_round_(uint32_t now) {
     if (m.state != wisp_core::MemberState::MISSING)
       add_row(m.mac, m.rssi);
   }
+  // This node's hive row is the same view, without the scores.
+  wisp_core::HiveEntry own[wisp_core::MAX_ROW];
+  for (int i = 0; i < b.row_len; i++)
+    own[i] = wisp_core::HiveEntry{b.row[i].mac, b.row[i].rssi};
+  this->hive_.set_own(own, b.row_len, now);
+  b.hive_hash = this->hive_.hash();
+  b.row_version = this->hive_.own() != nullptr ? this->hive_.own()->version : 0;
+
   uint8_t buf[wisp_core::BEACON_MAX_BYTES];
   const size_t n = wisp_core::encode_beacon(b, buf, sizeof(buf));
   if (n > 0)
     this->scheduler_.set_beacon(buf, n);
+  if (const wisp_core::HiveRow *relay = this->hive_.next_relay()) {
+    uint8_t rbuf[wisp_core::ROW_FRAME_MAX_BYTES];
+    const size_t rn = wisp_core::encode_row_frame(*relay, this->relay_seq_++, rbuf, sizeof(rbuf));
+    if (rn > 0)
+      this->scheduler_.set_relay(rbuf, rn);
+  }
   this->update_sources_();
+}
+
+// Every few seconds: whether everyone knows the same things, the layout when the hive changed,
+// and the hive report for Home Assistant.
+void WispComponent::update_hive_(uint32_t now) {
+  this->hive_.expire(now);
+  const uint32_t hash = this->hive_.hash();
+  bool in_sync = true;
+  for (int i = 0; i < this->grid_.count(); i++) {
+    const wisp_core::Member &m = this->grid_.member(i);
+    if (m.state == wisp_core::MemberState::ACTIVE && m.hive_hash != hash)
+      in_sync = false;
+  }
+  this->hive_in_sync_.store(in_sync);
+  if (now - this->last_hive_ms_ < HIVE_REPORT_INTERVAL_MS)
+    return;
+  this->last_hive_ms_ = now;
+  if (hash != this->layout_hash_) {
+    this->layout_count_ = wisp_core::solve_layout(this->hive_, this->layout_, this->layout_ws_);
+    this->layout_hash_ = hash;
+    if (this->layout_count_ > 0) {
+      char mac[18];
+      for (int i = 0; i < this->layout_count_; i++) {
+        format_mac(this->layout_[i].mac, mac);
+        ESP_LOGD(TAG, "Layout: %s at (%.1f, %.1f) m", mac, this->layout_[i].x, this->layout_[i].y);
+      }
+    }
+  }
+  if (this->live_streams_ & wisp_core::STREAM_HIVE) {
+    static uint8_t report[wisp_core::HIVE_REPORT_MAX];  // core task only
+    const size_t n = wisp_core::encode_hive_report(this->self_, this->hive_seq_++, hash, in_sync, this->layout_,
+                                                   this->layout_count_, this->hive_, report, sizeof(report));
+    if (n > 0)
+      this->stream_.send(wisp_core::STREAM_HIVE, report, n, now);
+  }
 }
 
 // CSI is captured only from the home access point and grid members.
@@ -359,6 +427,7 @@ void WispComponent::core_second_(uint32_t now) {
   this->ap_score_.store(ap != nullptr ? ap->score : NAN);
   this->ap_active_.store(ap != nullptr && ap->active);
   this->grid_nodes_.store(this->grid_.active_count());
+  this->update_hive_(now);
 }
 
 void WispComponent::dump_config() {
@@ -378,6 +447,7 @@ void WispComponent::dump_config() {
   LOG_SENSOR("  ", "AP motion score", this->ap_motion_score_sensor_);
   LOG_BINARY_SENSOR("  ", "AP motion", this->ap_motion_binary_sensor_);
   LOG_SENSOR("  ", "Grid nodes", this->grid_nodes_sensor_);
+  LOG_BINARY_SENSOR("  ", "Hive in sync", this->hive_sync_binary_sensor_);
 }
 
 }  // namespace esphome::wisp
