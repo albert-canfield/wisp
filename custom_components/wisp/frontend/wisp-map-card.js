@@ -45,6 +45,7 @@ function place(map) {
   const pos = new Map();
   for (const n of map.nodes) if (n.x != null && n.y != null) pos.set(n.mac, { x: n.x, y: n.y });
   const loose = map.nodes.filter((n) => !pos.has(n.mac));
+  const onLayout = pos.size > 0; // else the nodes go on a circle, and layout metres would not fit it
   if (!pos.size) {
     // No layout yet: a circle, so the links still show
     loose.forEach((n, i) => {
@@ -63,7 +64,7 @@ function place(map) {
   const span = Math.max(b.w, b.h, 0.5);
   const beside = new Map(); // access points already placed beside a node
   for (const ap of map.access_points) {
-    if (ap.x != null && ap.y != null) {
+    if (onLayout && ap.x != null && ap.y != null) {
       pos.set(ap.bssid, { x: ap.x, y: ap.y });
       continue;
     }

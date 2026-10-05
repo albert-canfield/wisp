@@ -109,7 +109,7 @@ class Detector:
         self.above = self.above + 1 if score >= self.threshold else 0
         if not self.active and self.above >= self.persist:
             self.active = True
-        elif self.active and score < 0.75 * self.threshold:
+        elif self.active and score < 1 + 0.5 * (self.threshold - 1):
             self.active = False
         return self.active
 

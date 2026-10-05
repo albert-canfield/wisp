@@ -91,6 +91,9 @@ def main() -> int:
             if (fix := model.update(scores, t, moving if gated else None)) is not None:
                 fixes[(m, gated)].append((t, fix.x, fix.y, fix.quality))
 
+    if not total:
+        print("less than a second of packets")
+        return 1
     start, end = packets[0][0], packets[-1][0]
     print(f"{time.strftime('%H:%M', time.localtime(start))} to {time.strftime('%H:%M', time.localtime(end))}, "
           f"{total} s; sum of log scores p50 {sorted(disturbance)[len(disturbance) // 2]:.3f}, "

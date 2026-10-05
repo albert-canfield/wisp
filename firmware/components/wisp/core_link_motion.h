@@ -117,7 +117,9 @@ class LinkMotion {
   uint32_t settle_{0};
 };
 
-// On above the threshold, off below 75% of it, so the state does not flicker at the edge.
+// On at the threshold, off halfway between it and a quiet 1.0 (1.5 for the default 2), so the
+// state does not flicker at the edge. Measured from 1.0, not 0: a quiet link sits near 1 and
+// would never turn a low threshold off again.
 class MotionDetector {
  public:
   explicit MotionDetector(float threshold = 2.0f) : threshold_(threshold) {}
@@ -128,10 +130,11 @@ class MotionDetector {
       return this->active_;
     if (!this->active_ && score >= this->threshold_)
       this->active_ = true;
-    else if (this->active_ && score < 0.75f * this->threshold_)
+    else if (this->active_ && score < this->off())
       this->active_ = false;
     return this->active_;
   }
+  float off() const { return 1.0f + 0.5f * (this->threshold_ - 1.0f); }
 
  protected:
   float threshold_;

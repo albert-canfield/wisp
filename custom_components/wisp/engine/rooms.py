@@ -183,8 +183,10 @@ class Rooms:
         self.runs.pop(floor, None)
         self.decisions.pop(floor, None)
 
-    def _record(self, run: Run, vector: Vector, motion: float) -> None:
-        if not vector or (run.area is not None and motion < self.quiet):
+    def _record(self, run: Run, vector: Vector, motion: float, moving: bool | None) -> None:
+        """moving: as in decide, so a room learns from the seconds it will be asked about."""
+        still = motion < self.quiet if moving is None else not moving
+        if not vector or (run.area is not None and still):
             run.skipped += 1  # a still moment says nothing about where someone is
             return
         empty = run.area is None
@@ -232,7 +234,7 @@ class Rooms:
         if run is not None:
             if run.starts < now <= run.ends:
                 vector = features(scores)
-                self._record(run, vector, max((s for s in scores.values() if s is not None), default=0.0))
+                self._record(run, vector, max((s for s in scores.values() if s is not None), default=0.0), moving)
             if now >= run.ends:
                 ended = self.runs.pop(floor)
         decision = decide(scores, self.models(floor, areas), self.quiet, moving)

@@ -140,8 +140,27 @@ static void test_motion_score() {
   CHECK(std::isnan(link.tick()));
 }
 
+// Off halfway back to a quiet 1.0: the default turns off at 1.5, a low threshold still turns off.
+static void test_detector_hysteresis() {
+  for (const float t : {1.2f, 2.0f, 3.0f}) {
+    MotionDetector d(t);
+    const float off = 1.0f + 0.5f * (t - 1.0f);
+    CHECK(!d.update(t - 0.01f));
+    CHECK(d.update(t));
+    CHECK(d.update(off + 0.01f));  // still on above the off point
+    CHECK(d.update(NAN));          // unknown keeps the state
+    CHECK(!d.update(off - 0.01f));
+  }
+  MotionDetector low(1.2f);  // a quiet link around 1.0 turns the lowest setting off again
+  CHECK(low.update(1.25f));
+  CHECK(!low.update(1.03f));
+  MotionDetector def(2.0f);  // the default, as before: on at 2, off below 1.5
+  CHECK(def.update(2.0f) && def.update(1.5f) && !def.update(1.49f));
+}
+
 int main() {
   test_raw_packet();
+  test_detector_hysteresis();
   test_shape_ignores_gain();
   test_start_up_is_not_motion();
   test_motion_score();

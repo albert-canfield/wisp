@@ -235,6 +235,19 @@ def test_room_runs_record_motion_only():
     assert (ended.recorded, ended.skipped) == (2, 1) and len(engine.empty[FLOOR]) == 2
 
 
+def test_room_runs_follow_the_motion_flags():
+    """With the nodes' flags, a room learns from the seconds a link reports motion, as decide asks."""
+    floor = Floor()
+    engine = Rooms()
+    engine.start(FLOOR, "kitchen", 0.0, 4)
+    busy = floor.scores("kitchen")
+    engine.step(FLOOR, [], busy, 1.0, moving=False)  # busy scores, but no node calls it motion
+    engine.step(FLOOR, [], floor.scores(None), 2.0, moving=True)  # quiet scores, a flag still on
+    engine.step(FLOOR, [], busy, 3.0, moving=True)
+    ended = engine.step(FLOOR, [], busy, 4.0, moving=False)
+    assert (ended.recorded, ended.skipped) == (2, 2)
+
+
 def test_a_delayed_run_records_after_its_delay():
     floor = Floor()
     engine = Rooms()
