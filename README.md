@@ -11,6 +11,23 @@ See who is where in your home, room by room and as footprints moving across your
 
 > **Status: early development, phase 1 working.** Nodes form their grid, measure every link and report motion per link to Home Assistant. Rooms and positions come next. The design is in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md), the wire format in [docs/PROTOCOL.md](docs/PROTOCOL.md).
 
+## See it
+
+<p align="center"><img src="https://raw.githubusercontent.com/albert-canfield/wisp/main/docs/images/map-card.png" alt="The Wisp map card in light and dark: nodes, an access point, links that redden with motion, footprints walking along them and a mark where someone moves" width="100%"></p>
+
+<table>
+  <tr>
+    <td width="70%"><img src="https://raw.githubusercontent.com/albert-canfield/wisp/main/docs/images/panel.png" alt="The Wisp panel: recording banners with countdowns, the map, and rooms per floor with Calibrate and Clear"></td>
+    <td width="30%"><img src="https://raw.githubusercontent.com/albert-canfield/wisp/main/docs/images/panel-phone.png" alt="The Wisp panel on a phone in dark mode"></td>
+  </tr>
+  <tr>
+    <td><b>The Wisp panel.</b> Teach it your rooms: tap Calibrate and walk around until the countdown ends.</td>
+    <td><b>On a phone,</b> light or dark.</td>
+  </tr>
+</table>
+
+<p align="center"><i>Rendered from the real card and panel code with sample data.</i></p>
+
 ## How it works
 
 People absorb and reflect WiFi. Wisp places three or four cheap ESP32 nodes around each floor. They find each other and form a grid on their own, take turns sending short pings to each other and to your WiFi access point, and every node measures how the signal on each link changes (its channel state information, or CSI). The access point is a fixed point on your floor plan, so it adds links and precision. When someone walks between two nodes, that link reacts.
