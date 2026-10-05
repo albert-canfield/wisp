@@ -3,7 +3,7 @@ from datetime import timedelta
 
 DOMAIN = "wisp"
 VERSION = "0.1.0"  # keep in sync with manifest.json (cache-busts the card)
-PLATFORMS = ["binary_sensor", "sensor"]
+PLATFORMS = ["binary_sensor", "button", "sensor"]
 TITLE = "Wisp"
 
 # ESPHome project of the node firmware (firmware/common/base.yaml), advertised over mDNS

@@ -14,11 +14,13 @@ from pytest_homeassistant_custom_component.common import (
     MockConfigEntry,
     async_capture_events,
     async_fire_time_changed,
+    async_mock_service,
 )
 
 from homeassistant.config_entries import ConfigEntryState, ConfigSubentry, ConfigSubentryData
 from homeassistant.const import EVENT_STATE_CHANGED, STATE_UNAVAILABLE, STATE_UNKNOWN
 from homeassistant.core import HomeAssistant
+from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers import device_registry as dr, entity_registry as er
 from homeassistant.helpers.device_registry import CONNECTION_NETWORK_MAC
 from homeassistant.util import dt as dt_util
@@ -45,9 +47,9 @@ HIVE_IN_SYNC = "binary_sensor.wisp_hive_in_sync"
 
 
 def link_ids(hass: HomeAssistant, domain: str | None = None) -> list[str]:
-    """Entity ids without the hub's own two, which are always there."""
+    """Entity ids without those always there: the hub's own two and each node's Identify."""
     ids = hass.states.async_entity_ids(domain) if domain else hass.states.async_entity_ids()
-    return [e for e in ids if e not in (NODES_ONLINE, HIVE_IN_SYNC)]
+    return [e for e in ids if e not in (NODES_ONLINE, HIVE_IN_SYNC) and not e.startswith("button.")]
 
 
 def node_subentry(mac: str, host: str, name: str) -> ConfigSubentryData:
@@ -424,3 +426,46 @@ async def test_real_udp_with_fake_node(hass: HomeAssistant, socket_enabled: None
                 await async_probe(hass, "127.0.0.1")
     finally:
         node.close()
+
+
+async def test_identify_button_on_each_node(hass: HomeAssistant, udp: FakeUdp, aioclient_mock) -> None:
+    """Identify on the node's device: its ESPHome Identify when Home Assistant has it, else the
+    node's own web page."""
+    entry = await setup_hub(hass, HALL, OFFICE)
+    registry = er.async_get(hass)
+    button = registry.async_get("button.hall_identify")
+    assert button is not None and button.entity_category == "config" and button.original_device_class == "identify"
+    sub_a = next(s for s in entry.subentries.values() if s.unique_id == NODE_A)
+    assert button.config_subentry_id == sub_a.subentry_id
+    assert registry.async_get("button.office_identify") is not None
+    component = hass.data["entity_components"]["button"]
+    hall = component.get_entity("button.hall_identify")
+
+    # No ESPHome device: straight on the node's web page
+    aioclient_mock.post(f"http://{IP_A}/button/Identify/press", status=200)
+    await hass.services.async_call("button", "press", {"entity_id": "button.hall_identify"}, blocking=True)
+    assert aioclient_mock.call_count == 1
+    aioclient_mock.clear_requests()
+    aioclient_mock.post(f"http://{IP_A}/button/Identify/press", status=404)
+    with pytest.raises(HomeAssistantError, match="no Identify button"):
+        await hall.async_press()
+    aioclient_mock.clear_requests()
+    aioclient_mock.post(f"http://{IP_A}/button/Identify/press", exc=TimeoutError())
+    with pytest.raises(HomeAssistantError, match="could not be reached"):
+        await hall.async_press()
+
+    # With its ESPHome device in Home Assistant: that device's Identify button
+    esphome = MockConfigEntry(domain="esphome")
+    esphome.add_to_hass(hass)
+    device = dr.async_get(hass).async_get_or_create(
+        config_entry_id=esphome.entry_id, connections={(CONNECTION_NETWORK_MAC, NODE_A)}, name="Wisp 535001"
+    )
+    theirs = registry.async_get_or_create(
+        "button", "esphome", f"{NODE_A}-button-identify", device_id=device.id, original_name="Identify",
+        config_entry=esphome,
+    )
+    hass.states.async_set(theirs.entity_id, "unknown")
+    calls = async_mock_service(hass, "button", "press")
+    aioclient_mock.clear_requests()
+    await hall.async_press()
+    assert [c.data["entity_id"] for c in calls] == [theirs.entity_id] and aioclient_mock.call_count == 0

@@ -99,6 +99,7 @@ class WispHub:
             ("packets", "reports", "hive_reports", "duplicates", "unknown_node", "ignored", "invalid", "subscribes"), 0
         )
         self._new_link_listeners: list[Callable[[LinkKey], None]] = []
+        self._node_listeners: list[Callable[[], None]] = []
         self._link_listeners: dict[LinkKey, list[Callable[[], None]]] = {}
         self._unsubs: list[CALLBACK_TYPE] = []
         self._subscribing = False
@@ -172,6 +173,8 @@ class WispHub:
             if sub.data.get(CONF_AREA):
                 self.async_set_node_area(mac, sub.data[CONF_AREA])
         self.presence.async_sync_floors()
+        for listener in list(self._node_listeners):
+            listener()
         if changed and self.transport:
             self.entry.async_create_task(self.hass, self.async_subscribe(), "wisp subscribe")
 
@@ -302,6 +305,12 @@ class WispHub:
             listener()
 
     # Entities
+
+    @callback
+    def async_listen_nodes(self, listener: Callable[[], None]) -> CALLBACK_TYPE:
+        """Call listener after the nodes were synced with the subentries (added, changed, removed)."""
+        self._node_listeners.append(listener)
+        return lambda: self._node_listeners.remove(listener)
 
     @callback
     def async_listen_new_links(self, listener: Callable[[LinkKey], None]) -> CALLBACK_TYPE:
