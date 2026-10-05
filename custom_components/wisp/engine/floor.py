@@ -4,9 +4,11 @@ Positions come from the hive (nodes, relative metres) unless the user placed the
 points are placed from how strongly the placed nodes hear them. On a floor plan, coordinates are
 the plan's (metres from its top left corner, y down): the floor's nodes the user placed stay
 put, and the rest of the hive's layout is fitted onto them (anchor.py). The Locator is rebuilt
-only when positions (to 10 cm) or the set of usable links change. Each second, link scores
+only when positions (to 10 cm) or the set of usable links change. Each second, while at least
+one of the links reports motion (the node's detector: its threshold, with hysteresis), link scores
 become disturbances (log of the score, so a quiet link is 0) and the best fit goes through the
-Track.
+Track. The gate keeps the map in step with the motion sensors: quiet links alone add up to a
+phantom now and then, more often the more links a floor has.
 """
 
 from __future__ import annotations
@@ -83,15 +85,20 @@ class FloorModel:
                     positions[ap] = spot
         self.positions = positions
 
-    def update(self, scores: Mapping[LinkKey, float | None], now: float) -> FloorFix | None:
-        """scores: motion score per link (1 = quiet, None = unknown). Returns the fix, or None when
-        nobody is moving or the layout cannot place anyone yet."""
+    def update(
+        self, scores: Mapping[LinkKey, float | None], now: float, moving: Collection[LinkKey] | None = None
+    ) -> FloorFix | None:
+        """scores: motion score per link (1 = quiet, None = unknown). moving: the links reporting
+        motion (None: no such gate). Returns the fix, or None when nobody is moving or the layout
+        cannot place anyone yet."""
         usable = sorted(k for k, s in scores.items() if s is not None and k[0] in self.positions and k[1] in self.positions)
         key = (tuple(usable), tuple(sorted((m, round(p[0], 1), round(p[1], 1)) for m, p in self.positions.items())))
         if key != self._key:
             self._key = key
             self._locator = Locator(self.positions, usable, width=self.width) if len(usable) >= 2 else None
         if self._locator is None:
+            return None
+        if moving is not None and not any(k in moving for k in usable):
             return None
         values = {k: math.log(max(scores[k], 1.0)) for k in usable}
         spot = self._locator.locate(values, self.min_disturbance)

@@ -174,12 +174,19 @@ class RoomPresence:
 
     def scores(self, floor: str, now: float) -> dict[LinkKey, float]:
         """Live motion scores of the links the floor's nodes receive."""
+        return {key: link.score for key, link in self._live_links(floor, now)}
+
+    def moving(self, floor: str, now: float) -> set[LinkKey]:
+        """The floor's live links that report motion."""
+        return {key for key, link in self._live_links(floor, now) if link.motion}
+
+    def _live_links(self, floor: str, now: float):
         nodes = self.floors[floor].nodes
-        return {
-            key: link.score
+        return (
+            (key, link)
             for key, link in self.hub.table.links.items()
             if link.receiver in nodes and link.score is not None and now - link.updated <= ROOM_LINK_AGE
-        }
+        )
 
     @callback
     def _async_tick(self, _now: Any = None) -> None:
@@ -192,7 +199,7 @@ class RoomPresence:
             live[floor] = len(scores)
             ended.append(self.engine.step(floor, self.floor_areas(floor), scores, now))
             model = self._layout(floor, hive)
-            if (fix := model.update(scores, now)) is not None:
+            if (fix := model.update(scores, now, self.moving(floor, now))) is not None:
                 self.fixes[floor] = fix
             else:
                 self.fixes.pop(floor, None)

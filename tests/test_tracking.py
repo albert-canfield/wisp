@@ -33,6 +33,17 @@ def test_places_an_access_point_from_three_nodes() -> None:
     assert place_access_point({(0.0, 0.0): -50}) is None
 
 
+def test_readings_the_geometry_cannot_meet_stay_near() -> None:
+    """Two boards side by side, one hearing the AP far weaker: the fit used to run off for km."""
+    a, b = (0.2, 0.0), (-0.2, 0.0)
+    for strong, weak in [(-48, -61), (-40, -75), (-61, -48)]:
+        got = place_access_point({a: strong, b: weak})
+        near, d = (a, rssi_to_metres(strong)) if strong > weak else (b, rssi_to_metres(weak))
+        assert got is not None and all(map(math.isfinite, got))
+        assert math.dist(got, near) <= 2 * d + 1e-9, (strong, weak, got)
+        assert math.dist(got, near) < math.dist(got, b if near == a else a)  # beyond the node hearing it best
+
+
 def test_track_smooths_and_follows() -> None:
     rng = random.Random(5)
     track = Track()

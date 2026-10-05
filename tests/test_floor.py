@@ -72,3 +72,19 @@ def test_quiet_floor_and_unknown_links() -> None:
     assert floor.update({k: 1.0 for k in links}, now=0.0) is None  # all quiet
     assert floor.update({k: None for k in links}, now=1.0) is None  # nothing scored yet
     assert floor.update({("xx:00", "aa:00"): 3.0}, now=2.0) is None  # transmitter without a position
+
+
+def test_no_one_without_a_link_in_motion() -> None:
+    """Quiet links add up to a phantom now and then: a fix needs a link that reports motion."""
+    floor = FloorModel()
+    floor.set_layout(hive_state())
+    positions = {**NODES, AP[0]: AP[1]}
+    links = [(t, r) for t in positions for r in NODES if t != r]
+    noisy = {k: 1.0 + 0.12 * (i % 3) for i, k in enumerate(links)}  # every link a bit restless
+    assert floor.update(noisy, now=0.0) is not None  # enough for the sum alone
+    assert floor.update(noisy, now=1.0, moving=set()) is None
+    person = (2.0, 2.0)
+    busy = {k: score(person, *k, positions) for k in links}
+    moving = {k for k, v in busy.items() if v >= 2.0}
+    fix = floor.update(busy, now=2.0, moving=moving)
+    assert moving and fix is not None and math.dist((fix.raw_x, fix.raw_y), person) < 1.0

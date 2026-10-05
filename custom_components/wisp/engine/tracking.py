@@ -3,7 +3,9 @@
 place_access_point: an access point has no row of its own in the hive, but every node reports
 how strongly it hears it. RSSI becomes a rough distance (the same path loss model as the nodes'
 layout solver) and a least squares fit (Gauss-Newton) puts the AP where those distances agree
-best. Needs three nodes; with two the answer is one of two mirror images.
+best. Needs three nodes; with two the answer is one of two mirror images. Readings the geometry
+cannot meet would push the fit away without end, so it stays within twice the distance of the
+node that hears the AP best.
 
 Track: a constant velocity Kalman filter in 2D. Measurements that land implausibly far from the
 prediction are ignored for a moment (a gate), so one bad fit does not throw the dot across the
@@ -58,6 +60,16 @@ def place_access_point(heard: Mapping[Point, float], iterations: int = 30) -> Po
         x, y = x - step_x, y - step_y
         if abs(step_x) + abs(step_y) < 1e-4:
             break
+    # Readings that the geometry cannot meet (nodes close together, one hearing much less) push
+    # the fit away without end: no further than twice its distance from the node hearing it best.
+    near = min(range(len(pts)), key=dists.__getitem__)
+    (nx, ny), d = pts[near], dists[near]
+    dx, dy = x - nx, y - ny
+    r = math.hypot(dx, dy) if math.isfinite(dx) and math.isfinite(dy) else math.inf
+    if r > 2.0 * d:  # back to its own distance from that node, in the direction of the fit
+        if not math.isfinite(r):
+            dx, dy, r = 1.0, 0.0, 1.0
+        x, y = nx + dx / r * d, ny + dy / r * d
     return (x, y)
 
 

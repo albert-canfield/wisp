@@ -115,6 +115,38 @@ def percentile(values: list[float], p: float) -> float:
     return s[min(len(s) - 1, int(p / 100 * len(s)))]
 
 
+def load(files: list[str], since: str | None = None) -> list[tuple[float, bytes]]:
+    """Every recorded packet in time order, optionally from a local time (HH:MM) of the last day on."""
+    packets = []
+    for path in files:
+        packets.extend(read_wcsi(path))
+    packets.sort(key=lambda p: p[0])
+    if since and packets:
+        day = time.localtime(packets[-1][0])
+        hh, mm = (int(v) for v in since.split(":"))
+        start = time.mktime((day.tm_year, day.tm_mon, day.tm_mday, hh, mm, 0, 0, 0, -1))
+        packets = [p for p in packets if p[0] >= start]
+    return packets
+
+
+def seconds(packets: list[tuple[float, bytes]]):
+    """Each second, every link's score as the firmware computes it (NaN while it warms up or is
+    silent): yields (time, {(receiver, transmitter): score})."""
+    links: dict[tuple, LinkMotion] = defaultdict(LinkMotion)
+    next_tick = packets[0][0] + 1.0
+    for t, pkt in packets:
+        while t >= next_tick:
+            yield next_tick, {key: link.tick() for key, link in links.items()}
+            next_tick += 1.0
+        if len(pkt) < HEADER.size:
+            continue
+        f = HEADER.unpack_from(pkt)
+        if f[0] != b"WISP" or f[2] != 1:
+            continue
+        node, src, header_len, n = f[5].hex(":"), f[6].hex(":"), f[3], f[16]
+        links[(node, src)].add_frame(pkt[header_len:header_len + n])
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("files", nargs="+", help=".wcsi files from csi_logger.py, any order")
@@ -125,36 +157,16 @@ def main() -> int:
     ap.add_argument("--since", help="only packets from this local time on, HH:MM")
     args = ap.parse_args()
 
-    packets = []
-    for path in args.files:
-        packets.extend(read_wcsi(path))
-    packets.sort(key=lambda p: p[0])
-    if args.since and packets:
-        day = time.localtime(packets[-1][0])
-        hh, mm = (int(v) for v in args.since.split(":"))
-        start = time.mktime((day.tm_year, day.tm_mon, day.tm_mday, hh, mm, 0, 0, 0, -1))
-        packets = [p for p in packets if p[0] >= start]
+    packets = load(args.files, args.since)
     if not packets:
         print("no packets")
         return 1
 
-    links: dict[tuple, LinkMotion] = defaultdict(LinkMotion)
     detectors: dict[tuple, Detector] = defaultdict(lambda: Detector(args.threshold, args.persist))
     scores: dict[tuple, list[tuple[float, float, bool]]] = defaultdict(list)
-    next_tick = packets[0][0] + 1.0
-    for t, pkt in packets:
-        while t >= next_tick:
-            for key, link in links.items():
-                score = link.tick()
-                scores[key].append((next_tick, score, detectors[key].update(score)))
-            next_tick += 1.0
-        if len(pkt) < HEADER.size:
-            continue
-        f = HEADER.unpack_from(pkt)
-        if f[0] != b"WISP" or f[2] != 1:
-            continue
-        node, src, header_len, n = f[5].hex(":"), f[6].hex(":"), f[3], f[16]
-        links[(node, src)].add_frame(pkt[header_len:header_len + n])
+    for t, tick in seconds(packets):
+        for key, score in tick.items():
+            scores[key].append((t, score, detectors[key].update(score)))
 
     if args.sweep:
         grid = [(th, pe) for th in (1.5, 2.0, 2.5, 3.0) for pe in (1, 2, 3)]

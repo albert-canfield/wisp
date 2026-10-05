@@ -313,8 +313,8 @@ Pure Python, unit tested, no HA dependency.
 
 - `protocol.py`, `links.py`, `hive.py`: the UDP protocol, the latest state per link, the best recent hive report.
 - `imaging.py`: where on a floor. `Locator` finds one moving person by best fit: for every 25 cm pixel it predicts how much each link would be disturbed by someone there (falling off with the distance to the link's line) and keeps the pixel that fits the observed links best, quiet links included. On synthetic floors it reaches a median error of about 0.3 m, against 1.2 m for classic radio tomographic imaging (`Imager`, kept for heat maps; both run in plain Python by solving only links-by-links systems).
-- `tracking.py`: access points placed from how strongly the nodes hear them, and a Kalman track with a gate against wild fixes.
-- `floor.py`: one floor from hive layout and link scores to a smoothed position with a quality; on a floor plan, in the plan's metres.
+- `tracking.py`: access points placed from how strongly the nodes hear them (kept within twice their distance from the node hearing them best, since readings the geometry cannot meet would push the fit away without end), and a Kalman track with a gate against wild fixes.
+- `floor.py`: one floor from hive layout and link scores to a smoothed position with a quality; on a floor plan, in the plan's metres. Someone is placed only while at least one of the floor's links reports motion (the node's detector, so its Motion threshold and hysteresis): replaying a quiet night, the sum of quiet links alone put a phantom on the map in 2.7% of seconds, the motion gate in under 0.1%.
 - `anchor.py`: the similarity (rotation, mirror, scale, shift) that fits the hive's layout onto the nodes placed on a floor plan, see Node placement.
 - `rooms.py`: room presence from calibrated motion fingerprints, see below.
 
