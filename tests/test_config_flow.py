@@ -87,6 +87,40 @@ async def test_user_sets_up_the_hub_once(hass: HomeAssistant, udp: FakeUdp) -> N
     assert result["type"] is FlowResultType.ABORT and result["reason"] == "already_configured"
 
 
+def esphome_node(hass: HomeAssistant, mac: str, host: str, name: str, model: str = "wisp-node") -> None:
+    """A node Home Assistant has as an ESPHome device, named as the ESPHome integration names it."""
+    entry = MockConfigEntry(domain="esphome", unique_id=mac, data={"host": host})
+    entry.add_to_hass(hass)
+    dr.async_get(hass).async_get_or_create(
+        config_entry_id=entry.entry_id, connections={(CONNECTION_NETWORK_MAC, mac)}, name=name,
+        manufacturer="albert-canfield", model=model,
+    )
+
+
+async def test_new_hub_adopts_the_nodes_home_assistant_has(hass: HomeAssistant, udp: FakeUdp) -> None:
+    """Set up again after removing it, a hub takes every Wisp node ESPHome has, not only the one
+    Home Assistant rediscovers."""
+    esphome_node(hass, NODE_A, IP_A, "Wisp 535001")
+    esphome_node(hass, NODE_B, IP_B, "Wisp 535002")
+    esphome_node(hass, "02:57:49:53:50:09", "192.168.1.99", "Plug", model="smart-plug")  # not a node
+    result = await discover(hass, discovery())  # Node A, rediscovered
+    result = await hass.config_entries.flow.async_configure(result["flow_id"], {})
+    await hass.async_block_till_done()
+    assert result["type"] is FlowResultType.CREATE_ENTRY
+    assert nodes(result["result"]) == {
+        NODE_A: {"mac": NODE_A, "host": IP_A, "name": "Wisp 535001", "title": "Wisp 535001"},
+        NODE_B: {"mac": NODE_B, "host": IP_B, "name": "Wisp 535002", "title": "Wisp 535002"},
+    }
+    assert sorted(result["result"].runtime_data.nodes) == [NODE_A, NODE_B]
+
+
+async def test_hub_set_up_by_hand_adopts_the_nodes_too(hass: HomeAssistant, udp: FakeUdp) -> None:
+    esphome_node(hass, NODE_B, IP_B, "Wisp 535002")
+    result = await hass.config_entries.flow.async_init(DOMAIN, context={"source": SOURCE_USER})
+    result = await hass.config_entries.flow.async_configure(result["flow_id"], {})
+    assert list(nodes(result["result"])) == [NODE_B]
+
+
 async def test_first_node_found_sets_up_the_hub(hass: HomeAssistant, udp: FakeUdp) -> None:
     result = await discover(hass, discovery())
     assert result["type"] is FlowResultType.FORM and result["step_id"] == "discovery_confirm"

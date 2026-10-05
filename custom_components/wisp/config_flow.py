@@ -21,11 +21,11 @@ from homeassistant.config_entries import (
 )
 from homeassistant.const import CONF_HOST, CONF_MAC, CONF_NAME
 from homeassistant.core import HomeAssistant, callback
-from homeassistant.helpers import selector
-from homeassistant.helpers.device_registry import format_mac
+from homeassistant.helpers import device_registry as dr, selector
+from homeassistant.helpers.device_registry import CONNECTION_NETWORK_MAC, format_mac
 from homeassistant.helpers.service_info.zeroconf import ZeroconfServiceInfo
 
-from .const import CONF_AREA, CONF_PRESENCE_HOLD, DOMAIN, PROJECT_NAME, SUBENTRY_NODE, TITLE
+from .const import CONF_AREA, CONF_PRESENCE_HOLD, DOMAIN, MANUFACTURER, MODEL, PROJECT_NAME, SUBENTRY_NODE, TITLE
 from .engine.rooms import HOLD
 from .hub import ProbeError, async_probe, default_node_name, node_devices
 
@@ -55,6 +55,22 @@ def _node_data(mac: str, host: str, name: str, area: str | None = None) -> dict[
 
 def _node_subentry(mac: str, host: str, name: str) -> ConfigSubentryData:
     return ConfigSubentryData(data=_node_data(mac, host, name), subentry_type=SUBENTRY_NODE, title=name, unique_id=mac)
+
+
+def known_nodes(hass: HomeAssistant, first: dict[str, str] | None = None) -> list[ConfigSubentryData]:
+    """The nodes a new hub starts with: the one found (first), then every Wisp node Home Assistant
+    has as an ESPHome device. Home Assistant rediscovers only the node that created a removed hub,
+    and the others stay quiet until they restart, so a hub set up again would miss them."""
+    found = {first[CONF_MAC]: _node_subentry(**first)} if first else {}
+    registry = dr.async_get(hass)
+    for esphome in hass.config_entries.async_entries("esphome", include_ignore=False, include_disabled=False):
+        if not (host := esphome.data.get(CONF_HOST)):
+            continue
+        for device in dr.async_entries_for_config_entry(registry, esphome.entry_id):
+            mac = next((format_mac(v) for kind, v in device.connections if kind == CONNECTION_NETWORK_MAC), None)
+            if mac and mac not in found and (device.manufacturer, device.model) == (MANUFACTURER, MODEL):
+                found[mac] = _node_subentry(mac, host, device.name_by_user or device.name or default_node_name(mac))
+    return list(found.values())
 
 
 @callback
@@ -109,7 +125,7 @@ class WispConfigFlow(ConfigFlow, domain=DOMAIN):
         await self.async_set_unique_id(DOMAIN)
         self._abort_if_unique_id_configured()
         if user_input is not None:
-            return self.async_create_entry(title=TITLE, data={})
+            return self.async_create_entry(title=TITLE, data={}, subentries=known_nodes(self.hass))
         return self.async_show_form(step_id="user")
 
     async def async_step_zeroconf(self, discovery_info: ZeroconfServiceInfo) -> ConfigFlowResult:
@@ -140,7 +156,7 @@ class WispConfigFlow(ConfigFlow, domain=DOMAIN):
         if user_input is not None:
             await self.async_set_unique_id(DOMAIN, raise_on_progress=False)
             self._abort_if_unique_id_configured()
-            return self.async_create_entry(title=TITLE, data={}, subentries=[_node_subentry(**self._node)])
+            return self.async_create_entry(title=TITLE, data={}, subentries=known_nodes(self.hass, self._node))
         self._set_confirm_only()
         return self.async_show_form(
             step_id="discovery_confirm",

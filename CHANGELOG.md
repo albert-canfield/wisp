@@ -53,6 +53,7 @@ First working version: the grid, the hive and motion per link, with the Home Ass
 - Homes on one level read as such: without Home Assistant floors, the panel shows Areas and Empty home, and the WiFi channel setting only appears where it helps (several floors, several access points, or a channel already chosen).
 - The panel shows who is where as small figures in its lists instead of a line of text under the map: someone moving in a room, someone there, someone keeping still, and on each node whether its links see motion. The map card's line under the map can be turned off (`motion_text: false`).
 - Someone moving is placed only near a link that could see them (within 0.6 m of its line), and on the busy link rather than at its fringe: the fit's free scale let a spot far from every link, or at a link's end, fit as well as one on it. The position shown stays in the room room presence is sure of, as each fit already did. Access points are placed with the nodes' indoor path-loss model (exponent 4.0, was 2.7), which put them too far out.
+- A hub set up again takes every Wisp node Home Assistant has as an ESPHome device, not only the node that created it: Home Assistant rediscovers only that one after a hub is removed, and the other nodes stayed out until they restarted.
 - Position sensors: on a floor with a plan, x and y of someone moving in the plan's metres (from its top left corner), with the fit's quality as an attribute; unknown while nobody moves.
 
 ### Tools
