@@ -21,7 +21,7 @@ import math
 Point = tuple[float, float]
 
 RSSI_AT_1M = -45.0
-PATH_LOSS_EXPONENT = 2.7
+PATH_LOSS_EXPONENT = 4.0  # the nodes' layout is in these metres (core_layout.h): indoors, through walls
 
 
 def rssi_to_metres(rssi: float) -> float:

@@ -167,6 +167,13 @@ def line_distance(p: Point, a: Point, b: Point) -> float:
     return math.hypot(p[0] - (a[0] + t * dx), p[1] - (a[1] + t * dy))
 
 
+# A spot further than this many link widths from every link's line is no candidate: someone
+# there disturbs no link. The fit has a free scale, so tiny predictions far from all links, in
+# the right proportions, would otherwise fit as well as a spot on the busy link.
+REACH = 1.5
+SCALE_PRIOR = 0.5  # weight of the expected scale, against a spot's sum of squared predictions (1 on one line)
+
+
 @dataclass
 class Locator:
     """Best fit position of one moving person, for a fixed layout."""
@@ -180,6 +187,7 @@ class Locator:
     ys: list[float] = field(init=False)
     _pred: list[list[float]] = field(init=False)  # per pixel: predicted disturbance per link
     _norm: list[float] = field(init=False)
+    _near: list[bool] = field(init=False)  # per pixel: close enough to a link's line to disturb it
 
     def __post_init__(self) -> None:
         used = [k for k in self.links if k[0] in self.positions and k[1] in self.positions]
@@ -195,11 +203,14 @@ class Locator:
         ends = [(self.positions[t], self.positions[r]) for t, r in used]
         self._pred = []
         self._norm = []
+        self._near = []
+        reach = math.exp(-REACH * REACH / 2)
         for y in self.ys:
             for x in self.xs:
                 row = [math.exp(-(line_distance((x, y), a, b) ** 2) / two_s2) for a, b in ends]
                 self._pred.append(row)
                 self._norm.append(sum(v * v for v in row))
+                self._near.append(max(row, default=0.0) >= reach)
 
     def locate(self, values: Mapping[LinkKey, float], min_disturbance: float = 0.3) -> Location | None:
         """values: disturbance per link (for example log(score)); missing links count as quiet.
@@ -210,20 +221,26 @@ class Locator:
         if total < min_disturbance:
             return None
         yy = sum(v * v for v in y)
+        # Someone on a link's line disturbs it about as much as the busiest link shows: the scale
+        # leans towards that, so a spot on the busy line beats one at its fringe, where only a
+        # larger scale fits (with a free scale both fit the pattern equally well).
+        s0, mu = max(y), SCALE_PRIOR
         best = None
         for i, row in enumerate(self._pred):
             norm = self._norm[i]
-            if norm < 1e-9:
+            if norm < 1e-9 or not self._near[i]:  # far from every link: only a huge scale would fit
                 continue
             dot = sum(a * b for a, b in zip(row, y))
             if dot <= 0:
                 continue
-            residual = yy - dot * dot / norm  # least squares with the best scale
-            if best is None or residual < best[0]:
-                best = (residual, i, dot / norm)
+            scale = (dot + mu * s0) / (norm + mu)
+            residual = yy - 2 * scale * dot + scale * scale * norm  # least squares at that scale
+            cost = residual + mu * (scale - s0) ** 2
+            if best is None or cost < best[0]:
+                best = (cost, i, scale, residual)
         if best is None:
             return None
-        residual, i, scale = best
+        _, i, scale, residual = best
         j, k = divmod(i, len(self.xs))
         return Location(self.xs[k], self.ys[j], scale, max(0.0, 1.0 - residual / yy))
 

@@ -153,17 +153,17 @@ class FloorModel:
             self._key = key
             self._locator = Locator(self.positions, usable, width=self.width) if len(usable) >= 2 else None
         if self._locator is None:
-            return self._read(None, now)
+            return self._read(None, now, room)
         if moving is not None:
             moving = self._corroborated(moving, now)
             if not any(k in moving for k in usable):
-                return self._read(None, now)
+                return self._read(None, now, room)
         values = {k: math.log(max(scores[k], 1.0)) for k in usable}
         spot = self._locator.locate(values, self.min_disturbance)
         raw: tuple[float, float, float] | None = None
         if spot is not None and spot.contrast >= self.min_quality:
             raw = (*self._keep_in(spot.x, spot.y, room), spot.contrast)
-        return self._read(raw, now)
+        return self._read(raw, now, room)
 
     def _corroborated(self, moving: Collection[LinkKey], now: float) -> set[LinkKey]:
         """The links reporting motion that another link backs up within corroborate seconds."""
@@ -181,8 +181,9 @@ class FloorModel:
         house = [r for rects in self.rooms.values() for r in rects]
         return inside(self.rooms.get(room or "") or house, x, y) if house else (x, y)
 
-    def _read(self, raw: tuple[float, float, float] | None, now: float) -> FloorFix | None:
-        """This second's fit (or none) read with the recent ones: walking, still, or nobody."""
+    def _read(self, raw: tuple[float, float, float] | None, now: float, room: str | None = None) -> FloorFix | None:
+        """This second's fit (or none) read with the recent ones: walking, still, or nobody. The
+        position shown stays in the room room presence is sure of, as each fit does."""
         if raw is not None:
             self.fits.append((now, *raw))
             self.track.update(raw[0], raw[1], now, raw[2])
@@ -200,7 +201,7 @@ class FloorModel:
         elif len(recent) < self.walk_min - 1 or travel < self.walk_travel / 2:
             self.walking = False
         if self.walking and self.track.state is not None and (raw is None or self.streak >= self.min_streak):
-            x, y = self._keep_in(self.track.state[0], self.track.state[1])
+            x, y = self._keep_in(self.track.state[0], self.track.state[1], room)
             last = self.fits[-1]
             return FloorFix(x, y, last[1], last[2], last[3])
         window = [f for f in self.fits if now - f[0] < self.still_window]
@@ -209,7 +210,7 @@ class FloorModel:
         weight = sum(f[3] for f in window)
         cx = sum(f[1] * f[3] for f in window) / weight
         cy = sum(f[2] * f[3] for f in window) / weight
-        x, y = self._keep_in(cx, cy)
+        x, y = self._keep_in(cx, cy, room)
         last = window[-1]
         return FloorFix(x, y, last[1], last[2], weight / len(window), walking=False)
 
