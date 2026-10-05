@@ -124,6 +124,32 @@ void WispComponent::loop() {
   }
   if (now - this->last_stats_ms_ >= STATS_INTERVAL_MS)
     this->publish_stats_(now);
+#ifdef USE_WISP_FTM
+  // Experimental: range to the home access point every 30 s; every 30 min after it failed to
+  // answer three times in a row (many home access points do not support FTM).
+  const uint32_t ftm_interval = this->ftm_failures_ >= 3 ? 30 * 60 * 1000 : 30000;
+  if (connected && now - this->last_ftm_ms_ >= ftm_interval) {
+    this->last_ftm_ms_ = now;
+    if (!this->ftm_started_ && !(this->ftm_started_ = this->ftm_.start()))
+      ESP_LOGW(TAG, "FTM probe could not register for reports");
+    wifi_ap_record_t ap;
+    if (this->ftm_started_ && esp_wifi_sta_get_ap_info(&ap) == ESP_OK && !this->ftm_.measure(ap.bssid, ap.primary))
+      ESP_LOGW(TAG, "Could not start an FTM session");
+  }
+  if (this->ftm_.results() != this->ftm_results_seen_) {
+    this->ftm_results_seen_ = this->ftm_.results();
+    const int status = this->ftm_.status();
+    this->ftm_failures_ = status == 0 ? 0 : static_cast<uint8_t>(this->ftm_failures_ < 255 ? this->ftm_failures_ + 1 : 255);
+    if (status == 0) {
+      ESP_LOGI(TAG, "FTM to the access point: %.2f m", this->ftm_.distance_m());
+    } else {
+      ESP_LOGI(TAG, "FTM to the access point failed: status %d (1 unsupported, 3 no response, 5 no valid measurement)",
+               status);
+    }
+    if (this->ap_distance_sensor_ != nullptr)
+      this->ap_distance_sensor_->publish_state(this->ftm_.distance_m());
+  }
+#endif
 }
 
 // While ESPHome is (re)connecting: remember the home network's APs from its scan results (it

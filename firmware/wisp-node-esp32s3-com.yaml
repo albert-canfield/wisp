@@ -1,5 +1,6 @@
 # Variant for two-port ESP32-S3 boards used through their COM (UART) port, for example when
-# debugging: logs and Improv on UART0 instead of the native USB port.
+# debugging: logs and Improv on UART0 instead of the native USB port. Also tries Wi-Fi FTM
+# ranging to the access point (experimental).
 
 packages:
   node: !include wisp-node-esp32s3.yaml
@@ -9,3 +10,8 @@ esphome:
 
 logger:
   hardware_uart: UART0
+
+wisp:
+  ftm_probe: true
+  ap_distance:
+    name: AP distance

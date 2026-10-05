@@ -19,6 +19,7 @@
 #include "core_wifi_plan.h"
 #include "esp_ap_csi.h"
 #include "esp_espnow.h"
+#include "esp_ftm.h"
 #include "esp_udp_stream.h"
 
 namespace esphome::wisp {
@@ -40,6 +41,7 @@ class WispComponent : public Component {
   void set_ap_motion_binary_sensor(binary_sensor::BinarySensor *s) { this->ap_motion_binary_sensor_ = s; }
   void set_grid_nodes_sensor(sensor::Sensor *s) { this->grid_nodes_sensor_ = s; }
   void set_channel_sensor(sensor::Sensor *s) { this->channel_sensor_ = s; }
+  void set_ap_distance_sensor(sensor::Sensor *s) { this->ap_distance_sensor_ = s; }
   void set_hive_sync_binary_sensor(binary_sensor::BinarySensor *s) { this->hive_sync_binary_sensor_ = s; }
   void set_raw_stream_enabled(bool enabled) { this->raw_stream_enabled_.store(enabled); }
   void set_grid_channel(uint8_t channel) { this->grid_channel_cfg_ = channel; }
@@ -75,6 +77,7 @@ class WispComponent : public Component {
   binary_sensor::BinarySensor *ap_motion_binary_sensor_{nullptr};
   sensor::Sensor *grid_nodes_sensor_{nullptr};
   sensor::Sensor *channel_sensor_{nullptr};
+  sensor::Sensor *ap_distance_sensor_{nullptr};
   binary_sensor::BinarySensor *hive_sync_binary_sensor_{nullptr};
 
   wisp_platform::CsiCapture capture_;
@@ -82,6 +85,11 @@ class WispComponent : public Component {
   wisp_platform::UdpStream stream_;
   wisp_platform::EspNowRadio radio_;
   wisp_platform::SlotScheduler scheduler_;
+  wisp_platform::FtmProbe ftm_;
+  bool ftm_started_{false};
+  uint32_t last_ftm_ms_{0};
+  uint32_t ftm_results_seen_{0};
+  uint8_t ftm_failures_{0};
   QueueHandle_t csi_queue_{nullptr};
   QueueHandle_t espnow_queue_{nullptr};
   TaskHandle_t task_{nullptr};

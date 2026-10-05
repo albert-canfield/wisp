@@ -2,7 +2,15 @@
 
 import esphome.codegen as cg
 from esphome.components import binary_sensor, sensor
-from esphome.components.esp32 import add_idf_sdkconfig_option
+from esphome.components.esp32 import (
+    VARIANT_ESP32C2,
+    VARIANT_ESP32C3,
+    VARIANT_ESP32C6,
+    VARIANT_ESP32S2,
+    VARIANT_ESP32S3,
+    add_idf_sdkconfig_option,
+    get_esp32_variant,
+)
 import esphome.config_validation as cv
 from esphome.const import (
     CONF_ID,
@@ -29,6 +37,9 @@ CONF_GRID_CHANNEL = "grid_channel"
 CONF_AP_MIN_RSSI = "ap_min_rssi"
 CONF_HIVE_IN_SYNC = "hive_in_sync"
 CONF_CHANNEL = "channel"
+CONF_FTM_PROBE = "ftm_probe"
+CONF_AP_DISTANCE = "ap_distance"
+FTM_VARIANTS = (VARIANT_ESP32S2, VARIANT_ESP32S3, VARIANT_ESP32C2, VARIANT_ESP32C3, VARIANT_ESP32C6)
 
 wisp_ns = cg.esphome_ns.namespace("wisp")
 WispComponent = wisp_ns.class_("WispComponent", cg.Component)
@@ -49,6 +60,14 @@ CONFIG_SCHEMA = cv.Schema(
         cv.Optional(CONF_AP_MIN_RSSI, default=-80): cv.int_range(min=-100, max=-30),
         cv.Optional(CONF_HIVE_IN_SYNC): binary_sensor.binary_sensor_schema(
             icon="mdi:hexagon-multiple",
+            entity_category=ENTITY_CATEGORY_DIAGNOSTIC,
+        ),
+        cv.Optional(CONF_FTM_PROBE, default=False): cv.boolean,
+        cv.Optional(CONF_AP_DISTANCE): sensor.sensor_schema(
+            unit_of_measurement="m",
+            icon="mdi:map-marker-distance",
+            accuracy_decimals=2,
+            state_class=STATE_CLASS_MEASUREMENT,
             entity_category=ENTITY_CATEGORY_DIAGNOSTIC,
         ),
         cv.Optional(CONF_CHANNEL): sensor.sensor_schema(
@@ -102,6 +121,15 @@ async def to_code(config):
     if CONF_HIVE_IN_SYNC in config:
         bs = await binary_sensor.new_binary_sensor(config[CONF_HIVE_IN_SYNC])
         cg.add(var.set_hive_sync_binary_sensor(bs))
+    if config[CONF_FTM_PROBE]:
+        if get_esp32_variant() not in FTM_VARIANTS:
+            raise cv.Invalid(f"ftm_probe needs a chip with Wi-Fi FTM: {', '.join(FTM_VARIANTS)}")
+        add_idf_sdkconfig_option("CONFIG_ESP_WIFI_FTM_ENABLE", True)
+        add_idf_sdkconfig_option("CONFIG_ESP_WIFI_FTM_INITIATOR_SUPPORT", True)
+        cg.add_build_flag("-DUSE_WISP_FTM")  # every file, including the ESP-IDF adapter
+    if CONF_AP_DISTANCE in config:
+        sens = await sensor.new_sensor(config[CONF_AP_DISTANCE])
+        cg.add(var.set_ap_distance_sensor(sens))
     if CONF_CHANNEL in config:
         sens = await sensor.new_sensor(config[CONF_CHANNEL])
         cg.add(var.set_channel_sensor(sens))

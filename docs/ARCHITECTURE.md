@@ -396,7 +396,7 @@ wisp/
 - Slots per round (the maximum number of nodes on one channel).
 - Lifecycle timers: how long until quiet, missing and forgotten, and whether the user can change them.
 - AP ping rate per node, and whether beacons from common routers carry usable CSI.
-- How many home routers answer FTM.
+- How many home routers answer FTM. Tested: the owner's TP-Link Omada AP on 2.4 GHz does not answer (status "no response"); the optional `ftm_probe` in the firmware checks any AP. Next option: node-to-node FTM, one node as responder.
 - How much the AP links improve position in practice: measure in phase 1, with and without them.
 - Multi-AP homes on different 2.4 GHz channels: how often to scan the other channels without hurting the grid.
 - How reliably BSSIDs group into physical APs across vendors (Omada, UniFi, Deco, Eero, Orbi and others).
