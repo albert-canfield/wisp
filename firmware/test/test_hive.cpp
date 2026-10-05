@@ -1,5 +1,6 @@
 // Host tests for the hive (core_hive.h) and the layout solver (core_layout.h).
 // Run: firmware/test/run.sh
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <random>
@@ -318,7 +319,171 @@ static void test_portable_exp2() {
   for (float x = -12.0f; x <= 12.0f; x += 0.01f)
     worst = std::fmax(worst, std::fabs(exp2_portable(x) / std::exp2(x) - 1.0f));
   CHECK(worst < 1e-6f);
-  CHECK(std::fabs(rssi_to_metres(-45.0f) - 1.0f) < 1e-6f && std::fabs(rssi_to_metres(-72.0f) - 10.0f) < 1e-5f);
+  CHECK(std::fabs(rssi_to_metres(-45.0f) - 1.0f) < 1e-6f && std::fabs(rssi_to_metres(-85.0f) - 10.0f) < 1e-5f);
+  CHECK(std::fabs(rssi_to_metres(-72.0f, PathLoss{-45.0f, 2.7f}) - 10.0f) < 1e-5f);
+}
+
+// Second over first singular value of the centred layout: 0 on a line, 1 for a round cloud.
+static float layout_flatness(const LayoutPoint *p, int n) {
+  float cx = 0, cy = 0;
+  for (int i = 0; i < n; i++) {
+    cx += p[i].x / n;
+    cy += p[i].y / n;
+  }
+  float sxx = 0, syy = 0, sxy = 0;
+  for (int i = 0; i < n; i++) {
+    sxx += (p[i].x - cx) * (p[i].x - cx);
+    syy += (p[i].y - cy) * (p[i].y - cy);
+    sxy += (p[i].x - cx) * (p[i].y - cy);
+  }
+  const float mid = 0.5f * (sxx + syy), half = std::sqrt(0.25f * (sxx - syy) * (sxx - syy) + sxy * sxy);
+  return mid + half > 0 ? std::sqrt(std::fmax(mid - half, 0.0f) / (mid + half)) : 0.0f;
+}
+
+// RMS error after the best similarity fit (mirror allowed), relative to the true spread.
+static float procrustes_error(const LayoutPoint *p, const float (*truth)[2], int n) {
+  float ox = 0, oy = 0, tx = 0, ty = 0;
+  for (int i = 0; i < n; i++) {
+    ox += p[i].x / n;
+    oy += p[i].y / n;
+    tx += truth[i][0] / n;
+    ty += truth[i][1] / n;
+  }
+  // Points as complex numbers: the best rotation and scale is sum(conj(o) t) / sum|o|^2.
+  float oo = 0, tt = 0, re = 0, im = 0, mre = 0, mim = 0;
+  for (int i = 0; i < n; i++) {
+    const float a = p[i].x - ox, b = p[i].y - oy, c = truth[i][0] - tx, d = truth[i][1] - ty;
+    oo += a * a + b * b;
+    tt += c * c + d * d;
+    re += a * c + b * d;
+    im += a * d - b * c;
+    mre += a * c - b * d;  // mirrored: conj(o) taken as o
+    mim += a * d + b * c;
+  }
+  if (oo <= 0)
+    return 1.0f;
+  const float fit = std::fmax(re * re + im * im, mre * mre + mim * mim) / oo;
+  return std::sqrt(std::fmax(tt - fit, 0.0f) / tt);
+}
+
+static Mac mac_of(uint8_t a, uint8_t b, uint8_t c, uint8_t d, uint8_t e, uint8_t f) {
+  return Mac{{a, b, c, d, e, f}};
+}
+
+// The owner's floor, live rows of 2026-10-05 (four nodes, each also hearing the access point).
+// With one fixed path loss exponent (2.7) these came out on a straight line: far pairs too far,
+// the triangle inequality broken. They must give a layout with two real dimensions.
+static void test_layout_of_live_rows() {
+  const Mac n8d58 = mac_of(0x44, 0x1b, 0xf6, 0x8d, 0x58, 0x58), nee90 = mac_of(0x58, 0xcf, 0x79, 0xee, 0x90, 0x58),
+            nd714 = mac_of(0xe0, 0x72, 0xa1, 0xd7, 0x14, 0x30), na8c7 = mac_of(0xac, 0x27, 0x6e, 0xa8, 0xc7, 0x7c),
+            ap = mac_of(0xa8, 0x29, 0x48, 0xe1, 0x6d, 0x70);
+  // Receiver, then what it hears; the access point readings are stand-ins (it is not a node).
+  struct Row {
+    Mac rx;
+    HiveEntry e[4];
+  } rows[4] = {
+      {n8d58, {{nee90, -71}, {na8c7, -42}, {nd714, -51}, {ap, -58}}},
+      {nee90, {{n8d58, -70}, {na8c7, -71}, {nd714, -80}, {ap, -62}}},
+      {nd714, {{n8d58, -52}, {na8c7, -63}, {nee90, -82}, {ap, -66}}},
+      {na8c7, {{n8d58, -43}, {nee90, -74}, {nd714, -64}, {ap, -55}}},
+  };
+  Hive h1(mac_n(100)), h2(mac_n(101));
+  for (int i = 0; i < 4; i++)
+    h1.on_row(rows[i].rx, 1, rows[i].e, 4, 0);
+  for (int i = 3; i >= 0; i--)  // same rows, the other way round
+    h2.on_row(rows[i].rx, 1, rows[i].e, 4, 0);
+  static LayoutWorkspace ws;
+  LayoutPoint a[MAX_POINTS], b[MAX_POINTS];
+  const int na = solve_layout(h1, a, ws), nb = solve_layout(h2, b, ws);
+  CHECK(na == 4 && nb == 4);  // the access point is no point of the layout
+  bool identical = na == nb;
+  for (int i = 0; i < na && identical; i++)
+    identical = a[i].mac == b[i].mac && a[i].x == b[i].x && a[i].y == b[i].y;
+  CHECK(identical);
+  CHECK(a[0].mac == n8d58 && a[0].x < 0.0f && a[0].y == 0.0f && a[1].y >= 0.0f);  // fixed pose
+  float spread = 0.0f;
+  for (int i = 0; i < na; i++)
+    spread = std::fmax(spread, std::fabs(a[i].y));
+  const float flat = layout_flatness(a, na);
+  std::printf("  live rows of 4 nodes: flatness %.2f, y spread %.1f m:", flat, spread);
+  for (int i = 0; i < na; i++)
+    std::printf(" %02x%02x (%.1f, %.1f)", a[i].mac.b[4], a[i].mac.b[5], a[i].x, a[i].y);
+  std::printf("\n");
+  CHECK(flat > 0.3f && spread >= 0.8f);
+  // Nearest pair by far (-42/-43 dB): the nearest in the layout too.
+  const float near = std::hypot(a[0].x - a[2].x, a[0].y - a[2].y);  // 8d58 to a8c7
+  bool nearest = true;
+  for (int i = 0; i < na; i++)
+    for (int j = i + 1; j < na; j++)
+      if (!(i == 0 && j == 2))
+        nearest = nearest && std::hypot(a[i].x - a[j].x, a[i].y - a[j].y) > near;
+  CHECK(a[2].mac == na8c7 && nearest);
+}
+
+// Homes with walls (3 by 2 rooms of 4 x 4.5 m), path loss exponent 2 to 3.5, 3 to 7 dB a wall,
+// per-board offsets of up to 4 dB and 1.5 dB noise: the shape comes back, and two dimensions.
+static void test_layout_through_walls() {
+  static LayoutWorkspace ws;
+  std::mt19937 rng(77);
+  std::uniform_real_distribution<float> unit(0.0f, 1.0f);
+  std::normal_distribution<float> noise(0.0f, 1.5f);
+  for (const int n : {3, 4, 6, 8}) {
+    std::vector<float> errors;
+    int flat = 0, runs = 0;
+    for (int r = 0; r < 100; r++) {
+      float pos[MAX_POINTS][2];
+      for (int i = 0; i < n; i++) {
+        bool apart = false;
+        while (!apart) {
+          const int room = (i + r) % 6;  // different rooms while there are rooms left
+          pos[i][0] = 4.0f * (room % 3) + 0.3f + 3.4f * unit(rng);
+          pos[i][1] = 4.5f * (room / 3) + 0.3f + 3.9f * unit(rng);
+          apart = true;
+          for (int j = 0; j < i; j++)
+            apart = apart && std::hypot(pos[i][0] - pos[j][0], pos[i][1] - pos[j][1]) >= 1.0f;
+        }
+      }
+      const float exponent = 2.0f + 1.5f * unit(rng), wall_db = 3.0f + 4.0f * unit(rng);
+      float offset[MAX_POINTS];
+      for (int i = 0; i < n; i++)
+        offset[i] = -4.0f + 8.0f * unit(rng);
+      Hive h(mac_n(500));
+      for (int i = 0; i < n; i++) {
+        HiveEntry e[MAX_ROW];
+        int k = 0;
+        for (int j = 0; j < n; j++) {
+          if (i == j)
+            continue;
+          const float d = std::hypot(pos[i][0] - pos[j][0], pos[i][1] - pos[j][1]);
+          int walls = 0;
+          for (const float wx : {4.0f, 8.0f})
+            walls += (pos[i][0] - wx) * (pos[j][0] - wx) < 0;
+          walls += (pos[i][1] - 4.5f) * (pos[j][1] - 4.5f) < 0;
+          const float rssi = -45.0f - 10.0f * exponent * std::log10(d) - wall_db * walls + offset[i] + offset[j] + noise(rng);
+          e[k++] = HiveEntry{mac_n(1 + j), static_cast<int8_t>(std::lround(rssi))};
+        }
+        h.on_row(mac_n(1 + i), 1, e, k, 0);
+      }
+      LayoutPoint out[MAX_POINTS];
+      if (solve_layout(h, out, ws) != n)
+        continue;
+      runs++;
+      errors.push_back(procrustes_error(out, pos, n));
+      float truth_flat = 0;
+      {
+        LayoutPoint t[MAX_POINTS];
+        for (int i = 0; i < n; i++)
+          t[i] = LayoutPoint{out[i].mac, pos[i][0], pos[i][1]};
+        truth_flat = layout_flatness(t, n);
+      }
+      flat += truth_flat >= 0.1f && layout_flatness(out, n) < 0.1f;
+    }
+    std::sort(errors.begin(), errors.end());
+    const float median = errors.empty() ? 1.0f : errors[errors.size() / 2];
+    std::printf("  %d nodes through walls: median shape error %.2f, %d of %d layouts on a line\n", n, median, flat,
+                runs);
+    CHECK(runs == 100 && median < 0.28f && flat <= (n == 3 ? 8 : 2));
+  }
 }
 
 // Nodes at known positions; RSSI from the path-loss model plus noise; the layout should give
@@ -393,6 +558,8 @@ int main() {
   test_stale_copy_of_own_row();
   test_layout();
   test_layout_keeps_two_dimensions();
+  test_layout_of_live_rows();
+  test_layout_through_walls();
   test_portable_exp2();
   test_hive_report_rotates_rows();
   if (failures) {

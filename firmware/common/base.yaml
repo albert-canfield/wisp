@@ -3,7 +3,7 @@
 substitutions:
   name: wisp
   friendly_name: Wisp
-  project_version: "0.1.1"
+  project_version: "0.1.5"
   motion_threshold: "2.0" # default; then the Motion threshold entity, kept across reboots
 
 esphome:

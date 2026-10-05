@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.1.4 (unreleased)
+## 0.1.5 (unreleased)
 Versions count up with each round of changes until the first release.
 
 First working version: the grid, the hive and motion per link, with the Home Assistant integration and the map card.
@@ -21,6 +21,7 @@ First working version: the grid, the hive and motion per link, with the Home Ass
   - Someone sitting still is no longer absorbed: a link's quiet baseline rises only towards the quietest second of the last 10 minutes, so hours at a desk (busy most seconds, a quiet moment now and then) keep scoring as someone there, while a lasting change in the room, with no quiet moments, is still learned in about half an hour. In a simulated hour of sitting the score held at 2.1 (it had faded to 1.6 and falling).
   - A node that restarts takes its row back from the others (their copy: version and averaged readings) instead of publishing fresh readings, so a restart no longer moves the layout or the access points on the map.
   - Layout: classical MDS finds the largest positive eigenvalues (shifted power iteration), so noisy floors no longer collapse onto a line (up to 45% did with 16 nodes); only + - * / and sqrt, so S3, C3 and ESP32 compute the same layout; nodes with no measured pair are left out.
+  - Layout through walls: signal strength between nodes often breaks the triangle inequality indoors, and the layout then came out as a straight line (the owner's 4 nodes did). The solver now tries six path-loss exponents per hive and keeps the one that fits the measured pairs best, nearest the indoor 4.0: on 1800 simulated homes the shape error fell from 0.33 to 0.27 and layouts on a line from 14% to 1%; the owner's floor is two-dimensional again.
   - Grid: slots by MAC rank among every node the hive knows, so nodes that do not all hear each other still get distinct slots; the listen window and member eviction hold across the 49.7-day clock wrap; the access point list keeps the lowest BSSIDs, so the grid channel does not depend on scan order; hive reports rotate their rows when they do not all fit.
   - ESP layer: ESP-NOW restarts never race a send; the slot timer is re-armed if it stops; a CSI watchdog re-arms CSI and restarts pings after 30 s without access point frames (backing off to 10 min); gateway pings wait one interval for a reply, not a second; steering uses the access point's current channel, keeps the saved one through two scans that miss it, retries after 30 min instead of giving up for good, and reads every new scan; a node alone on the grid for 5 min in a multi-channel network reconnects to re-check its channel (backing off to 6 h); the ESP-NOW queue is twice as deep and its drops are logged; the core task's stack is 8 KB (worst case measured about 4 KB).
   - Diagnostics: "Core stack free" and "Heap max block" sensors (disabled by default), and a health line in the log every 10 minutes.
@@ -51,6 +52,7 @@ First working version: the grid, the hive and motion per link, with the Home Ass
 - Nothing is out of reach on a floor plan: nodes left to follow the layout and access points placed from signal strength stay on the plan (inside the house when rooms are drawn), on the map and in Place nodes, and Move to the middle puts the selected one in the middle of the plan.
 - Homes on one level read as such: without Home Assistant floors, the panel shows Areas and Empty home, and the WiFi channel setting only appears where it helps (several floors, several access points, or a channel already chosen).
 - The panel shows who is where as small figures in its lists instead of a line of text under the map: someone moving in a room, someone there, someone keeping still, and on each node whether its links see motion. The map card's line under the map can be turned off (`motion_text: false`).
+- Someone moving is placed only near a link that could see them (within 0.6 m of its line), and on the busy link rather than at its fringe: the fit's free scale let a spot far from every link, or at a link's end, fit as well as one on it. The position shown stays in the room room presence is sure of, as each fit already did. Access points are placed with the nodes' indoor path-loss model (exponent 4.0, was 2.7), which put them too far out.
 - Position sensors: on a floor with a plan, x and y of someone moving in the plan's metres (from its top left corner), with the fit's quality as an attribute; unknown while nobody moves.
 
 ### Tools
