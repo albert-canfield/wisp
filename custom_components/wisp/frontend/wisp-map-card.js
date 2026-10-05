@@ -3,7 +3,8 @@
  * Nodes sit where the hive's layout puts them, access points beside the nodes that hear them
  * best, links darken and thicken with their motion score and glow while they see motion, and
  * footprints follow whoever moves. On a floor with a plan (set in the Wisp panel) everything is
- * drawn on the plan, in its metres. Shipped and registered by the integration, no build step.
+ * drawn on the plan, in its metres, over the rooms drawn on it. Shipped and registered by the
+ * integration, no build step.
  *
  *   type: custom:wisp-map-card
  *   title: Wisp     # optional
@@ -40,6 +41,14 @@ const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
 const n1 = (v) => Math.round(v * 10) / 10;
 const short = (s, max = 18) => (s.length > max ? `${s.slice(0, max - 1)}…` : s);
 const plural = (n, one, many) => `${n} ${n === 1 ? one : many}`;
+/* A gentle hue per area, the same in the panel */
+const hue = (area) => {
+  let h = 2166136261; // FNV-1a, then mixed so that ids alike get hues apart
+  for (const c of String(area)) h = Math.imul(h ^ c.codePointAt(0), 16777619);
+  h = Math.imul(h ^ (h >>> 16), 0x85ebca6b);
+  h = Math.imul(h ^ (h >>> 13), 0xc2b2ae35);
+  return ((h ^ (h >>> 16)) >>> 0) % 360;
+};
 
 function bounds(points) {
   const xs = points.map((p) => p.x);
@@ -183,6 +192,55 @@ function planLayer(f, grid = false) {
   const m = SCALES.find((v) => v * f.s >= 36) ?? SCALES[SCALES.length - 1];
   const x = f.x + 10, y = f.y + f.h - 10, len = m * f.s;
   return `${grid ? `<path class="grid" d="${gridPath(f)}"/>` : ""}<rect class="edge" x="${n1(f.x)}" y="${n1(f.y)}" width="${n1(f.w)}" height="${n1(f.h)}"/><g class="scale" aria-hidden="true"><path d="M${n1(x)} ${n1(y - 4)}V${n1(y)}H${n1(x + len)}V${n1(y - 4)}"/><text x="${n1(x + len / 2)}" y="${n1(y - 6)}">${m} m</text></g>`;
+}
+
+/* A room's outline from its rectangles [x, y, w, h], without the seams between them: each side
+   less where another rectangle lies just beyond it. Segments [x0, y0, x1, y1] in plan metres. */
+function outline(rects) {
+  const E = 1e-6, out = [];
+  rects.forEach(([x, y, w, h], i) => {
+    const others = rects.filter((_, j) => j !== i);
+    // A side: across, along from, along to, and whether a rectangle covers the strip beyond it
+    const sides = [
+      [false, y, x, x + w, (o) => o[1] < y - E && o[1] + o[3] >= y - E],
+      [false, y + h, x, x + w, (o) => o[1] <= y + h + E && o[1] + o[3] > y + h + E],
+      [true, x, y, y + h, (o) => o[0] < x - E && o[0] + o[2] >= x - E],
+      [true, x + w, y, y + h, (o) => o[0] <= x + w + E && o[0] + o[2] > x + w + E],
+    ];
+    for (const [upright, at, from, to, beyond] of sides) {
+      let parts = [[from, to]];
+      for (const o of others.filter(beyond)) {
+        const [a, b] = upright ? [o[1], o[1] + o[3]] : [o[0], o[0] + o[2]];
+        parts = parts.flatMap(([p, q]) => [[p, Math.min(q, a)], [Math.max(p, b), q]]).filter(([p, q]) => q - p > E);
+      }
+      for (const [p, q] of parts) out.push(upright ? [at, p, at, q] : [p, at, q, at]);
+    }
+  });
+  return out;
+}
+
+/* The rooms drawn on the plan, turned with it: a faint wash and outline each in its hue, stronger
+   on a plan without an image, where they are the house; the room someone moves in a little more.
+   Names go in the top left corner of each room's largest rectangle, as drawn. */
+function roomsLayer(rooms, f, here) {
+  let shapes = "", names = "";
+  for (const room of rooms) {
+    if (!room.rects?.length) continue;
+    const boxes = room.rects.map(([x, y, w, h]) => {
+      const p = f.to({ x, y }), q = f.to({ x: x + w, y: y + h });
+      return { x: Math.min(p.x, q.x), y: Math.min(p.y, q.y), w: Math.abs(q.x - p.x), h: Math.abs(q.y - p.y) };
+    });
+    const wash = boxes.map((b) => `<rect x="${n1(b.x)}" y="${n1(b.y)}" width="${n1(b.w)}" height="${n1(b.h)}"/>`).join("");
+    const wall = outline(room.rects).map(([x0, y0, x1, y1]) => {
+      const p = f.to({ x: x0, y: y0 }), q = f.to({ x: x1, y: y1 });
+      return `M${n1(p.x)} ${n1(p.y)}L${n1(q.x)} ${n1(q.y)}`;
+    }).join("");
+    shapes += `<g class="room${here.has(room.area) ? " here" : ""}" style="--hue:${hue(room.area)}"><title>${esc(room.name)}</title><g class="wash">${wash}</g><path class="wall" d="${wall}"/></g>`;
+    const big = boxes.reduce((a, b) => (b.w * b.h > a.w * a.h ? b : a));
+    const fit = Math.floor((big.w - 8) / 5.2); // characters of 10 px italic
+    if (fit >= 3 && big.h >= 16) names += `<text class="room-name" x="${n1(big.x + 4)}" y="${n1(big.y + 12)}">${esc(short(room.name, fit))}</text>`;
+  }
+  return { shapes, names };
 }
 
 /* Metres to the viewBox: turn, mirror, then scale to fit. */
@@ -369,14 +427,17 @@ function draw(map, config, floor, trails = new Map(), now = Date.now()) {
     steps += w.prints;
     walkers += w.mark;
   }
+  // The rooms drawn on the plan under it all; the one room presence puts someone in a little stronger
+  const here = new Set((map.rooms ?? []).map((r) => r.area).filter(Boolean));
+  const rooms = plan && floor.rooms?.length ? roomsLayer(floor.rooms, frame, here) : null;
   const pending = unplaced ? ` (${unplaced} not placed ${plan ? "on the plan" : "yet"})` : "";
   const summary = `${floor ? `${floor.name}: ` : ""}${plural(map.nodes.length, "node", "nodes")}${pending}, ${plural(map.access_points.length, "access point", "access points")}`;
   // The room someone moves in, per calibrated floor
-  const rooms = (map.rooms ?? []).filter((f) => f.area).map((f) => f.room);
-  const where = rooms.length ? `${rooms.length > 1 ? "Rooms" : "Room"}: ${rooms.join(", ")}. ` : "";
+  const occupied = (map.rooms ?? []).filter((f) => f.area).map((f) => f.room);
+  const where = occupied.length ? `${occupied.length > 1 ? "Rooms" : "Room"}: ${occupied.join(", ")}. ` : "";
   const motion = where + (moving.length ? `Motion: ${moving.join(", ")}` : "All quiet");
   return {
-    svg: `<svg viewBox="0 0 ${W} ${h}" role="img" aria-label="${esc(`Map of ${summary}. ${motion}.`)}">${plan ? planLayer(frame, !plan.url) : ""}<g class="lines">${lines}</g><g class="steps">${steps}</g><g class="marks">${marks}${walkers}</g><g class="labels">${labels}</g></svg>`,
+    svg: `<svg viewBox="0 0 ${W} ${h}" role="img" aria-label="${esc(`Map of ${summary}. ${motion}.`)}">${rooms ? `<g class="rooms${plan.url ? "" : " bare"}">${rooms.shapes}</g>` : ""}${plan ? planLayer(frame, !plan.url) : ""}${rooms?.names ? `<g class="room-names">${rooms.names}</g>` : ""}<g class="lines">${lines}</g><g class="steps">${steps}</g><g class="marks">${marks}${walkers}</g><g class="labels">${labels}</g></svg>`,
     summary,
     motion,
     // Where the plan's image goes, in shares of the drawing: unturned, centred on the frame, then
@@ -618,6 +679,17 @@ const STYLE = `
   .grid { fill: none; stroke: var(--wisp-ink); stroke-width: .6; opacity: .14; }
   .scale path { fill: none; stroke: var(--wisp-ink); stroke-width: 1.5; stroke-linecap: square; }
   .scale text { font-size: 10px; font-style: italic; }
+  /* Rooms: a wash of watercolour and a pencilled wall, so the plan under them stays readable */
+  .room .wash { opacity: .09; }
+  .room .wash rect { fill: hsl(var(--hue) 50% 48%); }
+  .room .wall { fill: none; stroke: hsl(var(--hue) 40% 30%); stroke-width: 1.2; stroke-linecap: square; opacity: .4; }
+  .room.here .wash { opacity: .17; }
+  .bare .room .wash { opacity: .16; }
+  .bare .room .wall { stroke-width: 1.5; opacity: .6; }
+  .bare .room.here .wash { opacity: .26; }
+  ha-card.dark .room .wash rect { fill: hsl(var(--hue) 45% 62%); }
+  ha-card.dark .room .wall { stroke: hsl(var(--hue) 50% 76%); }
+  .room-name { font-size: 10px; font-style: italic; text-anchor: start; opacity: .75; stroke-width: 3px; }
   .link { fill: none; stroke-linecap: round; }
   .link.ap { stroke-dasharray: 5 4; }
   .link.unknown { stroke-dasharray: 1 4; }

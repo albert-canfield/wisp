@@ -2,17 +2,20 @@
  * Wisp panel: the live map, the rooms of each floor with their calibration and floor plan, the
  * nodes and the hive, for admins. Registered by the integration in the sidebar, no build step.
  * Live from wisp/panel/subscribe; the buttons call the wisp services and the wisp/floor commands.
- * The map is the map card itself; placing nodes on a plan happens on a drawing of the panel's own.
+ * The map is the map card itself; placing nodes and drawing rooms on a plan happen on a drawing of
+ * the panel's own.
  */
 
 const DURATIONS = [30, 60, 90, 120, 180, 300]; // s to record
 const DURATION = 60; // s, as the services
 const LEAVE_S = 30; // s to leave the floor before the empty floor records
 const PREFS = "wisp-panel"; // this browser's duration, map turn, mirror and floor
-const PW = 360; // viewBox width of the drawing to place nodes on
+const PW = 360; // viewBox width of the drawing to place nodes and draw rooms on
 const PPAD = 16;
 const PMAX_H = 480;
 const NUDGE = 0.1; // metres an arrow key moves a node, five times that with shift
+const SNAP = 0.25; // metres a room's edges snap to, and its smallest side; an arrow key moves it as much
+const MAX_RECTS = 16; // rectangles per room, as Wisp takes them
 // The logo's footprint, as in the card
 const SOLE = "M0-13c4.6 0 6.4 4.4 6.4 8.6 0 4.6-2.2 7.9-6.4 7.9s-6.4-3.3-6.4-7.9C-6.4-8.6-4.6-13 0-13Z";
 const HEEL = "M0 5.6c3.3 0 4.8 2.1 4.8 4.4 0 2.6-2 4-4.8 4s-4.8-1.4-4.8-4c0-2.3 1.5-4.4 4.8-4.4Z";
@@ -25,6 +28,17 @@ const attr = (name, value) => (value == null ? "" : ` data-${name}="${esc(value)
 const n1 = (v) => Math.round(v * 10) / 10;
 const metres = (v) => Math.round(v * 100) / 100;
 const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
+const snap = (v) => Math.round(v / SNAP) * SNAP;
+const short = (s, max) => (s.length > max ? `${s.slice(0, max - 1)}…` : s);
+const size = (q) => `${metres(q.w)} by ${metres(q.h)} m`;
+/* A gentle hue per area, the same on the map */
+const hue = (area) => {
+  let h = 2166136261; // FNV-1a, then mixed so that ids alike get hues apart
+  for (const c of String(area)) h = Math.imul(h ^ c.codePointAt(0), 16777619);
+  h = Math.imul(h ^ (h >>> 16), 0x85ebca6b);
+  h = Math.imul(h ^ (h >>> 13), 0xc2b2ae35);
+  return ((h ^ (h >>> 16)) >>> 0) % 360;
+};
 const apLabel = (bssid) => `AP ${bssid.slice(-5)}`; // as the map
 const NODE_MARK = `<circle class="ring" r="7.5"/><circle class="dot" r="2.6"/>`;
 const AP_MARK = `<path class="waves" d="M-7.1-7.1A10 10 0 0 1 7.1-7.1M-9.9-9.9A14 14 0 0 1 9.9-9.9"/><rect class="ring" x="-5" y="-5" width="10" height="10" transform="rotate(45)"/><circle class="dot" r="2"/>`;
@@ -90,7 +104,8 @@ class WispPanel extends HTMLElement {
     this._failure = null; // {open, message}
     this._planForm = null; // the floor plan form's values while it is open
     this._placing = null; // placing nodes on a plan: {floor, moved: Map(id, [x, y] or null), selected, focus, busy, failure}
-    this._drag = null; // the node or access point under the pointer
+    this._roomEdit = null; // drawing rooms on a plan: {floor, rects: [{id, area, x, y, w, h}], next, area, selected, focus, changed, busy, failure}
+    this._drag = null; // the node, access point or room under the pointer
   }
 
   set hass(hass) {
@@ -183,9 +198,9 @@ class WispPanel extends HTMLElement {
     root.addEventListener("pointermove", (e) => this._pointerMove(e));
     root.addEventListener("pointerup", (e) => this._pointerUp(e));
     root.addEventListener("pointercancel", (e) => this._pointerUp(e));
-    // A finger on a node drags it, not the page (Safari scrolls despite touch-action on SVG)
+    // A finger on a node, or drawing a room, drags it, not the page (Safari scrolls despite touch-action on SVG)
     root.addEventListener("touchstart", (e) => {
-      if (e.target.closest?.(".placer .item")) e.preventDefault();
+      if (e.target.closest?.(".placer .item, .placer.rooms .plan-draw svg")) e.preventDefault();
     }, { passive: false });
     this._mirrorButton();
     this._loadCard();
@@ -321,6 +336,11 @@ class WispPanel extends HTMLElement {
     else if (act === "placer-cancel") this._stopPlacing();
     else if (act === "placer-save") this._savePlacing();
     else if (act === "unplace") this._unplace();
+    else if (act === "draw-rooms") this._startRooms(floor);
+    else if (act === "rooms-cancel") this._stopRooms();
+    else if (act === "rooms-save") this._saveRooms();
+    else if (act === "rooms-area") this._pickRoom(area);
+    else if (act === "rooms-delete") this._deleteRect(this._roomEdit?.selected);
     else if (act === "map-floor") {
       this._prefs.mapFloor = target;
       savePrefs(this._prefs);
@@ -338,6 +358,8 @@ class WispPanel extends HTMLElement {
     if (e.key === "Escape" && this._open) this._close();
     const g = e.target.closest?.(".placer .item");
     if (g && this._placing && !this._placing.busy) this._nudge(g.dataset.id, e);
+    const room = e.target.closest?.(".placer .room");
+    if (room && this._roomEdit && !this._roomEdit.busy && !this._drag) this._roomKey(room.dataset.id, e);
   }
 
   _change(e) {
@@ -350,6 +372,8 @@ class WispPanel extends HTMLElement {
     } else if (el.dataset.act === "pick") {
       if (el.value) this._ask("room", el.dataset.floor, el.value);
       else this._close();
+    } else if (el.dataset.act === "rect-area") {
+      this._rectArea(el.value);
     } else if (el.dataset.act === "node-area") {
       this._setNodeArea(el.dataset.mac, el.value || null);
     } else if (el.dataset.plan === "file") {
@@ -420,7 +444,7 @@ class WispPanel extends HTMLElement {
     const f = this._data?.floors?.find((x) => (x.floor ?? "") === key);
     if (!f) return;
     if (view) Object.assign(f, view);
-    else for (const k of ["plan", "positions", "access_points", "fit"]) delete f[k];
+    else for (const k of ["plan", "rooms", "positions", "access_points", "fit"]) delete f[k];
   }
 
   // Floor plan form
@@ -587,7 +611,14 @@ class WispPanel extends HTMLElement {
   // Placing nodes on a plan
 
   _startPlacing(key) {
+    this._roomEdit = null; // one editor at a time
     this._placing = { floor: key, moved: new Map(), selected: null, focus: null, busy: false, failure: null };
+    this._openEditor(key);
+  }
+
+  /* The plan's editor takes the map's place, scrolled to; the floor's question closes. */
+  _openEditor(key) {
+    this._drag = null;
     this._prefs.mapFloor = key;
     savePrefs(this._prefs);
     this._open = null;
@@ -662,6 +693,7 @@ class WispPanel extends HTMLElement {
   }
 
   _pointerDown(e) {
+    if (this._roomEdit) return this._roomDown(e);
     const g = e.target.closest?.(".placer .item");
     if (!g || !this._placing || this._placing.busy || e.button > 0) return;
     e.preventDefault();
@@ -684,6 +716,7 @@ class WispPanel extends HTMLElement {
     const at = this._svgPoint(drag.svg, e);
     if (!drag.moved && Math.hypot(at.x - drag.x0, at.y - drag.y0) < 3) return; // a tap, so far
     drag.moved = true;
+    if (drag.room) return this._roomMove(drag, at);
     const f = this._frame;
     drag.x = clamp(at.x + drag.dx, f.x, f.x + f.w);
     drag.y = clamp(at.y + drag.dy, f.y, f.y + f.h);
@@ -695,7 +728,8 @@ class WispPanel extends HTMLElement {
     if (!drag || e.pointerId !== drag.pointer) return;
     this._drag = null;
     this._redraw = true; // the drawing changed under the pointer: draw it again from the state
-    if (p && e.type === "pointerup") {
+    if (drag.room) this._roomUp(drag, e.type === "pointerup");
+    else if (p && e.type === "pointerup") {
       const f = this._frame;
       if (drag.moved) {
         p.moved.set(drag.id, [
@@ -725,6 +759,222 @@ class WispPanel extends HTMLElement {
       p.failure = err?.message || "Wisp could not save the positions.";
     } finally {
       p.busy = false;
+      this._render();
+    }
+  }
+
+  // Drawing rooms on a plan
+
+  _startRooms(key) {
+    const f = this._data?.floors.find((x) => (x.floor ?? "") === key);
+    if (!f?.plan) return;
+    this._placing = null; // one editor at a time
+    const rects = (f.rooms ?? []).flatMap((room) => room.rects.map(([x, y, w, h]) => ({ area: room.area, x, y, w, h })));
+    rects.forEach((q, i) => { q.id = `r${i + 1}`; });
+    // To begin with, the first room not drawn yet
+    const areas = this._roomAreas(f);
+    const area = (areas.find((a) => !rects.some((q) => q.area === a.area)) ?? areas[0])?.area ?? null;
+    this._roomEdit = { floor: key, rects, next: rects.length + 1, area, selected: null, focus: null, changed: false, busy: false, failure: null };
+    this._openEditor(key);
+  }
+
+  _stopRooms() {
+    this._roomEdit = null;
+    this._drag = null;
+    this._render();
+  }
+
+  _roomsFloor(d = this._data) {
+    const r = this._roomEdit;
+    return r && d?.loaded ? d.floors.find((f) => (f.floor ?? "") === r.floor) : null;
+  }
+
+  /* The areas to draw on the floor, by name: all of its areas, and any drawn on it already. */
+  _roomAreas(f) {
+    const out = new Map();
+    for (const a of [...f.areas, ...f.other_areas, ...(f.rooms ?? [])]) if (!out.has(a.area)) out.set(a.area, { area: a.area, name: a.name });
+    return [...out.values()].sort((a, b) => a.name.localeCompare(b.name));
+  }
+
+  _roomName(f, area) {
+    return this._roomAreas(f).find((a) => a.area === area)?.name ?? area;
+  }
+
+  /* Why the room cannot take more rectangles than it has, or null. */
+  _full(f, area, more = 1) {
+    const n = this._roomEdit.rects.filter((q) => q.area === area).length;
+    return n + more > MAX_RECTS ? `The ${this._roomName(f, area)} has ${MAX_RECTS} rectangles, the most a room takes.` : null;
+  }
+
+  /* The room to draw next. The selection lets go, so picking a room never changes one drawn. */
+  _pickRoom(area) {
+    const r = this._roomEdit;
+    if (!r || r.busy) return;
+    Object.assign(r, { area, selected: null, failure: null });
+    this._render();
+  }
+
+  /* The selected rectangle goes to another room. */
+  _rectArea(area) {
+    const r = this._roomEdit, f = this._roomsFloor();
+    const q = r?.rects.find((x) => x.id === r.selected);
+    if (!f || !q || q.area === area || r.busy) return;
+    r.failure = this._full(f, area);
+    if (!r.failure) {
+      q.area = r.area = area;
+      r.changed = true;
+    }
+    this._render();
+  }
+
+  _deleteRect(id) {
+    const r = this._roomEdit;
+    if (!r || r.busy || !r.rects.some((q) => q.id === id)) return;
+    r.rects = r.rects.filter((q) => q.id !== id);
+    Object.assign(r, { selected: null, changed: true, failure: null });
+    this._render();
+  }
+
+  /* Keys on a rectangle: the arrows move it by a snap, a metre with shift; Delete takes it away. */
+  _roomKey(id, e) {
+    const r = this._roomEdit, f = this._roomsFloor();
+    const q = r.rects.find((x) => x.id === id);
+    if (!f || !q) return;
+    if (e.key === "Delete" || e.key === "Backspace") {
+      e.preventDefault();
+      const rest = r.rects.filter((x) => x !== q);
+      r.focus = rest[Math.min(r.rects.indexOf(q), rest.length - 1)]?.id ?? null; // the next one
+      this._deleteRect(id);
+      return;
+    }
+    if (e.key === "Escape" && r.selected) {
+      Object.assign(r, { selected: null, focus: id });
+      this._render();
+      return;
+    }
+    const step = e.shiftKey ? 1 : SNAP;
+    const move = { ArrowLeft: [-step, 0], ArrowRight: [step, 0], ArrowUp: [0, -step], ArrowDown: [0, step] }[e.key];
+    if (!move && e.key !== "Enter" && e.key !== " ") return;
+    e.preventDefault();
+    Object.assign(r, { selected: id, focus: id, area: q.area });
+    if (move) {
+      const x = clamp(metres(q.x + move[0]), 0, metres(f.plan.width - q.w));
+      const y = clamp(metres(q.y + move[1]), 0, metres(f.plan.height - q.h));
+      if (x !== q.x || y !== q.y) {
+        Object.assign(q, { x, y });
+        r.changed = true;
+      }
+    }
+    this._render();
+  }
+
+  /* A press on the plan: on a corner of the selected rectangle it resizes it, on a rectangle it
+     moves it, anywhere else it draws a new one for the room picked. */
+  _roomDown(e) {
+    const r = this._roomEdit, svg = e.target.closest?.(".placer .plan-draw svg");
+    const f = this._roomsFloor(), frame = this._frame;
+    if (!svg || !f || r.busy || this._drag || e.button > 0) return;
+    const at = this._svgPoint(svg, e);
+    const m = { x: (at.x - frame.x) / frame.s, y: (at.y - frame.y) / frame.s };
+    const corner = e.target.closest(".handle")?.dataset.corner;
+    const g = e.target.closest(".room");
+    let q, mode, dx = 0, dy = 0;
+    if (corner) {
+      mode = "size";
+      q = r.rects.find((x) => x.id === r.selected);
+      if (!q) return;
+      dx = q.x + (corner[1] === "e" ? q.w : 0) - m.x; // the corner does not jump to the pointer
+      dy = q.y + (corner[0] === "s" ? q.h : 0) - m.y;
+    } else if (g) {
+      mode = "move";
+      q = r.rects.find((x) => x.id === g.dataset.id);
+      if (!q) return;
+      dx = q.x - m.x;
+      dy = q.y - m.y;
+      Object.assign(r, { selected: q.id, area: q.area });
+    } else {
+      if (!r.area) return; // no area to draw
+      mode = "draw";
+      q = { id: `r${r.next++}`, area: r.area, x: clamp(snap(m.x), 0, f.plan.width), y: clamp(snap(m.y), 0, f.plan.height), w: 0, h: 0 };
+      r.rects.push(q);
+      r.selected = q.id;
+    }
+    e.preventDefault();
+    try {
+      svg.setPointerCapture(e.pointerId);
+    } catch {
+      // the pointer is gone already; its move and up events still come to the page
+    }
+    r.failure = null;
+    this._drag = { room: true, mode, q, before: { ...q }, corner, dx, dy, svg, pointer: e.pointerId, x0: at.x, y0: at.y, moved: false };
+    this._paintRooms();
+  }
+
+  _roomMove(drag, at) {
+    const frame = this._frame, { width, height } = frame.plan, q = drag.q, b = drag.before;
+    const x = snap((at.x - frame.x) / frame.s + drag.dx), y = snap((at.y - frame.y) / frame.s + drag.dy);
+    if (drag.mode === "move") {
+      q.x = clamp(x, 0, metres(width - q.w));
+      q.y = clamp(y, 0, metres(height - q.h));
+    } else if (drag.mode === "draw") {
+      // From where the press began to the pointer
+      const x1 = clamp(x, 0, width), y1 = clamp(y, 0, height);
+      Object.assign(q, { x: Math.min(x1, b.x), y: Math.min(y1, b.y), w: metres(Math.abs(x1 - b.x)), h: metres(Math.abs(y1 - b.y)) });
+    } else {
+      // The corner follows the pointer, the opposite one stays
+      const right = b.x + b.w, bottom = b.y + b.h;
+      if (drag.corner[1] === "w") {
+        q.x = clamp(x, 0, metres(right - SNAP));
+        q.w = metres(right - q.x);
+      } else q.w = metres(clamp(x, b.x + SNAP, width) - b.x);
+      if (drag.corner[0] === "n") {
+        q.y = clamp(y, 0, metres(bottom - SNAP));
+        q.h = metres(bottom - q.y);
+      } else q.h = metres(clamp(y, b.y + SNAP, height) - b.y);
+    }
+    this._paintRooms();
+  }
+
+  _roomUp(drag, done) {
+    const r = this._roomEdit, q = drag.q, f = this._roomsFloor();
+    if (!r || !f) return;
+    const drawn = drag.mode === "draw";
+    const tiny = drawn && (q.w < SNAP - 1e-9 || q.h < SNAP - 1e-9);
+    const full = drawn && done && !tiny ? this._full(f, q.area, 0) : null;
+    if (full) r.failure = full;
+    if (!done || tiny || full) {
+      // Cancelled, a tap on the plan, too small to keep or one too many: as before, and a tap lets go
+      if (drawn) {
+        r.rects = r.rects.filter((x) => x !== q);
+        r.selected = null;
+      } else Object.assign(q, drag.before);
+      return;
+    }
+    if (["x", "y", "w", "h"].some((k) => q[k] !== drag.before[k])) r.changed = true;
+    r.selected = r.focus = q.id; // the keys work on it next
+  }
+
+  /* Only the rooms, while the pointer draws or moves one. */
+  _paintRooms() {
+    const layer = this._drag?.svg.querySelector(".room-layer");
+    if (layer) layer.innerHTML = this._roomShapes(this._roomsFloor(), this._frame);
+  }
+
+  async _saveRooms() {
+    const r = this._roomEdit;
+    if (!r || r.busy) return;
+    const rooms = {};
+    for (const q of r.rects) (rooms[q.area] ??= []).push([q.x, q.y, q.w, q.h].map(metres));
+    Object.assign(r, { busy: true, failure: null });
+    this._render();
+    try {
+      const view = await this._hass.callWS({ type: "wisp/floor/set_rooms", floor: r.floor || null, rooms });
+      this._mergeFloor(r.floor, view);
+      if (this._roomEdit === r) this._roomEdit = null;
+    } catch (err) {
+      r.failure = err?.message || "Wisp could not save the rooms.";
+    } finally {
+      r.busy = false;
       this._render();
     }
   }
@@ -797,11 +1047,11 @@ class WispPanel extends HTMLElement {
   }
 
   /* A button per floor over the map when there are several; turn and mirror under it, plan and all.
-     Placing nodes hides them: the placer draws the plan as it is, in its own metres. */
+     Placing nodes or drawing rooms hides them: the editor draws the plan as it is, in its own metres. */
   _mapTools(d) {
     const root = this.shadowRoot;
     const shown = this._shownFloor(d);
-    const placing = !!this._placing;
+    const placing = !!(this._placing || this._roomEdit);
     const tabs = root.querySelector(".tabs");
     const mapped = d.floors.filter((f) => f.nodes.length); // the map draws floors with nodes
     tabs.hidden = placing || mapped.length < 2;
@@ -815,28 +1065,33 @@ class WispPanel extends HTMLElement {
     if (this._card && (shown ? shown.floor ?? shown.name : "") !== this._cardFloor) this._card.setConfig(this._mapConfig());
   }
 
-  /* Placing nodes: the plan, its nodes and access points to drag, and what is still to do. */
+  /* The plan's editor: placing nodes (the plan, its nodes and access points to drag, and what is
+     still to do) or drawing rooms (the plan, its rooms, and the room to draw). */
   _renderPlacer(d) {
     const root = this.shadowRoot;
-    const f = this._placingFloor(d);
-    if (this._placing && !f?.plan) this._placing = null; // the plan or the floor went away
-    const p = this._placing;
-    root.querySelector(".placer").hidden = !p;
+    if (this._placing && !this._placingFloor(d)?.plan) this._placing = null; // the plan or the floor went away
+    if (this._roomEdit && !this._roomsFloor(d)?.plan) this._roomEdit = null;
+    const p = this._placing ?? this._roomEdit;
+    const sheet = root.querySelector(".placer");
+    sheet.hidden = !p;
     if (!p || this._drag) return; // nothing moves under a finger
+    const f = this._placing ? this._placingFloor(d) : this._roomsFloor(d);
+    sheet.classList.toggle("rooms", !this._placing);
+    root.querySelector("#wisp-placer").textContent = this._placing ? "Place nodes" : "Draw rooms";
     root.querySelector(".placer-note").textContent = floorLabel(f, d.floors);
-    const items = this._items(f, d);
-    const { svg, frame } = this._placerSvg(f, items);
+    const items = this._placing ? this._items(f, d) : null;
+    const { svg, frame } = items ? this._placerSvg(f, items) : this._roomsSvg(f);
     this._frame = frame;
     const draw = root.querySelector(".plan-draw"), info = root.querySelector(".placer-info");
     if (draw._html !== svg || this._redraw) {
       draw.innerHTML = svg;
       draw._html = svg;
       this._redraw = false;
-      // The node moved with the keys keeps the focus in the new drawing, once
-      if (p.focus) draw.querySelector(`.item[data-id="${CSS.escape(p.focus)}"]`)?.focus({ preventScroll: true });
+      // The node or room moved with the keys or the pointer keeps the focus in the new drawing, once
+      if (p.focus) draw.querySelector(`[data-id="${CSS.escape(p.focus)}"]`)?.focus({ preventScroll: true });
     }
     p.focus = null;
-    const text = this._placerInfo(f, items);
+    const text = items ? this._placerInfo(f, items) : this._roomsInfo(f);
     if (info._html !== text) {
       info.innerHTML = text;
       info._html = text;
@@ -850,12 +1105,31 @@ class WispPanel extends HTMLElement {
     });
   }
 
-  _placerSvg(f, items) {
-    const plan = f.plan, selected = this._placing.selected;
+  /* The plan scaled into the drawing, with room below it for what is not on it yet. */
+  _planFrame(plan, below = 0) {
     const s = Math.min((PW - 2 * PPAD) / plan.width, (PMAX_H - 2 * PPAD) / plan.height);
     const frame = { x: (PW - plan.width * s) / 2, y: PPAD, w: plan.width * s, h: plan.height * s, s, plan };
+    frame.vh = Math.round(frame.y + frame.h + PPAD + below);
+    return frame;
+  }
+
+  /* A plan without an image gets a grid of metres; then the plan's edge. */
+  _planBase(frame) {
+    const { plan, s } = frame;
+    let grid = "";
+    if (!plan.url) {
+      const step = [0.5, 1, 2, 5, 10].find((v) => v * s >= 14) ?? 10;
+      for (let x = step; x * s < frame.w - 0.5; x += step) grid += `M${n1(frame.x + x * s)} ${n1(frame.y)}v${n1(frame.h)}`;
+      for (let y = step; y * s < frame.h - 0.5; y += step) grid += `M${n1(frame.x)} ${n1(frame.y + y * s)}h${n1(frame.w)}`;
+      grid = `<path class="grid" d="${grid}"/>`;
+    }
+    return `${grid}<rect class="edge" x="${n1(frame.x)}" y="${n1(frame.y)}" width="${n1(frame.w)}" height="${n1(frame.h)}"/>`;
+  }
+
+  _placerSvg(f, items) {
+    const plan = f.plan, selected = this._placing.selected;
     const tray = items.filter((i) => !i.pos);
-    frame.vh = Math.round(frame.y + frame.h + PPAD + (tray.length ? 58 : 0));
+    const frame = this._planFrame(plan, tray.length ? 58 : 0), s = frame.s;
     const gap = Math.min(84, (PW - 2 * PPAD) / Math.max(tray.length, 1));
     const at = (i) => (i.pos
       ? { x: frame.x + i.pos.x * s, y: frame.y + i.pos.y * s }
@@ -868,14 +1142,7 @@ class WispPanel extends HTMLElement {
       return `<g class="${cls}" data-id="${esc(i.id)}" transform="translate(${n1(x)} ${n1(y)})" tabindex="0" role="button" aria-label="${esc(label)}"><circle class="hit" r="22"/>${i.kind === "ap" ? AP_MARK : NODE_MARK}<text y="24">${esc(i.name)}</text></g>`;
     }).join("");
     const below = tray.length ? `<text class="tray" x="${PW / 2}" y="${n1(frame.y + frame.h + 13)}">Not on the plan yet: drag onto it</text>` : "";
-    let grid = "";
-    if (!plan.url) {
-      const step = [0.5, 1, 2, 5, 10].find((v) => v * s >= 14) ?? 10;
-      for (let x = step; x * s < frame.w - 0.5; x += step) grid += `M${n1(frame.x + x * s)} ${n1(frame.y)}v${n1(frame.h)}`;
-      for (let y = step; y * s < frame.h - 0.5; y += step) grid += `M${n1(frame.x)} ${n1(frame.y + y * s)}h${n1(frame.w)}`;
-      grid = `<path class="grid" d="${grid}"/>`;
-    }
-    const svg = `<svg viewBox="0 0 ${PW} ${frame.vh}" role="group" aria-label="The plan of ${esc(floorPhrase(f))}, ${n1(plan.width)} by ${n1(plan.height)} m">${grid}<rect class="edge" x="${n1(frame.x)}" y="${n1(frame.y)}" width="${n1(frame.w)}" height="${n1(frame.h)}"/>${below}${marks}</svg>`;
+    const svg = `<svg viewBox="0 0 ${PW} ${frame.vh}" role="group" aria-label="The plan of ${esc(floorPhrase(f))}, ${n1(plan.width)} by ${n1(plan.height)} m">${this._planBase(frame)}${below}${marks}</svg>`;
     return { svg, frame };
   }
 
@@ -905,18 +1172,81 @@ class WispPanel extends HTMLElement {
         <button class="primary" data-act="placer-save"${p.busy || !pending ? " disabled" : ""}>${p.busy ? "Saving" : "Save"}</button></span></div>`;
   }
 
+  _roomsSvg(f) {
+    const plan = f.plan, frame = this._planFrame(plan);
+    const label = `The plan of ${floorPhrase(f)}, ${n1(plan.width)} by ${n1(plan.height)} m. Drag across it to draw a room.`;
+    const svg = `<svg viewBox="0 0 ${PW} ${frame.vh}" role="group" aria-label="${esc(label)}">${this._planBase(frame)}<g class="room-layer">${this._roomShapes(f, frame)}</g></svg>`;
+    return { svg, frame };
+  }
+
+  /* Each rectangle washed in its room's hue, the selected one on top with its corners to drag, and
+     each room's name in the corner of its largest rectangle. */
+  _roomShapes(f, frame) {
+    const r = this._roomEdit, s = frame.s;
+    const box = (q) => ({ x: frame.x + q.x * s, y: frame.y + q.y * s, w: q.w * s, h: q.h * s });
+    const names = new Map(this._roomAreas(f).map((a) => [a.area, a.name]));
+    const sel = r.rects.find((q) => q.id === r.selected);
+    const largest = new Map();
+    let shapes = "", labels = "", handles = "";
+    for (const q of [...r.rects.filter((x) => x !== sel), ...(sel ? [sel] : [])]) {
+      const b = box(q), name = names.get(q.area) ?? q.area;
+      const tip = `${name}, ${size(q)}, ${metres(q.x)} m from the left and ${metres(q.y)} m from the top. Drag it or move it with the arrow keys; Delete takes it away.`;
+      shapes += `<g class="room${q === sel ? " sel" : ""}" data-id="${q.id}" style="--hue:${hue(q.area)}" tabindex="0" role="button" aria-label="${esc(tip)}"><rect x="${n1(b.x)}" y="${n1(b.y)}" width="${n1(b.w)}" height="${n1(b.h)}"/></g>`;
+      const big = largest.get(q.area);
+      if (!big || q.w * q.h > big.q.w * big.q.h) largest.set(q.area, { q, b });
+    }
+    for (const [area, { b }] of largest) {
+      const fit = Math.floor((b.w - 10) / 5.6); // characters of 11 px italic
+      if (fit >= 3 && b.h >= 18) labels += `<text class="room-name" x="${n1(b.x + 5)}" y="${n1(b.y + 14)}">${esc(short(names.get(area) ?? area, fit))}</text>`;
+    }
+    if (sel && this._drag?.mode !== "draw") {
+      const b = box(sel);
+      handles = [["nw", b.x, b.y], ["ne", b.x + b.w, b.y], ["sw", b.x, b.y + b.h], ["se", b.x + b.w, b.y + b.h]]
+        .map(([c, x, y]) => `<g class="handle" data-corner="${c}" transform="translate(${n1(x)} ${n1(y)})" aria-hidden="true"><rect class="hit" x="-15" y="-15" width="30" height="30"/><rect class="knob" x="-4" y="-4" width="8" height="8"/></g>`)
+        .join("");
+    }
+    return shapes + labels + handles;
+  }
+
+  _roomsInfo(f) {
+    const r = this._roomEdit, areas = this._roomAreas(f);
+    const off = r.busy ? " disabled" : "";
+    const picks = areas.map((a) => {
+      const drawn = r.rects.some((q) => q.area === a.area);
+      return `<button data-act="rooms-area"${attr("area", a.area)} aria-pressed="${a.area === r.area}" style="--hue:${hue(a.area)}"${off}><i class="${drawn ? "" : "none"}" aria-hidden="true"></i>${esc(a.name)}</button>`;
+    }).join("");
+    const sel = r.rects.find((q) => q.id === r.selected);
+    const options = areas.map((a) => `<option value="${esc(a.area)}"${sel?.area === a.area ? " selected" : ""}>${esc(a.name)}</option>`).join("");
+    const selLine = sel
+      ? `<div class="sel-line"><p><b>${esc(this._roomName(f, sel.area))}</b> ${esc(size(sel))}, ${metres(sel.x)} m from the left and ${metres(sel.y)} m from the top.</p>
+          <span class="sel-acts"><select data-act="rect-area" aria-label="Room of this rectangle"${off}>${options}</select><button class="quiet" data-act="rooms-delete"${off}>Delete</button></span></div>`
+      : "";
+    const hint = areas.length
+      ? "Pick a room, then drag across the plan to draw it; an L-shaped room takes two rectangles. Tap a rectangle to move it, resize it by its corners or delete it. Wisp keeps someone moving inside the rooms, and inside the room it is sure of."
+      : "This floor has no areas yet. Add them in Home Assistant's settings under Areas, then draw them here.";
+    return `${areas.length ? `<div class="room-picks" role="group" aria-label="Room to draw"><span class="picks-label">Draw</span>${picks}</div>` : ""}
+      ${selLine}
+      <p class="say">${esc(hint)}</p>
+      ${r.failure ? `<p class="fail" role="alert">${esc(r.failure)}</p>` : ""}
+      <div class="ask-line"><span class="ask-buttons">
+        <button data-act="rooms-cancel"${off}>Cancel</button>
+        <button class="primary" data-act="rooms-save"${r.busy || !r.changed ? " disabled" : ""}>${r.busy ? "Saving" : "Save"}</button></span></div>`;
+  }
+
   _planRow(f) {
     const key = f.floor ?? "";
     const plan = f.plan;
     const form = this._isOpen("plan", key), removing = this._isOpen("remove-plan", key);
     const placed = plan ? f.nodes.filter((mac) => f.positions?.[mac]?.placed).length : 0;
     const kind = plan && !plan.url ? "a grid, " : "";
+    const rooms = f.rooms?.length ? `, ${plural(f.rooms.length, "room", "rooms")} drawn` : "";
     const meta = plan
-      ? `${kind}${metres(plan.width)} by ${metres(plan.height)} m, ${f.nodes.length ? `${placed} of ${plural(f.nodes.length, "node", "nodes")} placed` : "no nodes on this floor yet"}`
+      ? `${kind}${metres(plan.width)} by ${metres(plan.height)} m, ${f.nodes.length ? `${placed} of ${plural(f.nodes.length, "node", "nodes")} placed` : "no nodes on this floor yet"}${rooms}`
       : f.nodes.length ? "none yet: the map shows the hive's own layout" : "none yet";
-    const placing = this._placing?.floor === key;
+    const placing = this._placing?.floor === key, drawing = this._roomEdit?.floor === key;
     const acts = plan
       ? `<button data-act="place"${attr("floor", key)}${placing || form || removing || !f.nodes.length ? " disabled" : ""}>Place nodes</button>
+         <button data-act="draw-rooms"${attr("floor", key)}${drawing || form || removing ? " disabled" : ""}>Draw rooms</button>
          <button data-act="ask-plan"${attr("floor", key)}${form ? " disabled" : ""}>Change</button>
          <button class="quiet" data-act="ask-remove-plan"${attr("floor", key)}${removing ? " disabled" : ""}>Remove</button>`
       : `<button data-act="ask-plan"${attr("floor", key)}${form ? " disabled" : ""}>Add floor plan</button>`;
@@ -1242,6 +1572,29 @@ const STYLE = `
   .unplaced.done { font-style: italic; }
   .sel-line { display: flex; align-items: center; flex-wrap: wrap; gap: 4px 12px; }
   .sel-line p { flex: 1 1 12rem; }
+  .sel-acts { display: flex; align-items: center; gap: 4px; }
+  /* Drawing rooms: a wash per room in its own gentle hue, over the plan */
+  .placer.rooms .plan-draw svg { touch-action: none; cursor: crosshair; }
+  .room { cursor: move; outline: none; }
+  .room rect { fill: hsl(var(--hue) 45% 52% / .18); stroke: hsl(var(--hue) 40% 32% / .8); stroke-width: 1.4; }
+  .room.sel rect { fill: hsl(var(--hue) 45% 52% / .3); stroke: hsl(var(--hue) 45% 26%); stroke-width: 2.2; }
+  .page.dark .room rect { fill: hsl(var(--hue) 50% 62% / .18); stroke: hsl(var(--hue) 55% 74% / .8); }
+  .page.dark .room.sel rect { fill: hsl(var(--hue) 50% 62% / .3); stroke: hsl(var(--hue) 60% 80%); }
+  .page .room:focus-visible:not(.sel) rect { stroke: var(--wisp-hot); stroke-width: 2.2; } /* the selected one shows already */
+  .plan-draw .room-name { font-size: 11px; font-style: italic; text-anchor: start; pointer-events: none; }
+  .handle .hit { fill: transparent; }
+  .handle .knob { fill: var(--wisp-paper-1); stroke: var(--wisp-ink); stroke-width: 1.5; }
+  .handle[data-corner=nw], .handle[data-corner=se] { cursor: nwse-resize; }
+  .handle[data-corner=ne], .handle[data-corner=sw] { cursor: nesw-resize; }
+  .room-picks { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+  .picks-label { font-size: .9rem; font-style: italic; opacity: .85; margin-right: 2px; }
+  .room-picks button { display: inline-flex; align-items: center; gap: 7px; min-height: 34px; padding: 4px 12px 4px 9px; font-size: .9rem; }
+  .room-picks button[aria-pressed="true"] { background: var(--wisp-ink); color: var(--wisp-paper-1); }
+  .room-picks i { flex: none; box-sizing: border-box; width: 12px; height: 12px; border-radius: 3px;
+                  background: hsl(var(--hue) 55% 55% / .55); border: 1.5px solid hsl(var(--hue) 45% 30%); }
+  .page.dark .room-picks i { background: hsl(var(--hue) 50% 62% / .55); border-color: hsl(var(--hue) 55% 74%); }
+  .page .room-picks [aria-pressed="true"] i { border-color: var(--wisp-paper-1); }
+  .page .room-picks i.none { background: transparent; border-style: dashed; }
 
   .ask .field { display: grid; gap: 4px; flex: 1 1 8rem; }
   .field span { font-size: .85rem; font-style: italic; opacity: .85; }
