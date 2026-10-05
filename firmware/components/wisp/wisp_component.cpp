@@ -11,6 +11,7 @@
 
 #include "esphome/components/wifi/wifi_component.h"
 #include "esphome/core/hal.h"
+#include "esphome/core/helpers.h"
 #include "esphome/core/log.h"
 
 #include "core_hive_report.h"
@@ -39,6 +40,13 @@ static constexpr uint8_t CHIP = wisp_core::CHIP_ESP32;
 static constexpr uint8_t CHIP = wisp_core::CHIP_OTHER;
 #endif
 
+// The grid access point, saved so later boots join it directly.
+struct GridApPref {
+  uint8_t bssid[6];
+  uint8_t channel;
+  uint8_t valid;
+};
+
 static uint32_t core_now_ms() { return static_cast<uint32_t>(esp_timer_get_time() / 1000); }
 
 static void format_mac(const wisp_core::Mac &m, char *out) {
@@ -56,6 +64,14 @@ void WispComponent::setup() {
     ESP_LOGE(TAG, "No memory for the core queues");
     this->mark_failed();
     return;
+  }
+  this->grid_ap_pref_ = global_preferences->make_preference<GridApPref>(fnv1_hash("wisp_grid_ap"));
+  GridApPref saved{};
+  if (this->grid_ap_pref_.load(&saved) && saved.valid == 1) {
+    this->grid_ap_ = wisp_core::Mac::from(saved.bssid);
+    this->grid_ap_channel_ = saved.channel;
+    this->has_grid_ap_ = true;
+    this->boost_grid_ap_();  // before ESPHome's first scan finishes
   }
   this->stream_open_ = this->stream_.open(this->raw_stream_port_);
   if (!this->stream_open_)
@@ -104,18 +120,15 @@ void WispComponent::loop() {
     this->publish_stats_(now);
 }
 
-// While ESPHome is (re)connecting, remember the home network's APs from its scan results (it
-// frees them once connected). A pinned AP that stays unreachable is released after a minute,
-// so a node never gets stuck on a dead access point.
+// While ESPHome is (re)connecting: remember the home network's APs from its scan results (it
+// frees them once connected) and keep the grid AP slightly preferred, so ESPHome joins it
+// first. Only by one step: a single failed attempt puts it level with the others again, so a
+// dead access point never strands the node.
 void WispComponent::watch_wifi_(uint32_t now) {
   auto *wifi = wifi::global_wifi_component;
-  if (wifi->is_connected()) {
-    this->disconnected_since_ = 0;
+  if (wifi->is_connected())
     return;
-  }
   this->steered_ = false;
-  if (this->disconnected_since_ == 0)
-    this->disconnected_since_ = now;
   const auto &results = wifi->get_scan_result();
   if (!results.empty()) {
     const auto sta = wifi->get_sta();
@@ -124,14 +137,32 @@ void WispComponent::watch_wifi_(uint32_t now) {
         this->aps_seen_.add(wisp_core::Mac::from(r.get_bssid().data()), r.get_channel(), r.get_rssi());
     }
   }
-  if (this->pinned_ && now - this->disconnected_since_ > 60000) {
-    auto ap = wifi->get_sta();
-    ap.clear_bssid();
-    ap.set_channel(0);
-    wifi->set_sta(ap);
-    this->pinned_ = false;
-    ESP_LOGW(TAG, "Pinned access point unreachable for a minute, released");
+  if (now - this->last_boost_ms_ >= 2000) {
+    this->last_boost_ms_ = now;
+    this->boost_grid_ap_();
   }
+}
+
+void WispComponent::boost_grid_ap_() {
+  if (!this->has_grid_ap_)
+    return;
+  wifi::bssid_t bssid;
+  memcpy(bssid.data(), this->grid_ap_.b, 6);
+  wifi::global_wifi_component->set_sta_priority(bssid, 1);
+}
+
+// Saved across reboots, so the next boot joins the grid AP straight away. Written only on change.
+void WispComponent::remember_grid_ap_(const wisp_core::Mac &bssid, uint8_t channel) {
+  if (this->has_grid_ap_ && bssid == this->grid_ap_ && channel == this->grid_ap_channel_)
+    return;
+  this->grid_ap_ = bssid;
+  this->grid_ap_channel_ = channel;
+  this->has_grid_ap_ = true;
+  GridApPref pref{};
+  memcpy(pref.bssid, bssid.b, 6);
+  pref.channel = channel;
+  pref.valid = 1;
+  this->grid_ap_pref_.save(&pref);
 }
 
 // Moves this node to the grid channel: same rule on every node, see core_wifi_plan.h.
@@ -140,11 +171,13 @@ void WispComponent::steer_wifi_() {
   wifi_ap_record_t cur;
   if (esp_wifi_sta_get_ap_info(&cur) != ESP_OK)
     return;
-  this->aps_seen_.add(wisp_core::Mac::from(cur.bssid), cur.primary, cur.rssi);
+  const wisp_core::Mac current = wisp_core::Mac::from(cur.bssid);
+  this->aps_seen_.add(current, cur.primary, cur.rssi);
   const uint8_t channel = wisp_core::choose_grid_channel(this->aps_seen_.data(), this->aps_seen_.count(),
                                                          this->ap_min_rssi_, this->grid_channel_cfg_);
   if (channel == 0 || channel == cur.primary) {
     this->grid_channel_.store(cur.primary);
+    this->remember_grid_ap_(current, cur.primary);
     ESP_LOGI(TAG, "On the grid channel %u (%d APs of this network seen)", cur.primary, this->aps_seen_.count());
     return;
   }
@@ -153,20 +186,19 @@ void WispComponent::steer_wifi_() {
     ESP_LOGW(TAG, "Grid channel %u has no usable AP of this network", channel);
     return;
   }
+  if (this->steer_attempts_ >= 3) {
+    ESP_LOGW(TAG, "Could not reach the grid channel %u, staying on channel %u", channel, cur.primary);
+    return;
+  }
+  this->steer_attempts_++;
   const wisp_core::ApSeen &target = this->aps_seen_.data()[i];
-  auto *wifi = wifi::global_wifi_component;
-  auto ap = wifi->get_sta();
-  wifi::bssid_t bssid;
-  memcpy(bssid.data(), target.bssid.b, 6);
-  ap.set_bssid(bssid);
-  ap.set_channel(channel);
-  wifi->set_sta(ap);
-  wifi->start_connecting(ap);
-  this->pinned_ = true;
+  this->remember_grid_ap_(target.bssid, channel);
+  this->boost_grid_ap_();
   char mac[18];
   format_mac(target.bssid, mac);
   ESP_LOGI(TAG, "Moving from channel %u to the grid channel %u: access point %s (%d dBm)", cur.primary, channel, mac,
            target.rssi);
+  esp_wifi_disconnect();  // ESPHome reconnects, now preferring the grid AP
 }
 
 // Follows the home access point: its BSSID names the AP link, its gateway gets the pings.

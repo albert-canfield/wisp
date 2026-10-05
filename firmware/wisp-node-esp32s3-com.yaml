@@ -1,0 +1,11 @@
+# Variant for two-port ESP32-S3 boards used through their COM (UART) port, for example when
+# debugging: logs and Improv on UART0 instead of the native USB port.
+
+packages:
+  node: !include wisp-node-esp32s3.yaml
+
+esphome:
+  build_path: build/wisp-esp32s3-com
+
+logger:
+  hardware_uart: UART0

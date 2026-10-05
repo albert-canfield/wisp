@@ -6,6 +6,7 @@
 #include "esphome/components/binary_sensor/binary_sensor.h"
 #include "esphome/components/sensor/sensor.h"
 #include "esphome/core/component.h"
+#include "esphome/core/preferences.h"
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
@@ -58,6 +59,8 @@ class WispComponent : public Component {
   // Main loop.
   void watch_wifi_(uint32_t now);
   void steer_wifi_();
+  void boost_grid_ap_();
+  void remember_grid_ap_(const wisp_core::Mac &bssid, uint8_t channel);
   void update_ap_();
   void publish_stats_(uint32_t now);
 
@@ -119,9 +122,13 @@ class WispComponent : public Component {
   int8_t ap_min_rssi_{wisp_core::DEFAULT_MIN_RSSI};
   wisp_core::ApList aps_seen_;
   bool steered_{false};
-  bool pinned_{false};
+  uint8_t steer_attempts_{0};
+  ESPPreferenceObject grid_ap_pref_;
+  wisp_core::Mac grid_ap_{};
+  uint8_t grid_ap_channel_{0};
+  bool has_grid_ap_{false};
+  uint32_t last_boost_ms_{0};
   bool was_connected_{false};
-  uint32_t disconnected_since_{0};
   std::atomic<uint8_t> grid_channel_{0};
 
   uint32_t dropped_total_{0};
