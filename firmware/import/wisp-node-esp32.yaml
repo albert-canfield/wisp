@@ -1,0 +1,16 @@
+# Wisp node for original ESP32 boards (ESP32-WROOM, DevKit V1 and similar).
+# For the ESPHome dashboard ("Adopt"): the same node as ../wisp-node-esp32.yaml, with the Wisp
+# component taken from GitHub, since the adopting machine has no copy of this repository.
+
+packages:
+  base: !include ../common/base.yaml
+  board: !include ../common/board-esp32.yaml
+
+external_components:
+  - source:
+      type: git
+      url: https://github.com/albert-canfield/wisp
+      ref: main
+      path: firmware/components
+    components: [wisp]
+    refresh: 1d

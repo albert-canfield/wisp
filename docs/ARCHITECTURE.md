@@ -362,7 +362,9 @@ What Wisp adds: a self-forming grid of many nodes with shared knowledge, access 
 wisp/
   firmware/                  wisp-node (the core)
     common/base.yaml         ESPHome base shared by every chip
-    wisp-node-esp32*.yaml    ESPHome config per chip (S3, C3, original ESP32)
+    common/board-*.yaml      board settings per chip
+    wisp-node-esp32*.yaml    ESPHome config per chip (S3, C3, original ESP32), built from this repository
+    import/                  the same configs for the ESPHome dashboard, with the component from GitHub
     components/wisp/         ESPHome external component, one flat folder (ESPHome copies no subfolders)
       core_*                 wisp-core: portable C++, never includes ESPHome or ESP-IDF
       esp_*                  ESP-IDF adapter: CSI, ESP-NOW, clock, NVS, UDP

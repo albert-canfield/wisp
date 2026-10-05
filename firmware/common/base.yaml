@@ -14,11 +14,6 @@ esphome:
     name: albert-canfield.wisp-node
     version: ${project_version}
 
-external_components:
-  - source:
-      type: local
-      path: components
-
 wisp:
   id: wisp_node
   ap_ping_interval: 50ms # pings to the gateway: each reply from the AP carries CSI

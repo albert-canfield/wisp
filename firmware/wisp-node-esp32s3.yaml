@@ -1,22 +1,19 @@
-# Wisp node for ESP32-S3 boards. Tested on an ESP32-S3 N16R8 DevKitC board.
-# Generic build: 4 MB layout and no PSRAM, so it runs on every S3 board.
-# Boards with two USB ports: logs and Improv use the native port (often labelled USB).
-# The COM/UART port can flash the board but stays silent afterwards.
+# Wisp node for ESP32-S3 boards. Tested on ESP32-S3 N16R8 DevKitC boards.
+# Built from this repository (development, CI and releases). The ESPHome dashboard adopts nodes
+# with import/wisp-node-esp32s3.yaml instead, which takes the Wisp component from GitHub.
 
 esphome:
   build_path: build/wisp-esp32s3 # one build folder per chip
 
 packages:
   base: !include common/base.yaml
-  status_led: !include common/status_led_rgb.yaml
+  board: !include common/board-esp32s3.yaml
 
-esp32:
-  board: esp32-s3-devkitc-1
-  variant: esp32s3
-  flash_size: 4MB
-  framework:
-    type: esp-idf
+external_components:
+  - source:
+      type: local
+      path: components
 
 dashboard_import:
-  package_import_url: github://albert-canfield/wisp/firmware/wisp-node-esp32s3.yaml@main
+  package_import_url: github://albert-canfield/wisp/firmware/import/wisp-node-esp32s3.yaml@main
   import_full_config: false

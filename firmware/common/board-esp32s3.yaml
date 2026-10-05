@@ -1,0 +1,12 @@
+# ESP32-S3 boards: generic 4 MB layout, no PSRAM, so one build runs on every S3 board.
+# Boards with two USB ports: logs and Improv use the native port (often labelled USB).
+
+packages:
+  status_led: !include status_led_rgb.yaml
+
+esp32:
+  board: esp32-s3-devkitc-1
+  variant: esp32s3
+  flash_size: 4MB
+  framework:
+    type: esp-idf

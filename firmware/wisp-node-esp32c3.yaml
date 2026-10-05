@@ -1,18 +1,19 @@
-# Wisp node for ESP32-C3 boards. No status LED: its pin differs between boards.
+# Wisp node for ESP32-C3 boards.
+# Built from this repository (development, CI and releases). The ESPHome dashboard adopts nodes
+# with import/wisp-node-esp32c3.yaml instead, which takes the Wisp component from GitHub.
 
 esphome:
   build_path: build/wisp-esp32c3 # one build folder per chip
 
 packages:
   base: !include common/base.yaml
+  board: !include common/board-esp32c3.yaml
 
-esp32:
-  board: esp32-c3-devkitm-1
-  variant: esp32c3
-  flash_size: 4MB
-  framework:
-    type: esp-idf
+external_components:
+  - source:
+      type: local
+      path: components
 
 dashboard_import:
-  package_import_url: github://albert-canfield/wisp/firmware/wisp-node-esp32c3.yaml@main
+  package_import_url: github://albert-canfield/wisp/firmware/import/wisp-node-esp32c3.yaml@main
   import_full_config: false

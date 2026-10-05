@@ -1,0 +1,9 @@
+# Original ESP32 boards (ESP32-WROOM, DevKit V1 and similar). No status LED: its pin differs
+# between boards. These chips have CSI but no Wi-Fi FTM ranging.
+
+esp32:
+  board: esp32dev
+  variant: esp32
+  flash_size: 4MB
+  framework:
+    type: esp-idf
