@@ -215,7 +215,9 @@ async def test_still_calibration_and_separation(hass: HomeAssistant, house: Hous
     assert hub.panel_snapshot()["floors"][0]["run"]["mode"] == "still"
     await house.seconds(25, sitting="office")
     assert hass.states.get(CALIBRATION).attributes["samples"] == {"Office still": 25}
-    assert state(hass, OFFICE_PRESENCE) == "off"  # its own entity; without an empty floor, no still presence
+    # Its own entity, on while the recording says someone sits there (no class could tell it yet)
+    office = hass.states.get(OFFICE_PRESENCE)
+    assert office.state == "on" and office.attributes["still"] is True
     stored = store(hass_storage, house.entry)["data"]
     assert stored["areas"] == {} and len(stored["still"]["office"]["signal"]) == 25
 
@@ -275,7 +277,10 @@ async def test_no_walker_when_the_empty_floor_wins(hass: HomeAssistant, house: H
 
     house.udp.receive(encode_hive_report(1, NODE_A, 0xBEEF, LAYOUT, ROWS), IP_A)
     await house.calibrate("kitchen")
-    await house.calibrate("office")
+    await hass.services.async_call(DOMAIN, "calibrate_room", {"area": "office", "duration": 25}, blocking=True)
+    await house.seconds(3, "office")
+    assert state(hass, ROOM) == "Office"  # while it records, the recording says where someone moves
+    await house.seconds(22, "office")
     await house.hass.services.async_call(DOMAIN, "calibrate_empty", {"duration": 25}, blocking=True)
     await house.seconds(25, "upstairs")  # the empty floor learns what the floor above does to it
     hub = house.entry.runtime_data

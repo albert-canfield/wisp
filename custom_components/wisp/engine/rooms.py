@@ -448,11 +448,15 @@ class Rooms:
         motion = max(live, default=0.0)
         ended = None
         run = self.runs.get(floor)
+        recording = run is not None and run.starts < now <= run.ends
         if run is not None:
-            if run.starts < now <= run.ends:
+            if recording:
                 self._record(run, vector, motion, moving)
             if now >= run.ends:
                 ended = self.runs.pop(floor)
+        if recording and live:
+            self._known(floor, run, motion, len(live), now)
+            return ended
         decision = decide(scores, self.models(floor, areas), self.quiet, moving)
         self.decisions[floor] = decision
         if decision and decision.room is not None and decision.confidence >= self.confidence:
@@ -465,6 +469,23 @@ class Rooms:
         else:
             self._still_step(floor, areas, vector, motion, now)
         return ended
+
+    def _known(self, floor: str, run: Run, motion: float, links: int, now: float) -> None:
+        """While a recording runs, its instructions say where everyone is: moving or still in its
+        room, or off the floor for the empty floor. Presence and the map follow that instead of
+        classifying with the classes being recorded, which lit up other rooms meanwhile."""
+        self.streaks.pop(floor, None)
+        if run.area is None:  # the empty floor: nobody, and the map places nobody walking
+            self.decisions[floor] = Decision(None, None, {None: 1.0}, motion, links)
+            self.still_decisions[floor] = None
+        elif run.still:
+            self.decisions[floor] = Decision(None, None, {}, motion, links)
+            self.still_decisions[floor] = Decision(run.area, 1.0, {run.area: 1.0}, motion, links, still=True)
+            self.wins[run.area] = (now, 1.0, True)
+        else:
+            self.decisions[floor] = Decision(run.area, 1.0, {run.area: 1.0}, motion, links)
+            self.still_decisions[floor] = None
+            self.wins[run.area] = (now, 1.0, False)
 
     def _still_step(self, floor: str, areas: list[str], vector: Vector, motion: float, now: float) -> None:
         """Nobody moves on the floor: a room winning the still classification STILL_SECONDS in a row holds presence."""
