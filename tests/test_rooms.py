@@ -19,7 +19,7 @@ from custom_components.wisp.const import DOMAIN
 from custom_components.wisp.diagnostics import async_get_config_entry_diagnostics
 
 from .conftest import AP, IP_A, IP_B, NODE_A, NODE_B, FakeClock, FakeUdp
-from .fake_node import encode_report
+from .fake_node import encode_hive_report, encode_report
 from .test_init import HALL, OFFICE, fire, link_ids, setup_hub, state
 
 pytestmark = pytest.mark.usefixtures("enable_custom_integrations")
@@ -34,6 +34,7 @@ SCORES = {
     "office": ((105, 120), (310, 260)),
     None: ((104, 102), (103, 106)),
     "restless": ((192, 185), (104, 102)),  # the Kitchen's links busy, all under the motion threshold
+    "upstairs": ((104, 215), (103, 225)),  # someone on the floor above: two links flag motion, no room's pattern
 }
 # RSSI with nobody there, same order, and how much weaker the links arrive with someone in a room,
 # walking or sitting still: a body near a link absorbs some of it
@@ -264,6 +265,24 @@ async def test_restless_links_make_no_presence(hass: HomeAssistant, house: House
     assert (state(hass, ROOM), state(hass, KITCHEN)) == ("none", "off")
     await house.seconds(1, "kitchen")
     assert (state(hass, ROOM), state(hass, KITCHEN)) == ("Kitchen", "on")
+
+
+async def test_no_walker_when_the_empty_floor_wins(hass: HomeAssistant, house: House) -> None:
+    """Links can flag motion with nobody on the floor (people upstairs, someone shifting in a
+    chair): when room presence weighs that motion and the empty floor wins, the map places nobody
+    walking. Before, the locator placed a walker from the flags alone, often in the wrong room."""
+    from .test_map import LAYOUT, ROWS
+
+    house.udp.receive(encode_hive_report(1, NODE_A, 0xBEEF, LAYOUT, ROWS), IP_A)
+    await house.calibrate("kitchen")
+    await house.calibrate("office")
+    await house.hass.services.async_call(DOMAIN, "calibrate_empty", {"duration": 25}, blocking=True)
+    await house.seconds(25, "upstairs")  # the empty floor learns what the floor above does to it
+    hub = house.entry.runtime_data
+    await house.seconds(25, "upstairs")  # the last fixes, from the recording, fade after 20 s
+    assert state(hass, ROOM) == "none" and "people" not in hub.map_snapshot()
+    await house.seconds(5, "kitchen")  # someone walking in a room still shows
+    assert state(hass, ROOM) == "Kitchen" and hub.map_snapshot()["people"]
 
 
 async def test_room_writes(hass: HomeAssistant, house: House) -> None:

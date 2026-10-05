@@ -239,6 +239,11 @@ class RoomPresence:
             live[floor] = len(scores)
             signal = self.signal(floor, now)
             ended.append(self.engine.step(floor, self.floor_areas(floor), scores, now, bool(moving), signal))
+            decision = self.engine.decisions.get(floor)
+            if decision is not None and decision.room is None and decision.probabilities:
+                # Room presence weighed the motion and the empty floor won (people upstairs, someone
+                # shifting in a chair): nobody walks here, whatever the links' geometry would say
+                moving = set()
             model = self._layout(floor, hive)
             if (fix := model.update(scores, now, moving, self.sure_room(floor))) is not None:
                 self.fixes[floor] = fix
