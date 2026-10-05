@@ -158,8 +158,38 @@ static void test_detector_hysteresis() {
   CHECK(def.update(2.0f) && def.update(1.5f) && !def.update(1.49f));
 }
 
+// Someone sitting and working for an hour: busy most seconds, a quiet moment now and then. The
+// baseline must not climb to them (the score would fade to 1 and they would vanish), while a
+// lasting change with no quiet moments is still learned.
+static void test_still_person_is_not_absorbed() {
+  std::mt19937 rng(11);
+  auto second = [&rng](LinkMotion &link, float noise) {
+    for (int f = 0; f < 20; f++)
+      link.add_frame(make_frame(1.0f, noise, rng));
+    return link.tick();
+  };
+  LinkMotion sitting, changed;
+  for (int s = 0; s < 300; s++) {  // five quiet minutes
+    second(sitting, 0.01f);
+    second(changed, 0.01f);
+  }
+  float sit_score = 0.0f, change_score = 0.0f;
+  for (int s = 0; s < 3600; s++) {
+    const float a = second(sitting, s % 45 < 5 ? 0.01f : 0.03f);  // a few still seconds each 45
+    const float b = second(changed, 0.03f);                        // busier for good, no pauses
+    if (s >= 3300) {  // the last five minutes
+      sit_score += a / 300.0f;
+      change_score += b / 300.0f;
+    }
+  }
+  std::printf("  after an hour: sitting %.2f, lasting change %.2f\n", sit_score, change_score);
+  CHECK(sit_score > 1.8f);     // still clearly someone there
+  CHECK(change_score < 1.3f);  // a lasting change has become the new normal
+}
+
 int main() {
   test_raw_packet();
+  test_still_person_is_not_absorbed();
   test_detector_hysteresis();
   test_shape_ignores_gain();
   test_start_up_is_not_motion();

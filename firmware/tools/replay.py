@@ -37,6 +37,7 @@ class LinkMotion:
     BASELINE_SETTLE = 0.2
     BASELINE_DOWN = 0.05
     BASELINE_UP = 0.001
+    QUIET_WINDOW_MINUTES = 10
 
     def __init__(self, alpha: float = 0.05) -> None:
         self.alpha = alpha
@@ -46,6 +47,10 @@ class LinkMotion:
         self.fresh = 0
         self.baseline = 0.0
         self.settle = 0
+        self.quiet = [0.0] * self.QUIET_WINDOW_MINUTES
+        self.minute = 0
+        self.minute_ticks = 0
+        self.minutes = 0
 
     def add_frame(self, csi: bytes) -> None:
         if len(csi) < 128:
@@ -77,14 +82,22 @@ class LinkMotion:
         if fresh == 0 or self.frames < self.WARMUP_FRAMES:
             return math.nan
         sp = self.spread()
+        if self.minute_ticks == 0 or sp < self.quiet[self.minute]:
+            self.quiet[self.minute] = sp
+        self.minute_ticks += 1
+        if self.minute_ticks >= 60:
+            self.minute_ticks = 0
+            self.minute = (self.minute + 1) % self.QUIET_WINDOW_MINUTES
+            self.minutes = min(self.minutes + 1, self.QUIET_WINDOW_MINUTES)
+        quietest = min([self.quiet[self.minute], *self.quiet[: self.minutes]])
         if self.baseline <= 0:
             self.baseline = sp
         elif self.settle < self.SETTLE_TICKS:
             self.baseline += self.BASELINE_SETTLE * (sp - self.baseline)
         elif sp < self.baseline:
             self.baseline += self.BASELINE_DOWN * (sp - self.baseline)
-        else:
-            self.baseline += self.BASELINE_UP * (sp - self.baseline)
+        elif quietest > self.baseline:
+            self.baseline += self.BASELINE_UP * (quietest - self.baseline)
         if self.settle < self.SETTLE_TICKS:
             self.settle += 1
             return math.nan

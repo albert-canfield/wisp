@@ -5,8 +5,10 @@
 // mean, so automatic gain changes cancel out. Running mean and variance per subcarrier give the
 // spread (how much the shape moves, in percent). A baseline learns the spread of a quiet room:
 // for the first SETTLE_TICKS seconds both ways (the score is unknown meanwhile, so a start-up
-// reading never looks like motion), then quickly downwards and very slowly upwards, so people
-// moving do not become the new normal.
+// reading never looks like motion), then quickly downwards, and upwards only slowly and only
+// towards the quietest second of the last QUIET_WINDOW_MINUTES minutes: someone sitting still for
+// hours still has quiet moments, so they never become the new normal, while a real change in the
+// room (furniture moved, a new reflection) has none and is learned in about half an hour.
 // Score = spread / baseline: 1 is as quiet as usual, higher means more movement.
 
 #include <cmath>
@@ -82,14 +84,26 @@ class LinkMotion {
     if (fresh == 0 || this->frames_ < WARMUP_FRAMES)
       return NAN;
     const float sp = this->spread();
+    // Quietest second per minute, for the last QUIET_WINDOW_MINUTES minutes
+    if (this->minute_ticks_ == 0 || sp < this->quiet_[this->minute_])
+      this->quiet_[this->minute_] = sp;
+    if (++this->minute_ticks_ >= 60) {
+      this->minute_ticks_ = 0;
+      this->minute_ = static_cast<uint8_t>((this->minute_ + 1) % QUIET_WINDOW_MINUTES);
+      if (this->minutes_ < QUIET_WINDOW_MINUTES)
+        this->minutes_++;
+    }
+    float quietest = this->quiet_[this->minute_];
+    for (uint8_t m = 0; m < this->minutes_; m++)
+      quietest = std::fmin(quietest, this->quiet_[m]);
     if (this->baseline_ <= 0.0f) {
       this->baseline_ = sp;
     } else if (this->settle_ < SETTLE_TICKS) {
       this->baseline_ += BASELINE_SETTLE * (sp - this->baseline_);
     } else if (sp < this->baseline_) {
       this->baseline_ += BASELINE_DOWN * (sp - this->baseline_);
-    } else {
-      this->baseline_ += BASELINE_UP * (sp - this->baseline_);
+    } else if (quietest > this->baseline_) {
+      this->baseline_ += BASELINE_UP * (quietest - this->baseline_);
     }
     if (this->settle_ < SETTLE_TICKS) {
       this->settle_++;
@@ -106,7 +120,8 @@ class LinkMotion {
   static constexpr uint32_t SETTLE_TICKS = 20;   // seconds of learning before scores count
   static constexpr float BASELINE_SETTLE = 0.2f;
   static constexpr float BASELINE_DOWN = 0.05f;  // per tick: about 20 s to learn a quieter room
-  static constexpr float BASELINE_UP = 0.001f;   // per tick: about 17 min to follow slow drift
+  static constexpr float BASELINE_UP = 0.001f;   // per tick: about 17 min to follow a lasting change
+  static constexpr uint8_t QUIET_WINDOW_MINUTES = 10;
 
   float alpha_;
   float mean_[SHAPE_LEN]{};
@@ -115,6 +130,10 @@ class LinkMotion {
   uint32_t frames_since_tick_{0};
   float baseline_{0.0f};
   uint32_t settle_{0};
+  float quiet_[QUIET_WINDOW_MINUTES]{};  // quietest spread of each minute, a ring
+  uint8_t minute_{0};
+  uint8_t minute_ticks_{0};
+  uint8_t minutes_{0};  // full minutes in the ring
 };
 
 // On at the threshold, off halfway between it and a quiet 1.0 (1.5 for the default 2), so the
