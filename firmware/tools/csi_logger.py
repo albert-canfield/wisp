@@ -4,9 +4,11 @@
     python firmware/tools/csi_logger.py 192.168.10.75 192.168.10.76 --dir data
 
 Writes, per node and per hour:
-  <dir>/<node>-<YYYYmmdd-HH>.wcsi   every raw packet: u64 host time (us) + u16 length + packet
+  <dir>/<node>-<YYYYmmdd-HH>.wcsi   every packet: u64 host time (us) + u16 length + packet
   <dir>/summary-<YYYYmmdd>.csv      once a second per node and source: frames, mean RSSI, motion
-Turn on each node's "Raw CSI stream" switch first. Read .wcsi files with read_wcsi() below.
+Packets are raw CSI plus the node's own link reports (its scores and motion flags) and hive
+reports (its layout), so replays can be checked against the firmware; --raw-only for raw CSI
+alone. Turn on each node's "Raw CSI stream" switch first. Read .wcsi files with read_wcsi() below.
 """
 
 from __future__ import annotations
@@ -22,6 +24,7 @@ import time
 from csi_recorder import HEADER, SUBSCRIBE, motion_score, parse
 
 REC = struct.Struct("<QH")
+STREAMS_ALL = 0x07  # raw CSI, link reports, hive reports
 MIN_FREE_BYTES = 5 * 1024**3  # stop raw logging below 5 GB free; summaries continue
 
 
@@ -40,7 +43,9 @@ def main() -> int:
     ap.add_argument("nodes", nargs="+", help="node IPs or hostnames")
     ap.add_argument("--dir", default="data")
     ap.add_argument("--port", type=int, default=47010)
+    ap.add_argument("--raw-only", action="store_true", help="raw CSI only, no link or hive reports")
     args = ap.parse_args()
+    subscribe = SUBSCRIBE if args.raw_only else SUBSCRIBE + bytes((STREAMS_ALL,))
     os.makedirs(args.dir, exist_ok=True)
 
     addrs = {socket.gethostbyname(n): n for n in args.nodes}
@@ -59,7 +64,7 @@ def main() -> int:
         if now - last_sub >= 2:
             for ip in addrs:
                 try:
-                    sock.sendto(SUBSCRIBE, (ip, args.port))
+                    sock.sendto(subscribe, (ip, args.port))
                 except OSError:
                     pass
             last_sub = now

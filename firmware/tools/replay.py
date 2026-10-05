@@ -6,7 +6,9 @@
 
 A line-by-line port of core_link_motion.h (shape, running statistics, settling baseline, score,
 detector with hysteresis), driven by the host time of each recorded packet. Prints, per link,
-the score distribution and every stretch the detector would have reported motion.
+the score distribution and every stretch the detector would have reported motion. Recordings
+that hold the nodes' link reports (csi_logger.py since it asks for them) also show what the
+firmware itself reported, to check the port against it.
 """
 
 from __future__ import annotations
@@ -15,11 +17,15 @@ import argparse
 from collections import defaultdict
 import csv
 import math
+from pathlib import Path
 import struct
 import sys
 import time
 
 from csi_logger import read_wcsi
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "custom_components" / "wisp"))
+from engine.protocol import LinkReport, ProtocolError, parse_packet  # noqa: E402
 
 HEADER = struct.Struct("<4sBBHI6s6sIbbBBBBBBH")
 SHAPE_IDX = list(range(2, 27)) + list(range(38, 64))  # same subcarriers as lltf_shape()
@@ -147,6 +153,24 @@ def seconds(packets: list[tuple[float, bytes]]):
         links[(node, src)].add_frame(pkt[header_len:header_len + n])
 
 
+def reported(packets: list[tuple[float, bytes]]) -> dict[tuple, list[tuple[float, float, bool]]]:
+    """The firmware's own score and motion flag per link, from its link reports: the last report
+    of each host second (the score changes once a second), as (time, score, motion)."""
+    out: dict[tuple, dict[int, tuple[float, float, bool]]] = defaultdict(dict)
+    for t, pkt in packets:
+        if len(pkt) < 6 or pkt[5] != 2:  # byte 5: packet type, 2 = link report
+            continue
+        try:
+            report = parse_packet(pkt)
+        except ProtocolError:
+            continue
+        if isinstance(report, LinkReport):
+            for link in report.links:
+                if link.score is not None:
+                    out[(report.node, link.transmitter)][int(t)] = (t, link.score, link.motion)
+    return {key: sorted(rows.values()) for key, rows in out.items()}
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("files", nargs="+", help=".wcsi files from csi_logger.py, any order")
@@ -180,6 +204,7 @@ def main() -> int:
             print(f"{key[0][-8:]} <- {key[1]:17s}{'':15s}" + "".join(cells))
         return 0
 
+    firmware = reported(packets)
     out = csv.writer(open(args.csv, "w", newline="")) if args.csv else None
     if out:
         out.writerow(["time", "receiver", "transmitter", "score", "motion"])
@@ -205,6 +230,12 @@ def main() -> int:
         print(f"\n{node} <- {src}: {len(valid)} s scored, p50 {percentile(valid, 50):.2f}, "
               f"p95 {percentile(valid, 95):.2f}, p99 {percentile(valid, 99):.2f}, max {max(valid, default=math.nan):.2f}, "
               f"motion {motion_s} s in {len(events)} stretches")
+        if rows_fw := firmware.get((node, src)):
+            fw = [s for _, s, _ in rows_fw]
+            moving = [m for _, _, m in rows_fw]
+            starts = sum(1 for i, m in enumerate(moving) if m and (i == 0 or not moving[i - 1]))
+            print(f"   firmware: {len(fw)} s reported, p50 {percentile(fw, 50):.2f}, p95 {percentile(fw, 95):.2f}, "
+                  f"p99 {percentile(fw, 99):.2f}, max {max(fw):.2f}, motion {sum(moving)} s in {starts} stretches")
         for t0, t1, peak in events[:15]:
             print(f"   {time.strftime('%H:%M:%S', time.localtime(t0))} for {t1 - t0 + 1:4.0f} s, peak {peak:.2f}")
         if len(events) > 15:
