@@ -5,7 +5,7 @@ Once a second a floor gives a feature vector: the log motion score of every live
 vectors recorded while someone moves in it; each floor learns an empty class while nobody moves
 on it. A floor is classified only while one of its links reports motion (the node's detector, so
 its Motion threshold, with hysteresis); without those flags, while a link scores QUIET or more.
-Replaying a quiet night, a link touched QUIET about every 5 minutes, the motion flags far less.
+Replaying 1.5 quiet hours, a link touched QUIET 16 times, the motion flags came on once.
 The caller owns the clock (seconds) and says which floor each area is on.
 """
 from __future__ import annotations

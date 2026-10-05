@@ -137,8 +137,11 @@ def load(files: list[str], since: str | None = None) -> list[tuple[float, bytes]
 
 def seconds(packets: list[tuple[float, bytes]]):
     """Each second, every link's score as the firmware computes it (NaN while it warms up or is
-    silent): yields (time, {(receiver, transmitter): score})."""
+    silent): yields (time, {(receiver, transmitter): score}). A node that reboots (its packet
+    sequence starts over) starts its links over, as the firmware does; a transmitter that reboots
+    does not touch them."""
     links: dict[tuple, LinkMotion] = defaultdict(LinkMotion)
+    last_seq: dict[str, int] = {}
     next_tick = packets[0][0] + 1.0
     for t, pkt in packets:
         while t >= next_tick:
@@ -150,6 +153,10 @@ def seconds(packets: list[tuple[float, bytes]]):
         if f[0] != b"WISP" or f[2] != 1:
             continue
         node, src, header_len, n = f[5].hex(":"), f[6].hex(":"), f[3], f[16]
+        if f[4] < last_seq.get(node, 0):  # rebooted
+            for key in [key for key in links if key[0] == node]:
+                del links[key]
+        last_seq[node] = f[4]
         links[(node, src)].add_frame(pkt[header_len:header_len + n])
 
 
