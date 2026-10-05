@@ -6,6 +6,7 @@
 #include <vector>
 
 #include "core_hive.h"
+#include "core_hive_report.h"
 #include "core_layout.h"
 
 static int failures = 0;
@@ -160,8 +161,10 @@ static void test_departed_rows_expire_despite_relays() {
   b.on_row(mac_n(3), 7, ec, 1, 0);
   HiveEntry ed[1] = {{mac_n(2), -60}};
   uint32_t now = 0;
-  for (int minute = 1; minute <= 25 * 60; minute++) {
-    now = minute * 60000u;
+  // Steps that are not whole age units (4 s): each relay must round the age up, or two nodes
+  // relaying C's row to each other keep it young for ever.
+  for (uint32_t step = 1; now < 26u * 3600 * 1000; step++) {
+    now = step * 1300u;
     b.on_row(mac_n(4), 9, ed, 1, now);  // D is alive, heard directly by B only
     // Each relays the rows it holds to the other, with their ages.
     for (Hive *from : {&a, &b}) {
@@ -184,6 +187,123 @@ static void test_departed_rows_expire_despite_relays() {
   }
   CHECK(a.find(mac_n(3)) == nullptr && b.find(mac_n(3)) == nullptr);  // C expired everywhere
   CHECK(a.find(mac_n(4)) != nullptr);  // D, alive, stays at A through B's relays
+}
+
+// A full hive makes room for a newcomer only in place of a missing node's row.
+static void test_full_hive_makes_room() {
+  Hive h(mac_n(1));
+  HiveEntry e[1] = {{mac_n(1), -60}};
+  CHECK(h.own() != nullptr && h.count() == 1);  // own row reserved from the start
+  for (int i = 0; i < MAX_ROWS - 1; i++)
+    CHECK(h.on_row(mac_n(10 + i), 1, e, 1, 0));
+  CHECK(h.count() == MAX_ROWS);
+  CHECK(h.set_own(e, 1, 0));  // a full hive still takes this node's own row
+  CHECK(!h.on_row(mac_n(99), 1, e, 1, 60000));  // everyone heard within ROW_EVICT_MS: refused
+  uint32_t now = 0;
+  for (; now <= ROW_EVICT_MS + 60000; now += 30000) {
+    for (int i = 1; i < MAX_ROWS - 1; i++)  // all but mac_n(10) keep being heard
+      h.on_row(mac_n(10 + i), 1, e, 1, now);
+  }
+  CHECK(!h.on_row(mac_n(99), 1, e, 1, now, ROW_EVICT_MS + 120000));  // a newcomer staler than the stalest
+  CHECK(h.on_row(mac_n(99), 1, e, 1, now));
+  CHECK(h.find(mac_n(99)) != nullptr && h.find(mac_n(10)) == nullptr && h.count() == MAX_ROWS);
+  CHECK(!h.on_row(mac_n(98), 1, e, 1, now, ROW_EXPIRE_MS));  // a relay older than the expiry
+}
+
+// After two quick reboots the others may hold this node's old row at the very version it
+// reached again: other readings at the same version also make it move on, at most every 10 s.
+static void test_stale_copy_of_own_row() {
+  Hive a(mac_n(1));
+  HiveEntry fresh[1] = {{mac_n(2), -50}}, old[1] = {{mac_n(2), -85}};
+  a.set_own(fresh, 1, 0);
+  const uint16_t v = a.own()->version;
+  CHECK(!a.on_row(mac_n(1), v, fresh, 1, 1000));  // its own row relayed back as it is: nothing
+  CHECK(a.on_row(mac_n(1), v, old, 1, 2000));      // same version, other readings: move past
+  CHECK(a.own()->version == static_cast<uint16_t>(v + 1) && a.self_jumps() == 1);
+  CHECK(!a.on_row(mac_n(1), static_cast<uint16_t>(v + 5), old, 1, 5000));  // within 10 s: waits
+  CHECK(a.on_row(mac_n(1), static_cast<uint16_t>(v + 5), old, 1, 13000));
+  CHECK(a.own()->version == static_cast<uint16_t>(v + 6) && a.self_jumps() == 2);
+}
+
+// Random floors with noisy RSSI: the layout must keep two dimensions (it used to collapse onto
+// a line when a negative eigenvalue outweighed the second positive one).
+static void test_layout_keeps_two_dimensions() {
+  static LayoutWorkspace ws;
+  const PathLoss pl;
+  for (const int n : {6, 10, 16}) {
+    std::mt19937 rng(101 + n);
+    std::uniform_real_distribution<float> ux(0.0f, 15.0f), uy(0.0f, 10.0f);
+    std::normal_distribution<float> noise(0.0f, 4.0f);
+    int flat = 0;
+    const int runs = 200;
+    for (int r = 0; r < runs; r++) {
+      float pos[MAX_POINTS][2];
+      for (int i = 0; i < n; i++) {
+        pos[i][0] = ux(rng);
+        pos[i][1] = uy(rng);
+      }
+      Hive h(mac_n(500));
+      for (int i = 0; i < n; i++) {
+        HiveEntry e[MAX_ROW];
+        int k = 0;
+        for (int j = 0; j < n && k < MAX_ROW; j++) {
+          if (i == j)
+            continue;
+          const float d = std::fmax(0.5f, std::hypot(pos[i][0] - pos[j][0], pos[i][1] - pos[j][1]));
+          const float rssi = pl.rssi_at_1m - 10.0f * pl.exponent * std::log10(d) + noise(rng);
+          e[k++] = HiveEntry{mac_n(1 + j), static_cast<int8_t>(std::lround(std::fmax(-120.0f, rssi)))};
+        }
+        h.on_row(mac_n(1 + i), 1, e, k, 0);
+      }
+      LayoutPoint out[MAX_POINTS];
+      const int got = solve_layout(h, out, ws);
+      float spread = 0.0f;
+      for (int i = 0; i < got; i++)
+        spread = std::fmax(spread, std::fabs(out[i].y));
+      flat += got == n && spread < 0.15f;
+    }
+    std::printf("  %d nodes, 4 dB noise: %d of %d layouts flat\n", n, flat, runs);
+    CHECK(flat <= runs / 100);
+  }
+}
+
+// More rows than one packet holds: reports starting from different rows get them all out.
+static void test_hive_report_rotates_rows() {
+  Hive h(mac_n(1));
+  HiveEntry e[MAX_ROW];
+  for (int k = 0; k < MAX_ROW; k++)
+    e[k] = HiveEntry{mac_n(300 + k), -60};
+  h.set_own(e, MAX_ROW, 0);
+  for (int i = 0; i < MAX_ROWS - 1; i++)
+    h.on_row(mac_n(10 + i), 1, e, MAX_ROW, 0);
+  std::vector<int> seen(MAX_ROWS, 0);
+  int first = 0;
+  for (int report = 0; report < 3; report++) {  // each report starts where the last one stopped
+    uint8_t buf[HIVE_REPORT_MAX];
+    const size_t n = encode_hive_report(h.self(), 1, h.hash(), true, nullptr, 0, h, buf, sizeof(buf), first);
+    CHECK(n > 0 && n <= sizeof(buf) && (buf[22] & HIVE_FLAG_ROWS_TRUNCATED));
+    size_t pos = HIVE_REPORT_HEADER_BYTES;
+    for (int r = 0; r < buf[24]; r++) {
+      Mac origin = Mac::from(buf + pos);
+      for (int i = 0; i < h.count(); i++)
+        seen[i] += h.row(i).origin == origin;
+      pos += 9 + 7 * static_cast<size_t>(buf[pos + 8]);
+    }
+    CHECK(pos == n);
+    first += buf[24];
+  }
+  bool all = true;
+  for (int i = 0; i < h.count(); i++)
+    all = all && seen[i] > 0;
+  CHECK(all);
+}
+
+static void test_portable_exp2() {
+  float worst = 0.0f;
+  for (float x = -12.0f; x <= 12.0f; x += 0.01f)
+    worst = std::fmax(worst, std::fabs(exp2_portable(x) / std::exp2(x) - 1.0f));
+  CHECK(worst < 1e-6f);
+  CHECK(std::fabs(rssi_to_metres(-45.0f) - 1.0f) < 1e-6f && std::fabs(rssi_to_metres(-72.0f) - 10.0f) < 1e-5f);
 }
 
 // Nodes at known positions; RSSI from the path-loss model plus noise; the layout should give
@@ -254,7 +374,12 @@ int main() {
   test_gossip_over_a_chain();
   test_rebooted_node_gets_back_in_sync();
   test_departed_rows_expire_despite_relays();
+  test_full_hive_makes_room();
+  test_stale_copy_of_own_row();
   test_layout();
+  test_layout_keeps_two_dimensions();
+  test_portable_exp2();
+  test_hive_report_rotates_rows();
   if (failures) {
     std::printf("%d hive check(s) failed\n", failures);
     return 1;

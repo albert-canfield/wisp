@@ -9,9 +9,13 @@
 //
 // Each row also knows when its origin was last heard directly. Relays carry that as an age, so a
 // departed node's row grows old everywhere and expires after a day, even though the remaining
-// nodes keep relaying it to each other. A node that hears its own row relayed back at a version
-// it has not reached (it rebooted and its counter restarted) jumps past it, or the others would
-// keep ignoring its new rows as old.
+// nodes keep relaying it to each other: each relay rounds the age up, so a row only grows older
+// on its way around. A node that hears its own row relayed back at a version it has not reached,
+// or at its current version with other readings (it rebooted and its counter restarted), jumps
+// past it, or the others would keep ignoring its new rows as old.
+//
+// A full hive makes room for a new node by dropping the row unheard for longest, once that is
+// longer than ROW_EVICT_MS (a missing node); rows of nodes still heard are never dropped.
 
 #include <cmath>
 #include <cstddef>
@@ -27,6 +31,8 @@ constexpr int8_t ROW_CHANGE_DB = 3;
 constexpr uint32_t ROW_EXPIRE_MS = 24 * 3600 * 1000;  // same as forgetting a node
 constexpr uint32_t ROW_AGE_UNIT_MS = 4000;  // relayed ages: 16 bits of 4 s, up to 72 h, beyond the expiry
 constexpr uint32_t ROW_AGE_MAX_MS = 65535u * ROW_AGE_UNIT_MS;
+constexpr uint32_t ROW_EVICT_MS = 5 * 60 * 1000;  // a full hive drops a row unheard this long
+constexpr uint32_t SELF_JUMP_MIN_MS = 10 * 1000;  // a duplicate MAC must not make the version race
 
 struct HiveEntry {
   Mac mac;
@@ -54,13 +60,25 @@ inline uint32_t fnv1a(uint32_t h, const uint8_t *p, size_t n) {
 
 class Hive {
  public:
-  explicit Hive(const Mac &self) : self_(self) {}
+  explicit Hive(const Mac &self) { this->reset(self); }
+
+  // Empty again, for another MAC: in place, no large temporary on the caller's stack.
+  void reset(const Mac &self) {
+    this->self_ = self;
+    this->rows_[0] = HiveRow{};
+    this->rows_[0].origin = self;  // reserved: a full hive never refuses this node's own row
+    this->count_ = 1;
+    this->relay_cursor_ = 0;
+    this->hash_dirty_ = true;
+    this->last_self_jump_ms_ = 0;
+    this->self_jumps_ = 0;
+  }
 
   // This node's own view. Bumps its version when it changed enough. Returns true if it did.
   bool set_own(const HiveEntry *entries, int n, uint32_t now_ms) {
     if (n > MAX_ROW)
       n = MAX_ROW;
-    HiveRow *own = this->find_or_add_(this->self_);
+    HiveRow *own = this->find_(this->self_);
     bool changed = own->len != n;
     for (int i = 0; i < n && !changed; i++) {
       const HiveEntry *old = find_entry_(*own, entries[i].mac);
@@ -84,13 +102,20 @@ class Hive {
       return false;
     if (origin == this->self_) {
       HiveRow *own = this->find_(this->self_);
-      if (own != nullptr && row_newer(version, own->version)) {
-        own->version = static_cast<uint16_t>(version + 1);  // rebooted: move past the old count
-        this->hash_dirty_ = true;
-        return true;
-      }
-      return false;
+      const bool ahead = row_newer(version, own->version);
+      const bool stale = version == own->version && !same_entries_(*own, entries, n);
+      if (!ahead && !stale)
+        return false;
+      if (this->self_jumps_ > 0 && now_ms - this->last_self_jump_ms_ < SELF_JUMP_MIN_MS)
+        return false;
+      own->version = static_cast<uint16_t>(version + 1);  // rebooted: move past the old count
+      this->last_self_jump_ms_ = now_ms;
+      this->self_jumps_++;
+      this->hash_dirty_ = true;
+      return true;
     }
+    if (age_ms >= ROW_EXPIRE_MS)
+      return false;  // nobody has heard its origin for a day: it is being forgotten
     const uint32_t heard = now_ms - age_ms;
     HiveRow *row = this->find_(origin);
     if (row != nullptr && !row_newer(version, row->version)) {
@@ -99,7 +124,7 @@ class Hive {
         row->heard_ms = heard;
       return false;
     }
-    if (row == nullptr && (row = this->find_or_add_(origin)) == nullptr)
+    if (row == nullptr && (row = this->add_(origin, now_ms, age_ms)) == nullptr)
       return false;
     row->version = version;
     row->len = static_cast<uint8_t>(n);
@@ -155,6 +180,9 @@ class Hive {
   int count() const { return this->count_; }
   const HiveRow &row(int i) const { return this->rows_[i]; }
   const Mac &self() const { return this->self_; }
+  // Times this node moved its own version past a copy relayed back: after a reboot, once. Many
+  // more mean another device uses this node's MAC.
+  uint32_t self_jumps() const { return this->self_jumps_; }
 
  protected:
   static const HiveEntry *find_entry_(const HiveRow &row, const Mac &m) {
@@ -171,11 +199,34 @@ class Hive {
     }
     return nullptr;
   }
-  HiveRow *find_or_add_(const Mac &m) {
-    if (HiveRow *r = this->find_(m))
-      return r;
-    if (this->count_ >= MAX_ROWS)
-      return nullptr;
+  static bool same_entries_(const HiveRow &row, const HiveEntry *entries, int n) {
+    if (row.len != n)
+      return false;
+    for (int i = 0; i < n; i++) {
+      if (!(row.entries[i].mac == entries[i].mac) || row.entries[i].rssi != entries[i].rssi)
+        return false;
+    }
+    return true;
+  }
+  // A new origin's row; when full, in place of the row unheard for longest if that is a missing
+  // node's and older than the newcomer's.
+  HiveRow *add_(const Mac &m, uint32_t now_ms, uint32_t age_ms) {
+    if (this->count_ >= MAX_ROWS) {
+      int stalest = -1;
+      for (int i = 0; i < this->count_; i++) {
+        if (this->rows_[i].origin == this->self_)
+          continue;
+        if (stalest < 0 || now_ms - this->rows_[i].heard_ms > now_ms - this->rows_[stalest].heard_ms)
+          stalest = i;
+      }
+      if (stalest < 0)
+        return nullptr;
+      const uint32_t silent = now_ms - this->rows_[stalest].heard_ms;
+      if (silent <= ROW_EVICT_MS || silent <= age_ms)
+        return nullptr;
+      this->rows_[stalest] = this->rows_[--this->count_];
+      this->hash_dirty_ = true;
+    }
     HiveRow &r = this->rows_[this->count_++];
     r = HiveRow{};
     r.origin = m;
@@ -188,6 +239,8 @@ class Hive {
   int relay_cursor_{0};
   uint32_t hash_{0};
   bool hash_dirty_{true};
+  uint32_t last_self_jump_ms_{0};
+  uint32_t self_jumps_{0};
 };
 
 // ---- ESP-NOW hive row frame (type 2), sent right after the beacon to relay one row ----------
@@ -214,7 +267,10 @@ inline size_t encode_row_frame(const HiveRow &row, uint16_t seq, uint32_t now_ms
   memcpy(out + 6, row.origin.b, 6);
   out[12] = static_cast<uint8_t>(row.version);
   out[13] = static_cast<uint8_t>(row.version >> 8);
-  const uint32_t units = (now_ms - row.heard_ms) / ROW_AGE_UNIT_MS;
+  // Rounded up: a relay must never make a row look fresher than it is, or two nodes relaying a
+  // departed node's row to each other would keep it young for ever.
+  const uint32_t elapsed = now_ms - row.heard_ms;
+  const uint32_t units = elapsed / ROW_AGE_UNIT_MS + (elapsed % ROW_AGE_UNIT_MS != 0 ? 1 : 0);
   const uint16_t age = static_cast<uint16_t>(units > 65535 ? 65535 : units);
   out[14] = static_cast<uint8_t>(age);
   out[15] = static_cast<uint8_t>(age >> 8);

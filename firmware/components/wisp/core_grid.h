@@ -3,9 +3,10 @@
 // this node transmits in, and the ESP-NOW beacon every node sends once per round.
 //
 // No leader: every node applies the same rules to what it hears. Members are nodes heard
-// recently; slots go by MAC order among active members, so all nodes that hear the same set
-// pick the same, distinct slots. The round is aligned to a shared clock (the access point's
-// TSF) when there is one.
+// recently; slots go by MAC order among the active members and every other node the hive knows
+// (passed in by the caller), so nodes that do not all hear each other (A and C both next to B,
+// not to each other) still pick distinct slots. The round is aligned to a shared clock (the
+// access point's TSF) when there is one.
 
 #include <cstddef>
 #include <cstdint>
@@ -67,10 +68,19 @@ class Grid {
 
   const Mac &self() const { return this->self_; }
   void set_timers(const GridTimers &t) { this->timers_ = t; }
+  // Empty again, for another MAC: in place, no large temporary on the caller's stack.
+  void reset(const Mac &self) {
+    this->self_ = self;
+    this->count_ = 0;
+    this->started_ = this->listened_ = false;
+    this->start_ms_ = 0;
+    this->version_ = 0;
+  }
 
   // Called when this node starts (or restarts) taking part: it listens before transmitting.
   void start(uint32_t now_ms) {
     this->started_ = true;
+    this->listened_ = false;
     this->start_ms_ = now_ms;
   }
 
@@ -82,7 +92,7 @@ class Grid {
     Member *m = this->find_(from);
     bool is_new = false;
     if (m == nullptr) {
-      m = this->make_room_();
+      m = this->make_room_(now_ms);
       if (m == nullptr)
         return false;  // table full of active members: this node cannot track more
       *m = Member{from, MemberState::ACTIVE, now_ms, now_ms, static_cast<float>(rssi), seq, chip, uptime_s, hive_hash};
@@ -92,7 +102,7 @@ class Grid {
     } else {
       if (m->state != MemberState::ACTIVE)
         this->version_++;
-      if (uptime_s + 2 < m->uptime_s)
+      if (uptime_s < m->uptime_s && m->uptime_s - uptime_s > 2)
         m->first_heard_ms = now_ms;  // it rebooted
       m->state = MemberState::ACTIVE;
       m->last_heard_ms = now_ms;
@@ -107,6 +117,8 @@ class Grid {
 
   // Moves members along the lifecycle. Every node runs the same timers, so they agree.
   void tick(uint32_t now_ms) {
+    if (this->started_ && !this->listened_ && now_ms - this->start_ms_ >= LISTEN_MS)
+      this->listened_ = true;  // latched: the clock wrapping after 49.7 days must not mute it again
     for (int i = 0; i < this->count_;) {
       Member &m = this->members_[i];
       const uint32_t silent = now_ms - m.last_heard_ms;
@@ -128,14 +140,25 @@ class Grid {
     }
   }
 
-  // This node's slot, or -1 while it is still listening or when every slot is taken (listener).
-  int self_slot(uint32_t now_ms) const {
-    if (!this->started_ || now_ms - this->start_ms_ < LISTEN_MS)
+  // This node's slot, or -1 while it is still listening (tick() ends that) or when every slot
+  // is taken (listener). known: other nodes the hive knows, heard directly or not; each MAC
+  // below this node's counts once, whether it is an active member, known, or both.
+  int self_slot(const Mac *known = nullptr, int known_n = 0) const {
+    if (!this->started_ || !this->listened_)
       return -1;
     int rank = 0;
     for (int i = 0; i < this->count_; i++) {
       if (this->members_[i].state == MemberState::ACTIVE && this->members_[i].mac < this->self_)
         rank++;
+    }
+    for (int k = 0; k < known_n; k++) {
+      if (!(known[k] < this->self_))
+        continue;
+      const Member *m = this->find(known[k]);
+      bool seen = m != nullptr && m->state == MemberState::ACTIVE;
+      for (int j = 0; j < k && !seen; j++)
+        seen = known[j] == known[k];
+      rank += !seen;
     }
     return rank < SLOTS ? rank : -1;
   }
@@ -164,15 +187,16 @@ class Grid {
     return nullptr;
   }
 
-  // A free entry, or the longest-silent non-active member when full.
-  Member *make_room_() {
+  // A free entry, or the longest-silent non-active member when full (by time since heard, so
+  // the choice holds across the clock wrap).
+  Member *make_room_(uint32_t now_ms) {
     if (this->count_ < MAX_MEMBERS)
       return &this->members_[this->count_];
     int victim = -1;
     for (int i = 0; i < this->count_; i++) {
       const Member &m = this->members_[i];
       if (m.state != MemberState::ACTIVE &&
-          (victim < 0 || m.last_heard_ms < this->members_[victim].last_heard_ms))
+          (victim < 0 || now_ms - m.last_heard_ms > now_ms - this->members_[victim].last_heard_ms))
         victim = i;
     }
     if (victim < 0)
@@ -187,6 +211,7 @@ class Grid {
   Member members_[MAX_MEMBERS]{};
   int count_{0};
   bool started_{false};
+  bool listened_{false};
   uint32_t start_ms_{0};
   uint32_t version_{0};
 };

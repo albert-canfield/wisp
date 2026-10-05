@@ -7,6 +7,10 @@
 // pose (lowest MAC on the left, second lowest above the axis) and rounded to 10 cm, so every node
 // that holds the same rows gets the same layout. Relative only: rotation, mirror and scale come
 // from the user's anchors (access points and nodes placed on the floor plan).
+//
+// Same layout on every chip: only + - * / and sqrt, which IEEE 754 rounds the same everywhere
+// (built with -ffp-contract=off), no libm pow, exp or trigonometry, whose last bits differ.
+// A node with no measured pair (just booted, or out of range of all) is left out.
 
 #include <algorithm>
 #include <cmath>
@@ -23,8 +27,28 @@ struct PathLoss {
   float exponent = 2.7f;
 };
 
+// 2^x from + - * / only: whole part by repeated doubling, the rest by a degree 7 Taylor series
+// on [-0.5, 0.5] (error below 1e-7). Plenty for distances clamped to 0.3 to 40 m.
+inline float exp2_portable(float x) {
+  x = std::fmax(-30.0f, std::fmin(30.0f, x));
+  const float whole = std::floor(x + 0.5f);
+  const float f = (x - whole) * 0.69314718f;  // ln 2
+  float term = 1.0f, sum = 1.0f;
+  for (int k = 1; k <= 7; k++) {
+    term = term * f / static_cast<float>(k);
+    sum += term;
+  }
+  const int w = static_cast<int>(whole);
+  for (int i = 0; i < w; i++)
+    sum *= 2.0f;
+  for (int i = 0; i > w; i--)
+    sum *= 0.5f;
+  return sum;
+}
+
 inline float rssi_to_metres(float rssi, const PathLoss &pl = {}) {
-  const float d = std::pow(10.0f, (pl.rssi_at_1m - rssi) / (10.0f * pl.exponent));
+  // 10^e = 2^(e log2 10)
+  const float d = exp2_portable((pl.rssi_at_1m - rssi) / (10.0f * pl.exponent) * 3.32192809f);
   return std::fmin(40.0f, std::fmax(0.3f, d));
 }
 
@@ -49,23 +73,6 @@ inline int solve_layout(const Hive &hive, LayoutPoint *out, LayoutWorkspace &ws,
   auto &w = ws.w;
   auto &sp = ws.sp;
   auto &bm = ws.bm;
-  // Nodes: every row's origin, in MAC order so every node builds the same matrix.
-  Mac macs[MAX_POINTS];
-  int n = 0;
-  for (int i = 0; i < hive.count() && n < MAX_POINTS; i++)
-    macs[n++] = hive.row(i).origin;
-  if (n < 2)
-    return 0;
-  std::sort(macs, macs + n);
-
-  // Distances and weights: measured pairs weigh 1, filled-in pairs 0.2.
-  const float unknown = -1.0f;
-  for (int i = 0; i < n; i++) {
-    for (int j = 0; j < n; j++) {
-      d[i][j] = i == j ? 0.0f : unknown;
-      w[i][j] = 0.0f;
-    }
-  }
   auto heard = [&hive](const Mac &rx, const Mac &tx, float &rssi) {
     const HiveRow *row = hive.find(rx);
     if (row == nullptr)
@@ -78,6 +85,34 @@ inline int solve_layout(const Hive &hive, LayoutPoint *out, LayoutWorkspace &ws,
     }
     return false;
   };
+  // Nodes: every row's origin with at least one measured pair, in MAC order so every node builds
+  // the same matrix.
+  Mac all[MAX_POINTS];
+  int count = 0;
+  for (int i = 0; i < hive.count() && count < MAX_POINTS; i++)
+    all[count++] = hive.row(i).origin;
+  std::sort(all, all + count);
+  Mac macs[MAX_POINTS];
+  int n = 0;
+  for (int i = 0; i < count; i++) {
+    bool linked = false;
+    float unused;
+    for (int j = 0; j < count && !linked; j++)
+      linked = i != j && (heard(all[i], all[j], unused) || heard(all[j], all[i], unused));
+    if (linked)
+      macs[n++] = all[i];
+  }
+  if (n < 2)
+    return 0;
+
+  // Distances and weights: measured pairs weigh 1, filled-in pairs 0.2.
+  const float unknown = -1.0f;
+  for (int i = 0; i < n; i++) {
+    for (int j = 0; j < n; j++) {
+      d[i][j] = i == j ? 0.0f : unknown;
+      w[i][j] = 0.0f;
+    }
+  }
   float largest = 0.0f;
   for (int i = 0; i < n; i++) {
     for (int j = i + 1; j < n; j++) {
@@ -108,7 +143,10 @@ inline int solve_layout(const Hive &hive, LayoutPoint *out, LayoutWorkspace &ws,
     }
   }
 
-  // Classical MDS: B = -1/2 J D^2 J, two leading eigenvectors by power iteration.
+  // Classical MDS: B = -1/2 J D^2 J, the two largest eigenvalues by power iteration. Noisy
+  // distances give B negative eigenvalues too, often larger in size than the second positive
+  // one, so the iteration runs on B + cI (c from Gershgorin: every eigenvalue then >= 0) and
+  // finds the largest positive ones, never a negative one that would flatten an axis.
   float row_mean[MAX_POINTS] = {};
   float all_mean = 0.0f;
   for (int i = 0; i < n; i++) {
@@ -121,16 +159,24 @@ inline int solve_layout(const Hive &hive, LayoutPoint *out, LayoutWorkspace &ws,
       bm[i][j] = -0.5f * (d[i][j] * d[i][j] - row_mean[i] - row_mean[j] + all_mean);
   float xy[MAX_POINTS][2] = {};
   for (int axis = 0; axis < 2; axis++) {
+    float shift = 0.0f;
+    for (int i = 0; i < n; i++) {
+      float r = 0.0f;
+      for (int j = 0; j < n; j++)
+        r += std::fabs(bm[i][j]);
+      shift = std::fmax(shift, r);
+    }
     float v[MAX_POINTS];
     for (int i = 0; i < n; i++)
       v[i] = 1.0f + 0.37f * i + 0.11f * axis * (i % 3);  // fixed start: same answer everywhere
     float lambda = 0.0f;
-    for (int it = 0; it < 100; it++) {
+    for (int it = 0; it < 300; it++) {
       float nv[MAX_POINTS] = {};
       float norm = 0.0f;
       for (int i = 0; i < n; i++) {
         for (int j = 0; j < n; j++)
           nv[i] += bm[i][j] * v[j];
+        nv[i] += shift * v[i];
         norm += nv[i] * nv[i];
       }
       norm = std::sqrt(norm);
@@ -148,6 +194,12 @@ inline int solve_layout(const Hive &hive, LayoutPoint *out, LayoutWorkspace &ws,
     const float scale = std::sqrt(std::fmax(lambda, 0.0f));
     for (int i = 0; i < n; i++)
       xy[i][axis] = v[i] * scale;
+    if (scale < 1e-3f) {
+      // Nothing along this axis (a line, or noise only): a small fixed spread lets the refinement
+      // below still find a second dimension, the same way on every node.
+      for (int i = 0; i < n; i++)
+        xy[i][axis] = 0.05f * static_cast<float>((i * 7) % 5 - 2);
+    }
     for (int i = 0; i < n; i++)
       for (int j = 0; j < n; j++)
         bm[i][j] -= lambda * v[i] * v[j];  // deflate
@@ -189,9 +241,9 @@ inline int solve_layout(const Hive &hive, LayoutPoint *out, LayoutWorkspace &ws,
     xy[i][0] -= cx;
     xy[i][1] -= cy;
   }
-  const float angle = std::atan2(xy[0][1], xy[0][0]);
-  const float rot = 3.14159265f - angle;
-  const float c = std::cos(rot), s = std::sin(rot);
+  // Rotate the lowest MAC onto the negative x axis: cos and sin straight from its coordinates.
+  const float r0 = std::sqrt(xy[0][0] * xy[0][0] + xy[0][1] * xy[0][1]);
+  const float c = r0 > 1e-6f ? -xy[0][0] / r0 : 1.0f, s = r0 > 1e-6f ? xy[0][1] / r0 : 0.0f;
   for (int i = 0; i < n; i++) {
     const float x = xy[i][0] * c - xy[i][1] * s;
     const float y = xy[i][0] * s + xy[i][1] * c;

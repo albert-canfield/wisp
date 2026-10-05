@@ -52,7 +52,7 @@ struct Sim {
     for (auto &tx : nodes) {
       if (!tx.on)
         continue;
-      const int slot = tx.grid.self_slot(now_ms);
+      const int slot = tx.grid.self_slot();
       if (slot < 0)
         continue;
       Beacon b{};
@@ -111,7 +111,7 @@ struct Sim {
       if (nd.grid.active_count() != expect_active)
         return false;
       const int rank = static_cast<int>(std::find(online.begin(), online.end(), nd.grid.self()) - online.begin());
-      const int slot = nd.grid.self_slot(now_ms);
+      const int slot = nd.grid.self_slot();
       if (slot != (rank < SLOTS ? rank : -1))
         return false;
       if (slot >= 0 && !slots.insert(slot).second)
@@ -159,7 +159,7 @@ static void test_slot_timing() {
 
 static void test_grid_forms_and_heals() {
   Sim sim(4);
-  CHECK(sim.nodes[0].grid.self_slot(0) == -1);  // listening first
+  CHECK(sim.nodes[0].grid.self_slot() == -1);  // listening first
   sim.run_ms(2000);
   CHECK(sim.agreed(4));
 
@@ -210,7 +210,7 @@ static void test_more_nodes_than_slots() {
   std::set<int> slots;
   bool unique = true;
   for (auto &nd : sim.nodes) {
-    const int s = nd.grid.self_slot(sim.now_ms);
+    const int s = nd.grid.self_slot();
     if (s >= 0) {
       transmitting++;
       unique = slots.insert(s).second && unique;
@@ -310,9 +310,63 @@ static void test_wifi_plan() {
   ApList none;
   CHECK(choose_grid_channel(none.data(), none.count()) == 0);
   CHECK(choose_home_ap(seen.data(), seen.count(), 13) == -1);
+  // A large mesh: more BSSIDs than the list holds. The lowest ones are kept, whatever the order
+  // the scan lists them in, so the channel is the same.
+  ApList up, down;
+  for (int i = 0; i < MAX_APS_SEEN + 4; i++) {
+    const int j = MAX_APS_SEEN + 3 - i;
+    up.add(Mac{{0x10, 0, 0, 0, 0, static_cast<uint8_t>(i)}}, static_cast<uint8_t>(1 + i % 11), -60);
+    down.add(Mac{{0x10, 0, 0, 0, 0, static_cast<uint8_t>(j)}}, static_cast<uint8_t>(1 + j % 11), -60);
+  }
+  CHECK(up.count() == MAX_APS_SEEN && down.count() == MAX_APS_SEEN);
+  CHECK(choose_grid_channel(up.data(), up.count()) == 1 && choose_grid_channel(down.data(), down.count()) == 1);
+}
+
+// A and C both hear B, not each other: ranking only the members each one hears gave B and C
+// the same slot; with the nodes the hive knows (the same everywhere) all three differ.
+static void test_slots_without_full_hearing() {
+  const Mac A = mac_n(1), B = mac_n(2), C = mac_n(3);
+  Grid a(A), b(B), c(C);
+  for (Grid *g : {&a, &b, &c})
+    g->start(0);
+  a.on_beacon(B, 100, -60, 0, 0, 1);
+  b.on_beacon(A, 100, -60, 0, 0, 1);
+  b.on_beacon(C, 100, -60, 0, 0, 1);
+  c.on_beacon(B, 100, -60, 0, 0, 1);
+  for (Grid *g : {&a, &b, &c})
+    g->tick(600);
+  CHECK(b.self_slot() == 1 && c.self_slot() == 1);  // the clash, by members alone
+  const Mac known[3] = {C, A, B};                   // hive row origins, any order, self included
+  CHECK(a.self_slot(known, 3) == 0 && b.self_slot(known, 3) == 1 && c.self_slot(known, 3) == 2);
+  const Mac twice[4] = {A, A, B, C};  // a MAC listed twice or also a member counts once
+  CHECK(c.self_slot(twice, 4) == 2);
+}
+
+// The 32-bit millisecond clock wraps every 49.7 days: the listen window must not reopen, and a
+// full member table must still drop the member silent longest.
+static void test_clock_wrap() {
+  Grid g(mac_n(50));
+  g.start(1000);
+  g.tick(1600);
+  CHECK(g.self_slot() == 0);
+  g.tick(1100);  // 2^32 ms later, the clock reads just after the start again
+  CHECK(g.self_slot() == 0);
+
+  Grid h(mac_n(200));
+  const uint32_t before = 0xFFFFF000u, after = 0x00000500u, now = 0x00002000u;
+  h.on_beacon(mac_n(1), before, -60, 0, 0, 1);  // silent 12.3 s at now
+  h.on_beacon(mac_n(2), after, -60, 0, 0, 1);   // silent 6.9 s at now
+  for (int i = 0; i < MAX_MEMBERS - 2; i++)
+    h.on_beacon(mac_n(10 + i), now, -60, 0, 0, 1);
+  h.tick(now);
+  CHECK(h.count() == MAX_MEMBERS);
+  CHECK(h.on_beacon(mac_n(99), now, -60, 0, 0, 1));
+  CHECK(h.find(mac_n(1)) == nullptr && h.find(mac_n(2)) != nullptr);
 }
 
 int main() {
+  test_slots_without_full_hearing();
+  test_clock_wrap();
   test_wifi_plan();
   test_beacon_round_trip();
   test_slot_timing();

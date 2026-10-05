@@ -1,6 +1,8 @@
 #pragma once
 // wisp-core: the hive report (type 3 in docs/PROTOCOL.md): what this node knows about the whole
-// grid, for Home Assistant's floor plan. The layout, then as many rows as fit in one packet.
+// grid, for Home Assistant's floor plan. The layout, then as many rows as fit in one packet,
+// starting from row `first`: a caller that moves it on each report gets every row out over a few
+// reports when they do not all fit.
 
 #include <cmath>
 #include <cstddef>
@@ -25,7 +27,7 @@ inline int16_t to_cm(float metres) {
 }
 
 inline size_t encode_hive_report(const Mac &self, uint32_t seq, uint32_t hash, bool in_sync, const LayoutPoint *points,
-                                 int n_points, const Hive &hive, uint8_t *out, size_t cap) {
+                                 int n_points, const Hive &hive, uint8_t *out, size_t cap, int first = 0) {
   if (cap < HIVE_REPORT_HEADER_BYTES + 10 * static_cast<size_t>(n_points))
     return 0;
   memcpy(out, "WISP", 4);
@@ -46,12 +48,13 @@ inline size_t encode_hive_report(const Mac &self, uint32_t seq, uint32_t hash, b
     pos += 10;
   }
   uint8_t rows = 0;
-  for (int r = 0; r < hive.count(); r++) {
-    const HiveRow &row = hive.row(r);
+  const int count = hive.count();
+  for (int r = 0; r < count; r++) {
+    const HiveRow &row = hive.row(((first % count) + count + r) % count);
     const size_t need = 9 + 7 * static_cast<size_t>(row.len);
     if (pos + need > cap) {
       flags |= HIVE_FLAG_ROWS_TRUNCATED;
-      break;
+      continue;  // a shorter row further on may still fit
     }
     memcpy(out + pos, row.origin.b, 6);
     put_u16(out + pos + 6, row.version);

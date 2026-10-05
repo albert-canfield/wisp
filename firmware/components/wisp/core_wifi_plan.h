@@ -48,7 +48,8 @@ inline int choose_home_ap(const ApSeen *aps, int n, uint8_t channel) {
   return best;
 }
 
-// Keeps the strongest reading per BSSID from successive scans, up to MAX_APS_SEEN entries.
+// The latest reading per BSSID, up to MAX_APS_SEEN entries. When full, it keeps the lowest
+// BSSIDs, so the grid channel never depends on the order a scan lists them in.
 class ApList {
  public:
   void clear() { this->count_ = 0; }
@@ -60,8 +61,17 @@ class ApList {
         return;
       }
     }
-    if (this->count_ < MAX_APS_SEEN)
+    if (this->count_ < MAX_APS_SEEN) {
       this->aps_[this->count_++] = ApSeen{bssid, channel, rssi};
+      return;
+    }
+    int highest = 0;
+    for (int i = 1; i < this->count_; i++) {
+      if (this->aps_[highest].bssid < this->aps_[i].bssid)
+        highest = i;
+    }
+    if (bssid < this->aps_[highest].bssid)
+      this->aps_[highest] = ApSeen{bssid, channel, rssi};
   }
   int count() const { return this->count_; }
   const ApSeen *data() const { return this->aps_; }
