@@ -79,6 +79,23 @@ static void test_shape_ignores_gain() {
   CHECK(!lltf_shape(legacy_too_short, a));
 }
 
+// Right after start, a reading lower than usual must not look like motion: unknown while settling.
+static void test_start_up_is_not_motion() {
+  std::mt19937 rng(9);
+  LinkMotion link;
+  MotionDetector detector(2.0f);
+  for (int s = 0; s < 40; s++) {
+    const float noise = s < 3 ? 0.002f : 0.02f;  // starts unusually calm, then normal
+    for (int f = 0; f < 20; f++)
+      link.add_frame(make_frame(1.0f, noise, rng));
+    const float score = link.tick();
+    CHECK(!detector.update(score));
+    if (s < 20)
+      CHECK(std::isnan(score));
+  }
+  CHECK(link.settled());
+}
+
 static void test_motion_score() {
   std::mt19937 rng(2);
   LinkMotion link;
@@ -92,6 +109,7 @@ static void test_motion_score() {
     if (s > 5)
       CHECK(!detector.update(score));
   }
+  CHECK(link.settled());
   std::printf("  quiet: score %.2f, baseline spread %.2f%%\n", score, link.baseline());
   CHECK(score > 0.5f && score < 1.5f);
 
@@ -125,6 +143,7 @@ static void test_motion_score() {
 int main() {
   test_raw_packet();
   test_shape_ignores_gain();
+  test_start_up_is_not_motion();
   test_motion_score();
   if (failures) {
     std::printf("%d check(s) failed\n", failures);

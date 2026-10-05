@@ -4,7 +4,9 @@
 // Each frame becomes a "shape": the amplitudes of the usable LLTF subcarriers divided by their
 // mean, so automatic gain changes cancel out. Running mean and variance per subcarrier give the
 // spread (how much the shape moves, in percent). A baseline learns the spread of a quiet room:
-// quickly downwards, very slowly upwards, so people moving do not become the new normal.
+// for the first SETTLE_TICKS seconds both ways (the score is unknown meanwhile, so a start-up
+// reading never looks like motion), then quickly downwards and very slowly upwards, so people
+// moving do not become the new normal.
 // Score = spread / baseline: 1 is as quiet as usual, higher means more movement.
 
 #include <cmath>
@@ -82,18 +84,27 @@ class LinkMotion {
     const float sp = this->spread();
     if (this->baseline_ <= 0.0f) {
       this->baseline_ = sp;
+    } else if (this->settle_ < SETTLE_TICKS) {
+      this->baseline_ += BASELINE_SETTLE * (sp - this->baseline_);
     } else if (sp < this->baseline_) {
       this->baseline_ += BASELINE_DOWN * (sp - this->baseline_);
     } else {
       this->baseline_ += BASELINE_UP * (sp - this->baseline_);
     }
+    if (this->settle_ < SETTLE_TICKS) {
+      this->settle_++;
+      return NAN;
+    }
     return this->baseline_ > 0.0f ? sp / this->baseline_ : NAN;
   }
 
   float baseline() const { return this->baseline_; }
+  bool settled() const { return this->settle_ >= SETTLE_TICKS; }
 
  protected:
   static constexpr uint32_t WARMUP_FRAMES = 40;
+  static constexpr uint32_t SETTLE_TICKS = 20;   // seconds of learning before scores count
+  static constexpr float BASELINE_SETTLE = 0.2f;
   static constexpr float BASELINE_DOWN = 0.05f;  // per tick: about 20 s to learn a quieter room
   static constexpr float BASELINE_UP = 0.001f;   // per tick: about 17 min to follow slow drift
 
@@ -103,6 +114,7 @@ class LinkMotion {
   uint32_t frames_{0};
   uint32_t frames_since_tick_{0};
   float baseline_{0.0f};
+  uint32_t settle_{0};
 };
 
 // On above the threshold, off below 75% of it, so the state does not flicker at the edge.
