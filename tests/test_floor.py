@@ -136,6 +136,21 @@ def test_positions_stay_on_the_plan() -> None:
     assert max(f.raw_x for f in fixes) == 6.5  # held at the wall
 
 
+def test_what_is_not_placed_stays_on_the_plan() -> None:
+    """Nodes left to follow the layout and access points placed from signal strength stay on
+    the plan, inside the house when rooms are drawn, so each can be reached and dragged."""
+    floor = FloorModel()
+    placed = {"aa:00": (0.5, 0.5), "bb:00": (3.5, 0.5)}  # the layout scaled to fit these runs past a 4 x 3 m plan
+    floor.set_layout(hive_state(), placed, plan=(4.0, 3.0), nodes=set(NODES))
+    assert floor.positions["aa:00"] == (0.5, 0.5) and floor.positions["bb:00"] == (3.5, 0.5)
+    assert all(0 <= x <= 4.0 and 0 <= y <= 3.0 for x, y in floor.positions.values())
+    assert AP[0] in floor.positions
+    house = {"office": [(0.0, 0.0, 2.0, 2.0)], "hall": [(2.0, 0.0, 2.0, 1.0)]}
+    floor.set_layout(hive_state(), placed, plan=(4.0, 3.0), nodes=set(NODES), rooms=house)
+    for key, (x, y) in floor.positions.items():
+        assert key in placed or (0 <= x <= 2.0 and 0 <= y <= 2.0) or (2.0 <= x <= 4.0 and 0 <= y <= 1.0)
+
+
 def test_rooms_keep_someone_in_the_house_and_in_the_room_room_presence_is_sure_of() -> None:
     from custom_components.wisp.engine.floor import inside
 

@@ -119,6 +119,9 @@ class FloorModel:
             self._plan = plan
             self.track = Track()
             self._aps = {}
+        # What the user did not place stays on the plan (in the house, with rooms drawn): the
+        # layout and the access points come from signal strength, which can put them far out.
+        positions = {key: p if key in (placed or {}) else self._keep_in(*p) for key, p in positions.items()}
         if hive:
             heard_by: dict[str, dict[Point, float]] = {}
             for origin, row in hive.rows.items():
@@ -129,7 +132,8 @@ class FloorModel:
                         heard_by.setdefault(entry.neighbour, {})[positions[origin]] = entry.rssi
             for ap, heard in heard_by.items():
                 if ap not in positions and (spot := place_access_point(heard)) is not None:
-                    positions[ap] = self._aps[ap] = keep_side(spot, list(heard), self._aps.get(ap))
+                    self._aps[ap] = keep_side(spot, list(heard), self._aps.get(ap))
+                    positions[ap] = self._keep_in(*self._aps[ap])
         self.positions = positions
 
     def update(

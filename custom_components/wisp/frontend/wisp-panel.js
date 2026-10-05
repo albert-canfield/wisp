@@ -11,7 +11,7 @@ const DURATION = 60; // s, as the services
 const LEAVE_S = 30; // s to leave the floor before the empty floor records
 const PREFS = "wisp-panel"; // this browser's duration, map turn, mirror and floor
 const PW = 360; // viewBox width of the drawing to place nodes and draw rooms on
-const PPAD = 16;
+const PPAD = 28; // room around the plan for a mark on its edge: its touch circle and its name
 const PMAX_H = 480;
 const NUDGE = 0.1; // metres an arrow key moves a node, five times that with shift
 const SNAP = 0.25; // metres a room's edges snap to, and its smallest side; an arrow key moves it as much
@@ -65,8 +65,11 @@ function navigate(path) {
 }
 
 /* The hub's own floor holds the nodes without a floor: "Home" alone, "No floor" beside real floors. */
-const floorLabel = (f, floors) => (f.floor != null ? f.name : floors.length > 1 ? "No floor" : "Home");
-const floorPhrase = (f) => (f.floor != null ? f.name : "the floor");
+// A home without Home Assistant floors (a flat, a one-level house) is one group: its areas.
+const oneLevel = (f, floors) => f.floor == null && floors.length === 1;
+const floorLabel = (f, floors) => (f.floor != null ? f.name : floors.length > 1 ? "No floor" : "Areas");
+const floorPhrase = (f) => (f.floor != null ? f.name : "the home");
+const emptyName = (f, floors) => (oneLevel(f, floors) ? "home" : "floor"); // "Empty home" or "Empty floor"
 
 /* Replace only the children whose markup changed, so a control open in another one survives the update. */
 function patch(container, items) {
@@ -281,7 +284,7 @@ class WispPanel extends HTMLElement {
           ? `Done: the ${run.name} has ${has}.`
           : `The ${run.name} has ${has} and needs ${data.min_samples}: calibrate it again and keep ${still ? "still" : "moving"}.`;
       } else {
-        message = `Done: the empty floor has ${plural(now?.empty_samples ?? run.recorded, "sample", "samples")}.`;
+        message = `Done: the empty ${emptyName(now ?? {}, data.floors)} has ${plural(now?.empty_samples ?? run.recorded, "sample", "samples")}.`;
       }
       this._notify(message);
       navigator.vibrate?.(200);
@@ -344,6 +347,7 @@ class WispPanel extends HTMLElement {
     else if (act === "placer-cancel") this._stopPlacing();
     else if (act === "placer-save") this._savePlacing();
     else if (act === "unplace") this._unplace();
+    else if (act === "place-middle") this._toMiddle();
     else if (act === "draw-rooms") this._startRooms(floor);
     else if (act === "rooms-cancel") this._stopRooms();
     else if (act === "rooms-save") this._saveRooms();
@@ -695,6 +699,10 @@ class WispPanel extends HTMLElement {
       const saved = f.positions?.[i.id];
       const change = moved.get(i.id);
       const pos = Array.isArray(change) ? { x: change[0], y: change[1] } : saved ? { x: saved.x, y: saved.y } : null;
+      if (pos) { // always on the plan, where it can be reached and dragged
+        pos.x = clamp(pos.x, 0, f.plan.width);
+        pos.y = clamp(pos.y, 0, f.plan.height);
+      }
       return { ...i, pos, placed: Array.isArray(change) || (change === undefined && !!saved?.placed) };
     });
   }
@@ -712,6 +720,14 @@ class WispPanel extends HTMLElement {
     if (!p || !f || !p.selected) return;
     if (f.positions?.[p.selected]?.placed) p.moved.set(p.selected, null);
     else p.moved.delete(p.selected);
+    this._render();
+  }
+
+  /* The selected node or access point to the middle of the plan, to drag from there. */
+  _toMiddle() {
+    const p = this._placing, f = this._placingFloor();
+    if (!p || !f?.plan || !p.selected) return;
+    p.moved.set(p.selected, [metres(f.plan.width / 2), metres(f.plan.height / 2)]);
     this._render();
   }
 
@@ -1083,7 +1099,7 @@ class WispPanel extends HTMLElement {
       text = `${plural(r.recorded, "sample", "samples")} so far${skipped}.`;
     } else if (waiting) {
       title = `Leave ${floorPhrase(f)} now`;
-      text = `Everyone must be off the floor until it ends. Recording starts in ${r.starts_in} s and lasts ${secs(r.seconds_left - r.starts_in)}.`;
+      text = `Everyone must stay out until it ends. Recording starts in ${r.starts_in} s and lasts ${secs(r.seconds_left - r.starts_in)}.`;
     } else {
       title = `Keep ${floorPhrase(f)} empty`;
       text = `${plural(r.recorded, "sample", "samples")} so far.`;
@@ -1212,7 +1228,7 @@ class WispPanel extends HTMLElement {
           : "The nodes you leave follow the placed ones.";
     // Two placed nodes always match exactly; from three the error says how well the layout agrees
     const fit = f.fit && f.fit.nodes > 2 && !pending ? `<p class="say">The placed nodes match the hive's own layout within ${f.fit.error} m.</p>` : "";
-    return `${sel ? `<div class="sel-line"><p><b>${esc(sel.name)}</b> ${esc(this._where(sel))}</p>${sel.placed ? `<button class="quiet" data-act="unplace"${p.busy ? " disabled" : ""}>Let Wisp place it</button>` : ""}</div>` : ""}
+    return `${sel ? `<div class="sel-line"><p><b>${esc(sel.name)}</b> ${esc(this._where(sel))}</p><span class="sel-buttons"><button class="quiet" data-act="place-middle"${p.busy ? " disabled" : ""}>Move to the middle</button>${sel.placed ? `<button class="quiet" data-act="unplace"${p.busy ? " disabled" : ""}>Let Wisp place it</button>` : ""}</span></div>` : ""}
       <p class="say">${esc(hint)}${pending && loose.length ? " Save to see them follow." : ""}</p>
       <p class="unplaced${loose.length ? "" : " done"}">${loose.length ? `<b>Not placed yet:</b> ${esc(loose.join(", "))}.` : "Every node is placed."}</p>
       ${fit}
@@ -1367,12 +1383,21 @@ class WispPanel extends HTMLElement {
     if (f.other_areas.length && f.nodes.length) rows.push(["other", this._other(f, d)]);
     if (f.nodes.length) rows.push(["empty", this._empty(f)]);
     rows.push(["plan", this._planRow(f)]);
-    if (f.nodes.length) rows.push(["channel", this._channelRow(f, d)]);
+    if (f.nodes.length && this._channelShown(f, d)) rows.push(["channel", this._channelRow(f, d)]);
     return rows.map(([k, html]) => [`${key}:${k}`, html]);
   }
 
   /* The WiFi channel the floor's nodes form their grid on, one setting for all of them, and the
      channels they are on now. */
+  /* Only where it helps: several floors, several access points, or a channel already chosen.
+     One router, or a router with extenders on one floor, needs no choice: Automatic does it. */
+  _channelShown(f, d) {
+    const aps = new Set(d.nodes.map((n) => n.wifi?.ap).filter(Boolean));
+    const levels = d.floors.filter((x) => x.nodes.length).length;
+    const chosen = d.nodes.some((n) => f.nodes.includes(n.mac) && n.wifi?.fixed);
+    return levels > 1 || aps.size > 1 || chosen || this._channelChoice?.floor === (f.floor ?? "");
+  }
+
   _channelRow(f, d) {
     const key = f.floor ?? "";
     let choice = this._channelChoice?.floor === key ? this._channelChoice : null;
@@ -1432,7 +1457,7 @@ class WispPanel extends HTMLElement {
     const id = `wisp-other-${esc(key)}`;
     return `<div class="row">
       <div class="line">
-        <label class="what" for="${id}"><b>Another room</b><small>areas on this floor without a node</small></label>
+        <label class="what" for="${id}"><b>Another room</b><small>${oneLevel(f, this._data.floors) ? "areas" : "areas on this floor"} without a node</small></label>
         <select id="${id}" data-act="pick"${attr("floor", key)}><option value="">Choose a room</option>${options}</select>
       </div>
       ${picked ? this._askRoom(f, picked.area, picked.name) : ""}
@@ -1446,9 +1471,9 @@ class WispPanel extends HTMLElement {
     const meta = f.empty_samples ? plural(f.empty_samples, "sample", "samples") : "needed to find someone keeping still; also helps against fans and access points that change power";
     return `<div class="row">
       <div class="line">
-        <div class="what"><b>Empty floor</b><small>${esc(meta)}</small></div>
+        <div class="what"><b>Empty ${emptyName(f, this._data.floors)}</b><small>${esc(meta)}</small></div>
         ${run ? `<span class="chip rec">${run.starts_in ? "starting" : "recording"}</span>` : ""}
-        <div class="acts"><button data-act="ask-empty"${attr("floor", key)}${asking || run ? " disabled" : ""}>Calibrate empty floor</button></div>
+        <div class="acts"><button data-act="ask-empty"${attr("floor", key)}${asking || run ? " disabled" : ""}>Calibrate empty ${emptyName(f, this._data.floors)}</button></div>
       </div>
       ${asking ? this._askEmpty(f) : ""}
     </div>`;
@@ -1532,7 +1557,7 @@ class WispPanel extends HTMLElement {
 
   _node(n, d) {
     const floor = n.added ? d.floors.find((f) => f.floor === n.floor) : null;
-    const where = [floor ? floorLabel(floor, d.floors) : null, n.host].filter(Boolean).join(", ");
+    const where = [floor && !oneLevel(floor, d.floors) ? floorLabel(floor, d.floors) : null, n.host].filter(Boolean).join(", ");
     const onPlan = floor?.plan ? !!floor.positions?.[n.mac]?.placed : null;
     const chips = [
       `<span class="chip${n.online ? " up" : ""}">${n.online ? "online" : "offline"}</span>`,
@@ -1671,6 +1696,7 @@ const STYLE = `
   .unplaced.done { font-style: italic; }
   .sel-line { display: flex; align-items: center; flex-wrap: wrap; gap: 4px 12px; }
   .sel-line p { flex: 1 1 12rem; }
+  .sel-buttons { display: flex; flex-wrap: wrap; gap: 4px 12px; }
   .sel-acts { display: flex; align-items: center; gap: 4px; }
   /* Drawing rooms: a wash per room in its own gentle hue, over the plan */
   .placer.rooms .plan-draw svg { touch-action: none; cursor: crosshair; }

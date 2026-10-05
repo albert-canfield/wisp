@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.1.2 (unreleased)
+## 0.1.3 (unreleased)
 Versions count up with each round of changes until the first release.
 
 First working version: the grid, the hive and motion per link, with the Home Assistant integration and the map card.
@@ -48,6 +48,8 @@ First working version: the grid, the hive and motion per link, with the Home Ass
 - Repairs: a warning per floor with fewer than 3 nodes (rooms and positions need them), gone once it has them.
 - WiFi channel per floor in the panel: Automatic, or the channel of the floor's access point, set on every node of the floor at once (through ESPHome, or the node's web page); each node shows its access point, channel and signal. A home with an access point per floor keeps each floor's grid on its own access point, instead of nodes sensing through the access point of another floor.
 - The panel calibrates a room walking around or sitting still, shows both sample counts, and says when a room's presence is someone keeping still. The empty floor calibration now asks everyone to leave the floor: a still person no longer counts as empty.
+- Nothing is out of reach on a floor plan: nodes left to follow the layout and access points placed from signal strength stay on the plan (inside the house when rooms are drawn), on the map and in Place nodes, and Move to the middle puts the selected one in the middle of the plan.
+- Homes on one level read as such: without Home Assistant floors, the panel shows Areas and Empty home, and the WiFi channel setting only appears where it helps (several floors, several access points, or a channel already chosen).
 - Position sensors: on a floor with a plan, x and y of someone moving in the plan's metres (from its top left corner), with the fit's quality as an attribute; unknown while nobody moves.
 
 ### Tools
