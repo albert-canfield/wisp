@@ -12,6 +12,7 @@
  *   rotate: 0       # optional, degrees clockwise, to match your home (a plan turns in 90° steps)
  *   flip: false     # optional, mirror left to right
  *   plan_photo: false # optional, the floor plan is a photo: dimmed, not inverted, in dark mode
+ *   motion_text: true # optional, the line under the map naming the room and links with motion
  */
 
 const W = 360; // viewBox width; the height follows the drawing
@@ -468,13 +469,15 @@ class WispMapCard extends HTMLElement {
         { name: "rotate", selector: { number: { min: 0, max: 359, step: 1, mode: "slider", unit_of_measurement: "°" } } },
         { name: "flip", selector: { boolean: {} } },
         { name: "plan_photo", selector: { boolean: {} } },
+        { name: "motion_text", selector: { boolean: {} } },
       ],
-      computeLabel: (s) => ({ title: "Title", floor: "Floor", rotate: "Rotate", flip: "Mirror", plan_photo: "Photo floor plan" })[s.name],
+      computeLabel: (s) => ({ title: "Title", floor: "Floor", rotate: "Rotate", flip: "Mirror", plan_photo: "Photo floor plan", motion_text: "Motion text" })[s.name],
       computeHelper: (s) => ({
         floor: "Name or id of the floor to show, in a home with several. Empty: the first floor with nodes",
         rotate: "Degrees clockwise, to match the drawing to your home. A floor plan turns in steps of 90°",
         flip: "Mirror left to right",
         plan_photo: "The floor plan is a photo: dim it in dark mode instead of inverting it",
+        motion_text: "The line under the map naming the room someone moves in and the links that see motion",
       })[s.name],
     };
   }
@@ -635,7 +638,9 @@ class WispMapCard extends HTMLElement {
     }
     foot.hidden = false;
     foot.querySelector(".sum").textContent = summary + (plan?.url && this._badPlan === plan.url ? ". The floor plan image could not be loaded" : "");
-    foot.querySelector(".mot").textContent = motion;
+    const mot = foot.querySelector(".mot");
+    mot.textContent = this._config.motion_text === false ? "" : motion;
+    mot.hidden = !mot.textContent;
   }
 }
 

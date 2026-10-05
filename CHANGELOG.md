@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.1.3 (unreleased)
+## 0.1.4 (unreleased)
 Versions count up with each round of changes until the first release.
 
 First working version: the grid, the hive and motion per link, with the Home Assistant integration and the map card.
@@ -50,6 +50,7 @@ First working version: the grid, the hive and motion per link, with the Home Ass
 - The panel calibrates a room walking around or sitting still, shows both sample counts, and says when a room's presence is someone keeping still. The empty floor calibration now asks everyone to leave the floor: a still person no longer counts as empty.
 - Nothing is out of reach on a floor plan: nodes left to follow the layout and access points placed from signal strength stay on the plan (inside the house when rooms are drawn), on the map and in Place nodes, and Move to the middle puts the selected one in the middle of the plan.
 - Homes on one level read as such: without Home Assistant floors, the panel shows Areas and Empty home, and the WiFi channel setting only appears where it helps (several floors, several access points, or a channel already chosen).
+- The panel shows who is where as small figures in its lists instead of a line of text under the map: someone moving in a room, someone there, someone keeping still, and on each node whether its links see motion. The map card's line under the map can be turned off (`motion_text: false`).
 - Position sensors: on a floor with a plan, x and y of someone moving in the plan's metres (from its top left corner), with the fit's quality as an attribute; unknown while nobody moves.
 
 ### Tools

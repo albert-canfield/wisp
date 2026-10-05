@@ -41,6 +41,11 @@ const hue = (area) => {
 };
 const apLabel = (bssid) => `AP ${bssid.slice(-5)}`; // as the map
 const NODE_MARK = `<circle class="ring" r="7.5"/><circle class="dot" r="2.6"/>`;
+// Who is where, drawn as small figures: someone moving, someone there, someone keeping still
+const figure = (body) => `<svg class="fig" viewBox="0 0 24 24" aria-hidden="true">${body}</svg>`;
+const WALKING = figure(`<circle cx="13.6" cy="3.9" r="2.2"/><path d="M12.8 7.6 11 14M12.6 8.8l3.4 3M12.4 8.6 8.6 10.8M11 14l2.8 3.4.2 4.2M11 14l-2.4 3.6-2.8 2.4"/>`);
+const STANDING = figure(`<circle cx="12" cy="3.9" r="2.2"/><path d="M12 7.6v7M12 9 8.6 12.6M12 9l3.4 3.6M12 14.6 9.6 21M12 14.6l2.4 6.4"/>`);
+const SITTING = figure(`<circle cx="11" cy="3.9" r="2.2"/><path d="M11 7.6v6.6h5v6.6M11 9l3.6 2.8M6.6 9.6v11.2M6.6 16.4h4.4"/>`);
 const AP_MARK = `<path class="waves" d="M-7.1-7.1A10 10 0 0 1 7.1-7.1M-9.9-9.9A14 14 0 0 1 9.9-9.9"/><rect class="ring" x="-5" y="-5" width="10" height="10" transform="rotate(45)"/><circle class="dot" r="2"/>`;
 
 function loadPrefs() {
@@ -70,6 +75,27 @@ const oneLevel = (f, floors) => f.floor == null && floors.length === 1;
 const floorLabel = (f, floors) => (f.floor != null ? f.name : floors.length > 1 ? "No floor" : "Areas");
 const floorPhrase = (f) => (f.floor != null ? f.name : "the home");
 const emptyName = (f, floors) => (oneLevel(f, floors) ? "home" : "floor"); // "Empty home" or "Empty floor"
+
+/* A state figure, set in place after an update: it changes every second or so, and a row's
+   markup changing would rebuild it, closing a list open in it. state: [class, figure, words] or null. */
+function showState(el, state) {
+  if (!el) return;
+  const key = state ? `${state[0]}|${state[2]}` : "";
+  if (el.dataset.key === key) return;
+  el.dataset.key = key;
+  el.hidden = !state;
+  el.className = `state${el.classList.contains("mini") ? " mini" : ""}${state ? ` ${state[0]}` : ""}`;
+  el.innerHTML = state ? state[1] : "";
+  if (state) {
+    el.setAttribute("role", "img");
+    el.setAttribute("aria-label", state[2]);
+    el.title = state[2];
+  } else {
+    el.removeAttribute("role");
+    el.removeAttribute("aria-label");
+    el.removeAttribute("title");
+  }
+}
 
 /* Replace only the children whose markup changed, so a control open in another one survives the update. */
 function patch(container, items) {
@@ -236,7 +262,8 @@ class WispPanel extends HTMLElement {
   _mapConfig() {
     const f = this._shownFloor();
     this._cardFloor = f ? f.floor ?? f.name : ""; // the card takes a floor id, or the hub's own floor by name
-    return { title: "Map", rotate: Number(this._prefs.rotate) || 0, flip: !!this._prefs.flip, floor: this._cardFloor };
+    // Motion and presence show in the rooms and nodes lists here, not as a line under the map
+    return { title: "Map", rotate: Number(this._prefs.rotate) || 0, flip: !!this._prefs.flip, floor: this._cardFloor, motion_text: false };
   }
 
   _mirrorButton() {
@@ -1066,6 +1093,7 @@ class WispPanel extends HTMLElement {
       const el = rows.get(n.mac).querySelector(".wifi"), text = this._wifi(n);
       if (el.textContent !== text) el.textContent = text;
       el.hidden = !text;
+      showState(rows.get(n.mac).querySelector(".state"), n.motion ? ["hot", WALKING, `Links of ${n.name} see motion`] : null);
     }
     const note = root.querySelector(".hive-note");
     note.textContent = d.hive ? (d.hive.in_sync ? "in sync" : "syncing") : "";
@@ -1359,7 +1387,18 @@ class WispPanel extends HTMLElement {
     const calibrated = d.elsewhere.length || d.floors.some((f) => f.empty_samples || f.areas.some((a) => a.samples || a.still_samples));
     if (calibrated) items.push(["clear-all", this._clearAll()]);
     const sheets = patch(col, items);
-    for (const f of d.floors) patch(sheets.get(`floor:${f.floor ?? ""}`).querySelector(".rows"), this._floorRows(f, d));
+    for (const f of d.floors) {
+      const rows = patch(sheets.get(`floor:${f.floor ?? ""}`).querySelector(".rows"), this._floorRows(f, d));
+      for (const a of f.areas) showState(rows.get(`${f.floor ?? ""}:area:${a.area}`)?.querySelector(".state"), this._areaState(f, a));
+    }
+  }
+
+  /* Someone moving in the room (the room the floor's motion is placed in), else someone there,
+     moving a moment ago or keeping still. */
+  _areaState(f, a) {
+    if (a.area === f.area && f.room && f.room !== "none") return ["hot", WALKING, `Someone moving in the ${a.name}`];
+    if (!a.presence) return null;
+    return a.still ? ["on", SITTING, `Someone keeping still in the ${a.name}`] : ["on", STANDING, `Someone in the ${a.name}`];
   }
 
   _floorRows(f, d) {
@@ -1387,10 +1426,8 @@ class WispPanel extends HTMLElement {
     return rows.map(([k, html]) => [`${key}:${k}`, html]);
   }
 
-  /* The WiFi channel the floor's nodes form their grid on, one setting for all of them, and the
-     channels they are on now. */
-  /* Only where it helps: several floors, several access points, or a channel already chosen.
-     One router, or a router with extenders on one floor, needs no choice: Automatic does it. */
+  /* The WiFi channel setting only where it helps: several floors, several access points, or a
+     channel already chosen. One router, or a router with extenders on one floor, needs no choice. */
   _channelShown(f, d) {
     const aps = new Set(d.nodes.map((n) => n.wifi?.ap).filter(Boolean));
     const levels = d.floors.filter((x) => x.nodes.length).length;
@@ -1398,6 +1435,8 @@ class WispPanel extends HTMLElement {
     return levels > 1 || aps.size > 1 || chosen || this._channelChoice?.floor === (f.floor ?? "");
   }
 
+  /* The WiFi channel the floor's nodes form their grid on, one setting for all of them, and the
+     channels they are on now. */
   _channelRow(f, d) {
     const key = f.floor ?? "";
     let choice = this._channelChoice?.floor === key ? this._channelChoice : null;
@@ -1435,7 +1474,7 @@ class WispPanel extends HTMLElement {
     const kinds = [a.samples ? `${count(a.samples)} walking` : "", still ? `${count(still)} still` : ""].filter(Boolean);
     const one = kinds.length === 1 && (a.samples || still) === 1 && min <= 1 ? "sample" : "samples";
     meta.push(kinds.length ? `${kinds.join(", ")} ${one}` : "not calibrated");
-    const chip = recording ? `<span class="chip rec">recording</span>` : a.presence ? `<span class="chip on">${a.still ? "someone keeping still" : "occupied"}</span>` : "";
+    const chip = recording ? `<span class="chip rec">recording</span>` : `<span class="state" hidden></span>`; // filled after each update
     const asking = this._isOpen("room", key, a.area) ? this._askRoom(f, a.area, a.name) : this._isOpen("clear", key, a.area) ? this._askClear(key, a) : "";
     return `<div class="row">
       <div class="line">
@@ -1568,7 +1607,7 @@ class WispPanel extends HTMLElement {
     return `<div class="row">
       <div class="line">
         <span class="dot${n.online ? " up" : ""}" aria-hidden="true"></span>
-        <div class="what"><b>${esc(n.name)}</b>${where ? `<small>${esc(where)}</small>` : ""}<small class="wifi" hidden></small><span class="chips">${chips}</span></div>
+        <div class="what"><b>${esc(n.name)}<span class="state mini" hidden></span></b>${where ? `<small>${esc(where)}</small>` : ""}<small class="wifi" hidden></small><span class="chips">${chips}</span></div>
         ${n.device_id ? `<div class="acts"><button data-act="device"${attr("device", n.device_id)} aria-label="Open the ESPHome device of ${esc(n.name)}">ESPHome</button></div>` : ""}
       </div>
       ${n.added ? this._nodeArea(n, d) : ""}
@@ -1766,6 +1805,14 @@ const STYLE = `
   .chip { font-size: .8rem; font-style: italic; line-height: 1.5; padding: 0 8px; border-radius: 999px; white-space: nowrap;
           border: 1px solid color-mix(in srgb, var(--wisp-ink) 35%, transparent); }
   .chip.on { background: var(--wisp-hot); border-color: var(--wisp-hot); color: var(--wisp-on-hot); font-style: normal; }
+  .state { display: inline-grid; place-items: center; width: 30px; height: 30px; border-radius: 50%; flex: none;
+    border: 1.5px solid var(--wisp-hot); color: var(--wisp-hot); }
+  .state[hidden] { display: none; }
+  .state.hot { background: var(--wisp-hot); color: var(--wisp-on-hot); }
+  .state.mini { width: 22px; height: 22px; margin-left: 6px; vertical-align: -4px; }
+  .fig { width: 20px; height: 20px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+  .fig circle { fill: currentColor; stroke: none; }
+  .state.mini .fig { width: 15px; height: 15px; }
   .chip.up { border-color: currentColor; font-style: normal; }
   .chip.rec::before { content: ""; display: inline-block; width: 7px; height: 7px; margin-right: 5px; border-radius: 50%;
                       background: var(--wisp-hot); animation: wisp-blink 1.6s ease-in-out infinite; }

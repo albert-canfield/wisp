@@ -102,11 +102,12 @@ async def test_snapshot_of_nodes_floors_and_areas(hass: HomeAssistant, udp: Fake
                 "mac": NODE_A, "name": "Hall", "added": True, "host": IP_A, "area": "hall", "area_name": "Hall",
                 "floor": "ground_floor", "floor_name": "Ground floor", "online": False, "placed": False,
                 "device_id": device.id, "wifi": {"ap": None, "rssi": None, "channel": None, "fixed": None},
+                "motion": False,
             },
             {
                 "mac": NODE_B, "name": "Office", "added": True, "host": "192.168.1.51", "area": None, "area_name": None,
                 "floor": None, "floor_name": "Wisp", "online": False, "placed": False, "device_id": None,
-                "wifi": {"ap": None, "rssi": None, "channel": None, "fixed": None},
+                "wifi": {"ap": None, "rssi": None, "channel": None, "fixed": None}, "motion": False,
             },
         ],
         "floors": [

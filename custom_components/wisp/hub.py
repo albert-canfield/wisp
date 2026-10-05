@@ -430,6 +430,12 @@ class WispHub:
         layout = hive.layout if hive else {}
         presence = self.presence
         floor_of = {mac: key for key, floor in presence.floors.items() for mac in floor.nodes}
+        moving = {  # nodes with a link that sees motion now, either end
+            mac
+            for link in self.table.links.values()
+            if link.motion and now - link.updated <= LINK_TIMEOUT
+            for mac in (link.receiver, link.transmitter)
+        }
         nodes = []
         for mac in sorted(set(self.nodes) | set(layout)):  # the layout may hold nodes not added yet
             node = self.nodes.get(mac)
@@ -447,6 +453,7 @@ class WispHub:
                 "placed": mac in layout,
                 "device_id": esphome_device_id(self.hass, mac),
                 "wifi": self.wifi(mac, now) if node else None,
+                "motion": mac in moving,
             })
         panel = presence.panel()
         wifi = {n["mac"]: n["wifi"] for n in nodes if n["wifi"]}

@@ -1,4 +1,4 @@
-"""The WiFi channel per floor: each node's access point, channel and setting in the panel, and
+"""The WiFi channel per floor: each node's access point, channel, setting and motion in the panel, and
 setting a floor's channel through ESPHome or the node's web page."""
 from __future__ import annotations
 
@@ -8,6 +8,8 @@ from pytest_homeassistant_custom_component.common import MockConfigEntry, async_
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers import device_registry as dr, entity_registry as er
 from homeassistant.helpers.device_registry import CONNECTION_NETWORK_MAC
+
+from custom_components.wisp.engine.protocol import LINK_FLAG_MOTION
 
 from .conftest import AP, IP_A, IP_B, NODE_A, NODE_B, FakeUdp
 from .fake_node import encode_report
@@ -40,13 +42,14 @@ def esphome_node(hass: HomeAssistant, mac: str, channel: str, fixed: str) -> str
 async def test_floor_channel(hass: HomeAssistant, udp: FakeUdp, hass_ws_client, aioclient_mock) -> None:
     entry = await setup_hub(hass, HALL, OFFICE)
     hub = entry.runtime_data
-    udp.receive(encode_report(1, NODE_A, [(AP, 0, -50, 101, 100, 20, 0)]), IP_A)
+    udp.receive(encode_report(1, NODE_A, [(AP, 0, -50, 101, 100, 20, 0), (NODE_B, 1, -60, 300, 100, 20, LINK_FLAG_MOTION)]), IP_A)
     await hass.async_block_till_done()
     number_a = esphome_node(hass, NODE_A, "11", "11")
     snapshot = hub.panel_snapshot()
     hall, office = snapshot["nodes"]
     assert hall["wifi"] == {"ap": AP, "rssi": -50, "channel": 11, "fixed": 11}
     assert office["wifi"] == {"ap": None, "rssi": None, "channel": None, "fixed": None}  # not in ESPHome yet
+    assert hall["motion"] and office["motion"]  # the link between them sees motion: both ends show it
     assert snapshot["floors"][0]["channel"] == 11  # the one setting the floor's nodes show
 
     client = await hass_ws_client(hass)
