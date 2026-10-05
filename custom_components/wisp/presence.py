@@ -449,6 +449,19 @@ class RoomPresence:
             out.append(entry)
         return out
 
+    def access_point_positions(self) -> dict[str, tuple[float, float]]:
+        """Where the position engine puts each access point on the hive's layout (floors without a
+        plan), so the map draws the geometry someone moving is placed on."""
+        out: dict[str, tuple[float, float]] = {}
+        for key in self.floors:
+            model = self.models.get(key)
+            if model is None or key in self.plans.floors:
+                continue
+            for mac, point in model.positions.items():
+                if mac not in self.hub.nodes and mac not in out:
+                    out[mac] = point
+        return out
+
     def people(self) -> list[dict[str, Any]]:
         """Where someone moves, per floor, in the layout's metres or the floor plan's; empty when nobody moves."""
         return [

@@ -1,6 +1,8 @@
 """Live map: the websocket subscription behind the card, and the card's registration."""
 from __future__ import annotations
 
+import math
+
 import pytest
 
 from homeassistant.components.frontend import DATA_EXTRA_MODULE_URL
@@ -9,6 +11,7 @@ from homeassistant.helpers import area_registry as ar
 from homeassistant.setup import async_setup_component
 
 from custom_components.wisp.const import VERSION
+from custom_components.wisp.engine.tracking import rssi_to_metres
 
 from .conftest import (
     AP,
@@ -78,6 +81,8 @@ async def test_snapshot_then_changes_at_most_once_a_second(hass: HomeAssistant, 
     (person,) = snapshot.pop("people")
     assert (person["floor"], person["name"]) == (None, "Wisp")
     assert -1.0 <= person["x"] <= 1.0 and abs(person["y"] + 0.5 * person["x"]) < 0.3
+    (ap,) = snapshot["access_points"]  # where the position engine puts it: near Hall, which hears it best
+    assert math.dist((ap.pop("x"), ap.pop("y")), (-1.0, 0.5)) < 2 * rssi_to_metres(-48)
     assert snapshot == {
         "nodes": [
             {"mac": NODE_A, "name": "Hall", "online": True, "x": -1.0, "y": 0.5},

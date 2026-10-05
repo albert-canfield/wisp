@@ -39,7 +39,8 @@ function bounds(points) {
   return { x0, x1, y0, y1, w: x1 - x0, h: y1 - y0, cx: (x0 + x1) / 2, cy: (y0 + y1) / 2 };
 }
 
-/* Positions in metres, y up: nodes from the layout, access points beside who hears them best. */
+/* Positions in metres, y up: nodes from the layout, access points where the position engine puts
+   them, else beside who hears them best. */
 function place(map) {
   const pos = new Map();
   for (const n of map.nodes) if (n.x != null && n.y != null) pos.set(n.mac, { x: n.x, y: n.y });
@@ -62,6 +63,10 @@ function place(map) {
   const span = Math.max(b.w, b.h, 0.5);
   const beside = new Map(); // access points already placed beside a node
   for (const ap of map.access_points) {
+    if (ap.x != null && ap.y != null) {
+      pos.set(ap.bssid, { x: ap.x, y: ap.y });
+      continue;
+    }
     const heard = ap.heard_by.filter((h) => pos.has(h.node));
     let anchor = { x: c.x, y: b.y1 };
     if (heard.length) {
@@ -212,10 +217,18 @@ function footprints(q, reverse) {
   return out;
 }
 
-/* Label away from the drawing's middle: below or above its mark. */
-function label(p, c, text, cls, below, above) {
-  const y = p.y >= c.y - 1 ? p.y + below + 9 : p.y - above;
-  return `<text class="${cls}" x="${n1(p.x)}" y="${n1(y)}">${esc(short(text))}</text>`;
+/* Label away from the drawing's middle, below or above its mark; on the other side, or a line
+   further out, when it would cover a label already drawn (nodes side by side). */
+function label(p, c, text, cls, below, above, size, taken) {
+  const t = short(text);
+  const half = (t.length * size * 0.56) / 2;
+  const down = p.y + below + 9, up = p.y - above, step = size + 3;
+  const tries = p.y >= c.y - 1 ? [down, up, down + step, up - step] : [up, down, up - step, down + step];
+  const box = (y) => ({ x0: p.x - half, x1: p.x + half, y0: y - size, y1: y + 3 });
+  const free = (b) => !taken.some((o) => b.x0 < o.x1 && o.x0 < b.x1 && b.y0 < o.y1 && o.y0 < b.y1);
+  const y = tries.find((y) => free(box(y))) ?? tries[0];
+  taken.push(box(y));
+  return `<text class="${cls}" x="${n1(p.x)}" y="${n1(y)}">${esc(t)}</text>`;
 }
 
 function draw(map, config, floor) {
@@ -227,7 +240,7 @@ function draw(map, config, floor) {
   // On a plan, placed means placed by the user; the rest is fitted to them, or waits below it
   const placed = (id) => (plan ? !!floor.positions?.[id]?.placed : true);
   let lines = "", steps = "", marks = "", labels = "";
-  const moving = [];
+  const moving = [], taken = [];
   for (const g of pairs(map.links, pts)) {
     const q = curve(pts.get(g.a), pts.get(g.b));
     if (q.len < 1) continue;
@@ -245,7 +258,7 @@ function draw(map, config, floor) {
     const p = pts.get(ap.bssid);
     const where = placed(ap.bssid) ? "" : ", placed from the signal";
     marks += `<g class="ap" transform="translate(${n1(p.x)} ${n1(p.y)})"><title>Access point ${esc(ap.bssid)}${where}</title><path class="waves" d="M-7.1-7.1A10 10 0 0 1 7.1-7.1M-9.9-9.9A14 14 0 0 1 9.9-9.9"/><rect class="ring" x="-4.6" y="-4.6" width="9.2" height="9.2" transform="rotate(45)"/><circle class="dot" r="1.8"/></g>`;
-    labels += label(p, c, ap.label, "ap-label", 8, 18);
+    labels += label(p, c, ap.label, "ap-label", 8, 18, 11, taken);
   }
   let unplaced = 0;
   for (const n of map.nodes) {
@@ -255,7 +268,7 @@ function draw(map, config, floor) {
     if (!fixed) unplaced += 1;
     const where = fixed ? "" : !known ? ", not placed yet" : ", not placed on the plan: fitted to the placed nodes";
     marks += `<g class="node${n.online ? "" : " off"}${fixed ? "" : " loose"}" transform="translate(${n1(p.x)} ${n1(p.y)})"><title>${esc(n.name)}: ${n.online ? "online" : "offline"}${where}</title><circle class="ring" r="6.5"/><circle class="dot" r="2.2"/></g>`;
-    labels += label(p, c, n.name, `node-label${n.online ? "" : " off"}`, 10, 12);
+    labels += label(p, c, n.name, `node-label${n.online ? "" : " off"}`, 10, 12, 13, taken);
   }
   for (const person of map.people ?? []) {
     const p = pts.get(`person:${person.floor ?? ""}`);

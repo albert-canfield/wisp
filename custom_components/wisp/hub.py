@@ -329,6 +329,7 @@ class WispHub:
                 "y": y,
             })
         aps = access_points(self.table, hive, set(self.nodes))
+        placed = self.presence.access_point_positions()
         on_map = {n["mac"] for n in nodes} | set(aps)
         links = [
             {
@@ -348,6 +349,7 @@ class WispHub:
                     "bssid": bssid,
                     "label": ap_label(bssid),
                     "heard_by": [{"node": mac, "rssi": rssi} for mac, rssi in heard],
+                    **({"x": round(placed[bssid][0], 2), "y": round(placed[bssid][1], 2)} if bssid in placed else {}),
                 }
                 for bssid, heard in aps.items()
             ],
