@@ -43,6 +43,7 @@ class WispComponent : public Component {
   void set_channel_sensor(sensor::Sensor *s) { this->channel_sensor_ = s; }
   void set_ap_distance_sensor(sensor::Sensor *s) { this->ap_distance_sensor_ = s; }
   void set_hive_sync_binary_sensor(binary_sensor::BinarySensor *s) { this->hive_sync_binary_sensor_ = s; }
+  void set_core_stack_sensor(sensor::Sensor *s) { this->core_stack_sensor_ = s; }
   void set_raw_stream_enabled(bool enabled) { this->raw_stream_enabled_.store(enabled); }
   void set_grid_channel(uint8_t channel) { this->grid_channel_cfg_ = channel; }
   void set_ap_min_rssi(int8_t rssi) { this->ap_min_rssi_ = rssi; }
@@ -60,8 +61,10 @@ class WispComponent : public Component {
   bool home_bssid_(wisp_core::Mac &out);
 
   // Main loop.
-  void watch_wifi_(uint32_t now);
-  void steer_wifi_();
+  void watch_wifi_();
+  void steer_wifi_(uint32_t now);
+  void watch_csi_(bool connected);
+  void watch_alone_(uint32_t now, bool connected);
   void boost_grid_ap_();
   void remember_grid_ap_(const wisp_core::Mac &bssid, uint8_t channel);
   void update_ap_();
@@ -78,6 +81,7 @@ class WispComponent : public Component {
   sensor::Sensor *channel_sensor_{nullptr};
   sensor::Sensor *ap_distance_sensor_{nullptr};
   binary_sensor::BinarySensor *hive_sync_binary_sensor_{nullptr};
+  sensor::Sensor *core_stack_sensor_{nullptr};
 
   wisp_platform::CsiCapture capture_;
   wisp_platform::GatewayPinger pinger_;
@@ -93,7 +97,7 @@ class WispComponent : public Component {
   QueueHandle_t espnow_queue_{nullptr};
   TaskHandle_t task_{nullptr};
   wisp_core::Mac self_{};
-  bool stream_open_{false};
+  std::atomic<bool> stream_open_{false};
 
   // Owned by the core task.
   wisp_core::Grid grid_{wisp_core::Mac{}};
@@ -112,6 +116,7 @@ class WispComponent : public Component {
   uint32_t report_seq_{0};
   uint32_t raw_seq_{0};
   uint8_t live_streams_{0};
+  int report_first_{0};  // hive report rows start here, moving on by the rows each report carried
   float threshold_applied_{0.0f};
 
   // Shared between the main loop and the core task.
@@ -127,6 +132,8 @@ class WispComponent : public Component {
   std::atomic<int> grid_nodes_{1};
   std::atomic<bool> hive_in_sync_{false};
   std::atomic<uint32_t> ap_frames_{0};
+  std::atomic<uint32_t> ap_frames_total_{0};
+  std::atomic<uint32_t> self_jumps_{0};
 
   // Grid channel steering (main loop).
   uint8_t grid_channel_cfg_{0};  // 0 = automatic
@@ -134,18 +141,30 @@ class WispComponent : public Component {
   wisp_core::ApList aps_seen_;
   bool steered_{false};
   uint8_t steer_attempts_{0};
+  uint32_t last_steer_ms_{0};
+  uint8_t grid_ap_missing_{0};  // scans in a row without the saved grid AP
+  uint32_t scan_fingerprint_{0};
+  bool alone_{false};
+  uint32_t alone_since_ms_{0};
+  uint32_t alone_wait_ms_{0};
   ESPPreferenceObject grid_ap_pref_;
   wisp_core::Mac grid_ap_{};
   uint8_t grid_ap_channel_{0};
   bool has_grid_ap_{false};
   bool was_connected_{false};
   bool wifi_up_{false};
-  bool fresh_scan_{true};
   uint32_t beacons_seen_{0};
   uint8_t beacons_stalled_s_{0};
   std::atomic<uint8_t> grid_channel_{0};
 
   uint32_t dropped_total_{0};
+  uint32_t espnow_dropped_total_{0};
+  uint32_t self_jumps_seen_{0};
+  // CSI watchdog (main loop): seconds without a frame from the AP, and the wait before acting.
+  uint32_t csi_seen_{0};
+  uint32_t csi_quiet_s_{0};
+  uint32_t csi_wait_s_{0};
+  uint32_t last_health_ms_{0};
   uint32_t last_check_ms_{0};
   uint32_t last_stats_ms_{0};
 };

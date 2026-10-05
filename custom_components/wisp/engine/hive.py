@@ -29,6 +29,8 @@ class HiveTracker:
 
     In sync every node reports the same rows. While the grid syncs they differ, so the pick
     prefers an in-sync report, then the fullest layout, and the map does not flip between views.
+    A large hive does not fit one report: each carries the rows from a different starting row,
+    so while a node's hash stays the same its truncated reports add up to all of its rows.
     """
 
     def __init__(self, timeout: float) -> None:
@@ -40,6 +42,9 @@ class HiveTracker:
         old = self.reports.get(report.node)
         if old is not None and old.seq == report.seq and now - old.updated <= self.timeout:
             return False
+        rows = {row.origin: row for row in report.rows}
+        if report.truncated and old is not None and old.hash == report.hash:
+            rows = {**old.rows, **rows}  # same knowledge: the rows this report left out still hold
         self.reports[report.node] = HiveState(
             reporter=report.node,
             seq=report.seq,
@@ -47,7 +52,7 @@ class HiveTracker:
             in_sync=report.in_sync,
             truncated=report.truncated,
             layout={p.node: (p.x, p.y) for p in report.layout},
-            rows={row.origin: row for row in report.rows},
+            rows=rows,
             updated=now,
         )
         return True

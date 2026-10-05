@@ -41,10 +41,13 @@ wisp:
     name: Grid channel
   hive_in_sync:
     name: Hive in sync
+  core_stack_free:
+    name: Core stack free
+    disabled_by_default: true
 
 logger:
 
-# Nodes keep sensing without Home Assistant or WiFi, so never reboot for a missing connection.
+# Nodes wait out a missing Home Assistant or WiFi and recover by themselves: never reboot for it.
 api:
   reboot_timeout: 0s
 
@@ -121,6 +124,9 @@ sensor:
   - platform: debug
     free:
       name: Free memory
+    block:
+      name: Heap max block
+      disabled_by_default: true
 
 text_sensor:
   - platform: wifi_info

@@ -75,7 +75,9 @@ bool GatewayPinger::start(uint32_t gateway, uint32_t interval_ms) {
   cfg.target_addr = target;
   cfg.count = ESP_PING_COUNT_INFINITE;
   cfg.interval_ms = interval_ms;
-  cfg.timeout_ms = 1000;
+  // Waits for each reply at most one interval: the CSI comes from the reply frame itself, and a
+  // longer wait would hold every next ping back after a lost reply (1 s each with the default).
+  cfg.timeout_ms = interval_ms;
   cfg.data_size = 8;  // tiny: the reply only has to exist
 
   esp_ping_callbacks_t cbs = {};

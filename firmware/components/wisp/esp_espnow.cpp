@@ -13,6 +13,15 @@ std::atomic<uint32_t> EspNowRadio::dropped_{0};
 
 bool EspNowRadio::start(QueueHandle_t rx_queue) {
   rx_queue_ = rx_queue;
+  if (this->lock_ == nullptr && (this->lock_ = xSemaphoreCreateMutex()) == nullptr)
+    return false;
+  xSemaphoreTake(this->lock_, portMAX_DELAY);
+  const bool ok = this->start_locked_();
+  xSemaphoreGive(this->lock_);
+  return ok;
+}
+
+bool EspNowRadio::start_locked_() {
   if (esp_now_init() != ESP_OK)
     return false;
   esp_now_register_recv_cb(&EspNowRadio::on_recv_);
@@ -32,12 +41,20 @@ bool EspNowRadio::start(QueueHandle_t rx_queue) {
 }
 
 bool EspNowRadio::restart() {
+  if (this->lock_ == nullptr || xSemaphoreTake(this->lock_, pdMS_TO_TICKS(200)) != pdTRUE)
+    return false;  // a send is stuck: try again later
   esp_now_deinit();
-  return this->start(rx_queue_);
+  const bool ok = this->start_locked_();
+  xSemaphoreGive(this->lock_);
+  return ok;
 }
 
 bool EspNowRadio::send_broadcast(const uint8_t *data, size_t len) {
-  return esp_now_send(BROADCAST, data, len) == ESP_OK;
+  if (this->lock_ == nullptr || xSemaphoreTake(this->lock_, 0) != pdTRUE)
+    return false;  // being restarted: skip this slot
+  const bool ok = esp_now_send(BROADCAST, data, len) == ESP_OK;
+  xSemaphoreGive(this->lock_);
+  return ok;
 }
 
 void EspNowRadio::on_recv_(const esp_now_recv_info_t *info, const uint8_t *data, int len) {
@@ -98,7 +115,20 @@ void SlotScheduler::arm_() {
   uint64_t delay = wisp_core::ROUND_US;  // not transmitting: check again next round
   if (slot >= 0)
     delay = wisp_core::next_slot_time(now, slot) - now;
-  esp_timer_start_once(this->timer_, delay);
+  esp_timer_start_once(this->timer_, delay);  // a failure is caught by keep_armed()
+}
+
+void SlotScheduler::keep_armed() {
+  if (this->timer_ == nullptr || esp_timer_is_active(this->timer_)) {
+    this->idle_checks_ = 0;
+    return;
+  }
+  // The timer is idle only while its callback runs (well under a millisecond): idle at two
+  // checks a second apart means it stopped.
+  if (++this->idle_checks_ >= 2) {
+    this->idle_checks_ = 0;
+    this->arm_();
+  }
 }
 
 void SlotScheduler::on_timer_(void *arg) {

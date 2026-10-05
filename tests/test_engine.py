@@ -364,6 +364,19 @@ def test_hive_tracker_keeps_the_latest_report_per_node():
     assert tracker.fresh(NODE, 20.0) and not tracker.fresh(NODE, 21.5) and not tracker.fresh(OTHER, 6.0)
 
 
+def test_hive_tracker_adds_up_truncated_reports():
+    """A hive too large for one report: each carries other rows; same hash, they add up."""
+    tracker = HiveTracker(timeout=15)
+    first, second = ROWS[:1], ROWS[1:]
+    tracker.apply(h(1, flags=0x03, rows=first), now=0.0)  # in sync, rows truncated
+    tracker.apply(h(2, flags=0x03, rows=second), now=5.0)
+    assert set(tracker.current(5.0).rows) == {NODE, OTHER}
+    tracker.apply(h(3, flags=0x03, rows=first, hive_hash=0xBEEF), now=10.0)  # the hive changed
+    assert set(tracker.current(10.0).rows) == {first[0][0]}
+    tracker.apply(h(4, flags=0x01, rows=first, hive_hash=0xBEEF), now=15.0)  # whole again
+    assert set(tracker.current(15.0).rows) == {first[0][0]}
+
+
 def test_hive_tracker_prefers_in_sync_and_fuller_views():
     tracker = HiveTracker(timeout=15)
     tracker.apply(h(1, node=NODE, layout=LAYOUT), now=0.0)

@@ -9,6 +9,7 @@
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
+#include "freertos/semphr.h"
 
 #include "core_grid.h"
 #include "core_hive.h"
@@ -28,14 +29,20 @@ class EspNowRadio {
  public:
   // Starts ESP-NOW with a broadcast peer at a fixed 802.11n rate. False while WiFi is not up.
   bool start(QueueHandle_t rx_queue);
-  // Tears ESP-NOW down and starts it again, for example after a Wi-Fi restart.
+  // Tears ESP-NOW down and starts it again, for example after a Wi-Fi restart. Never while a
+  // send is in progress: both hold the same lock.
   bool restart();
+  // False when the frame could not go out, or ESP-NOW is being restarted (the slot is skipped).
   bool send_broadcast(const uint8_t *data, size_t len);
+  // Received frames the core task had no room for, since the last call.
+  static uint32_t take_dropped() { return dropped_.exchange(0); }
 
  protected:
+  bool start_locked_();
   static void on_recv_(const esp_now_recv_info_t *info, const uint8_t *data, int len);
   static QueueHandle_t rx_queue_;
   static std::atomic<uint32_t> dropped_;
+  SemaphoreHandle_t lock_{nullptr};
 };
 
 // Fires once per round at this node's slot, aligned to the access point's clock (TSF) when
@@ -49,10 +56,14 @@ class SlotScheduler {
   void set_relay(const uint8_t *data, size_t len);
   bool synced() const { return this->synced_.load(); }
   uint32_t sent() const { return this->sent_.load(); }
+  // Called once a second: re-arms the slot timer if it has stopped (a failed esp_timer start
+  // would otherwise end all beacons until a reboot).
+  void keep_armed();
 
  protected:
   static void on_timer_(void *arg);
   void arm_();
+  uint8_t idle_checks_{0};
 
   EspNowRadio *radio_{nullptr};
   esp_timer_handle_t timer_{nullptr};

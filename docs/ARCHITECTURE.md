@@ -204,7 +204,9 @@ A node is never stuck, and never needs a ladder to reach it.
 
 **Security.** ESPHome API encryption key and OTA password, set per install. The fallback hotspot and the web server get a password once the node is set up.
 
-**While WiFi is down the node keeps working.** The ESP-NOW grid carries on, on the last channel: pings, CSI and the hive continue. Recent link scores wait in a small buffer and are dropped when stale. Stretch goal: a neighbour that is still connected forwards the node's data to Home Assistant over ESP-NOW.
+**While WiFi is down the node waits, it does not reboot.** ESPHome keeps scanning every channel to reconnect, and after 90 s opens the fallback hotspot, so the grid pauses: beacons go out on whatever channel the radio is on, and nothing reaches Home Assistant anyway, since reports go over WiFi. On reconnecting, the node re-arms CSI and ESP-NOW, steers back to the grid channel and the hive resyncs within seconds; the CSI and beacon watchdogs catch anything a Wi-Fi restart left disarmed. Stretch goal: a neighbour that is still connected forwards the node's data to Home Assistant over ESP-NOW.
+
+**Self-healing, in the firmware:** a beacon watchdog restarts ESP-NOW after 10 s without a beacon sent and re-arms the slot timer if it stopped; a CSI watchdog re-arms CSI and restarts the gateway pings after 30 s without a frame from the access point (waits doubling to 10 min for a gateway that never answers); a node alone on the grid for 5 min in a network with several channels reconnects to re-check the grid channel (waits doubling to 6 h); the saved grid access point survives two scans that miss it; and the core task runs under the task watchdog.
 
 ### Web interface (proposed)
 

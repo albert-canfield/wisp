@@ -39,6 +39,7 @@ CONF_HIVE_IN_SYNC = "hive_in_sync"
 CONF_CHANNEL = "channel"
 CONF_FTM_PROBE = "ftm_probe"
 CONF_AP_DISTANCE = "ap_distance"
+CONF_CORE_STACK_FREE = "core_stack_free"
 FTM_VARIANTS = (VARIANT_ESP32S2, VARIANT_ESP32S3, VARIANT_ESP32C2, VARIANT_ESP32C3, VARIANT_ESP32C6)
 
 wisp_ns = cg.esphome_ns.namespace("wisp")
@@ -67,6 +68,13 @@ CONFIG_SCHEMA = cv.Schema(
             unit_of_measurement="m",
             icon="mdi:map-marker-distance",
             accuracy_decimals=2,
+            state_class=STATE_CLASS_MEASUREMENT,
+            entity_category=ENTITY_CATEGORY_DIAGNOSTIC,
+        ),
+        cv.Optional(CONF_CORE_STACK_FREE): sensor.sensor_schema(
+            unit_of_measurement="B",
+            icon="mdi:layers-outline",
+            accuracy_decimals=0,
             state_class=STATE_CLASS_MEASUREMENT,
             entity_category=ENTITY_CATEGORY_DIAGNOSTIC,
         ),
@@ -132,6 +140,9 @@ async def to_code(config):
     if CONF_HIVE_IN_SYNC in config:
         bs = await binary_sensor.new_binary_sensor(config[CONF_HIVE_IN_SYNC])
         cg.add(var.set_hive_sync_binary_sensor(bs))
+    if CONF_CORE_STACK_FREE in config:
+        s = await sensor.new_sensor(config[CONF_CORE_STACK_FREE])
+        cg.add(var.set_core_stack_sensor(s))
     if config[CONF_FTM_PROBE]:
         if get_esp32_variant() not in FTM_VARIANTS:
             raise cv.Invalid(f"ftm_probe needs a chip with Wi-Fi FTM: {', '.join(FTM_VARIANTS)}")
