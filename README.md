@@ -9,7 +9,7 @@
 See who is where in your home, room by room and as footprints moving across your floor plan, using only the WiFi signals between small ESP32 nodes. No cameras, no wearables, no phone to carry.
 </p>
 
-> **Status: early development.** There is nothing to install yet. The design is in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) and progress follows the roadmap below.
+> **Status: early development, phase 1 working.** Nodes form their grid, measure every link and report motion per link to Home Assistant. Rooms and positions come next. The design is in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md), the wire format in [docs/PROTOCOL.md](docs/PROTOCOL.md).
 
 ## How it works
 
@@ -21,14 +21,36 @@ People absorb and reflect WiFi. Wisp places three or four cheap ESP32 nodes arou
 
 Everything stays on your local network.
 
-## Planned entities
+## What works today
 
-| What | Example |
-|---|---|
-| Room per floor | `sensor.wisp_floor_2_room` |
-| Presence per room | `binary_sensor.wisp_office_presence` |
-| Position per floor | `sensor.wisp_floor_1_x`, `sensor.wisp_floor_1_y` |
-| Node health | signal, link quality, locked access point, firmware version |
+- **Self-forming grid.** Nodes find each other over ESP-NOW, take time slots without a leader, and heal by themselves when a node reboots, leaves or joins.
+- **Homes with several access points.** Nodes agree on one channel and join the best access point on it, so the grid stays together.
+- **The hive.** Every node keeps the same picture of the whole grid and works out the same layout of the nodes.
+- **Motion per link.** Each link from an access point or another node gets a motion score (1 means as quiet as usual) and a motion on/off state.
+- **Home Assistant.** Nodes are ESPHome devices (restart, updates, settings, health); the Wisp integration adds the link sensors.
+
+## Entities
+
+| From | What | Example |
+|---|---|---|
+| Each node (ESPHome) | Motion on the link to its access point, grid size, hive in sync, AP CSI rate, restart, safe mode, identify, firmware update | `binary_sensor.wisp_a8c77c_ap_motion` |
+| Wisp integration | Motion score and motion per link, signal and spread (disabled by default) | `sensor.hall_ap_58_04_4f_1d_12_f9_motion_score` |
+| Planned | Room per floor, presence per room, position per floor | `sensor.wisp_floor_2_room` |
+
+## Try it
+
+Until the first release puts the web flasher online, nodes are built with ESPHome:
+
+```bash
+python3.13 -m venv .venv && .venv/bin/pip install esphome
+.venv/bin/esphome run firmware/wisp-node-esp32s3.yaml   # or wisp-node-esp32c3.yaml
+```
+
+1. Join the node's hotspot `wisp-xxxxxx` from a phone and pick your WiFi.
+2. Add the node in Home Assistant under ESPHome when it is discovered.
+3. Copy `custom_components/wisp` into Home Assistant's `config/custom_components` (or add this repository to HACS as a custom integration repository) and restart. Wisp finds the nodes by itself.
+
+Tools for looking at the raw signal are in [firmware/tools](firmware/tools): a live recorder with a plot, an overnight logger and a replay of the motion score.
 
 ## Hardware
 
@@ -42,7 +64,7 @@ Nodes are flashed from the browser, with nothing to install. Open the Wisp web f
 
 ## Roadmap
 
-1. **Prove the signal.** Node firmware and an integration skeleton: per-link disturbance sensors that react when you walk between nodes.
+1. **Prove the signal (working).** Node firmware with the self-forming grid, the hive and per-link motion, the integration with link sensors, CI and the release pipeline.
 2. **Room presence.** Floor plans and node placement, a calibration walk per room, presence per room with a confidence score.
 3. **Position and map.** Tomographic imaging, a tracking filter that respects walls, and the map card.
 4. **Ready for HACS.** OTA updates for nodes, diagnostics, automatic baseline and full documentation.
