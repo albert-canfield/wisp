@@ -306,6 +306,8 @@ class Rooms:
         self.still_seconds = still_seconds
         self.move_seconds = move_seconds
         self.moves: dict[str, tuple[str, int]] = {}  # by floor: the room winning moving, seconds in a row
+        self.walked: dict[str, str] = {}  # by floor: the room someone last walked in, where they sit down
+        self.quiet_for: dict[str, int] = {}  # by floor: seconds in a row the still classification found nobody
         self.areas: dict[str, deque[Vector]] = {}  # moving samples, by area
         self.still: dict[str, deque[Vector]] = {}  # still samples, by area
         self.empty: dict[str, deque[Vector]] = {}  # by floor
@@ -342,6 +344,8 @@ class Rooms:
             self.wins.clear()
             self.streaks.clear()
             self.moves.clear()
+            self.walked.clear()
+            self.quiet_for.clear()
             self._models.clear()
             return
         self.areas.pop(area, None)
@@ -366,6 +370,8 @@ class Rooms:
         self.still_decisions.pop(floor, None)
         self.streaks.pop(floor, None)
         self.moves.pop(floor, None)
+        self.walked.pop(floor, None)
+        self.quiet_for.pop(floor, None)
         self._signal.pop(floor, None)
 
     def _record(self, run: Run, vector: Vector, motion: float, moving: bool | None) -> None:
@@ -472,6 +478,8 @@ class Rooms:
             self.moves[floor] = (decision.room, count)
             if count >= self.move_seconds:
                 self.wins[decision.room] = (now, decision.confidence, False)
+                self.walked[floor] = decision.room
+                self.quiet_for.pop(floor, None)
         else:
             self.moves.pop(floor, None)
         if not live:
@@ -491,7 +499,9 @@ class Rooms:
         classifying with the classes being recorded, which lit up other rooms meanwhile."""
         self.streaks.pop(floor, None)
         self.moves.pop(floor, None)
+        self.quiet_for.pop(floor, None)
         if run.area is None:  # the empty floor: nobody, and the map places nobody walking
+            self.walked.pop(floor, None)
             self.decisions[floor] = Decision(None, None, {None: 1.0}, motion, links)
             self.still_decisions[floor] = None
         elif run.still:
@@ -502,19 +512,35 @@ class Rooms:
             self.decisions[floor] = Decision(run.area, 1.0, {run.area: 1.0}, motion, links)
             self.still_decisions[floor] = None
             self.wins[run.area] = (now, 1.0, False)
+        if run.area is not None:
+            self.walked[floor] = run.area
 
     def _still_step(self, floor: str, areas: list[str], vector: Vector, motion: float, now: float) -> None:
-        """Nobody moves on the floor: a room winning the still classification STILL_SECONDS in a row holds presence."""
+        """Nobody walks on the floor: someone found still STILL_SECONDS in a row holds presence, in
+        the room they last walked in. Nobody changes room without walking, and where someone sits
+        shows in the signal only while their body shadows a link (30 cm make the difference), so
+        the still classification says whether someone is there; the room comes from their walk,
+        and from the still classification only when nobody was seen walking (a restart). Found
+        nobody for the hold time, the walk is forgotten."""
         decision = decide_still(vector, self.still_models(floor, areas), motion)
-        self.still_decisions[floor] = decision
-        if decision is None or decision.room is None or decision.confidence < self.confidence:
+        someone = None if decision is None or decision.room is None else 1.0 - decision.probabilities.get(None, 0.0)
+        if someone is None or someone < self.confidence:
+            self.still_decisions[floor] = decision
             self.streaks.pop(floor, None)
+            quiet = self.quiet_for.get(floor, 0) + 1
+            self.quiet_for[floor] = quiet
+            if quiet >= self.hold:
+                self.walked.pop(floor, None)
             return
-        room, count = self.streaks.get(floor, (decision.room, 0))
-        count = count + 1 if room == decision.room else 1
-        self.streaks[floor] = (decision.room, count)
+        self.quiet_for.pop(floor, None)
+        walked = self.walked.get(floor)
+        room = walked if walked in areas else decision.room
+        self.still_decisions[floor] = Decision(room, someone, decision.probabilities, motion, decision.links, still=True)
+        held, count = self.streaks.get(floor, (room, 0))
+        count = count + 1 if held == room else 1
+        self.streaks[floor] = (room, count)
         if count >= self.still_seconds:
-            self.wins[decision.room] = (now, decision.confidence, True)
+            self.wins[room] = (now, someone, True)
 
     def presence(self, area: str, now: float) -> float | None:
         """Confidence of the area's latest win while its presence holds, else None."""

@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.1.10 (unreleased)
+## 0.1.11 (unreleased)
 Versions count up with each round of changes until the first release.
 
 First working version: the grid, the hive and motion per link, with the Home Assistant integration and the map card.
@@ -63,6 +63,7 @@ First working version: the grid, the hive and motion per link, with the Home Ass
 - While a calibration records, presence and the map follow what it says: someone moving or sitting in its room, or nobody on the floor for the empty floor. They classified with the classes being recorded and lit up other rooms meanwhile.
 - Presence first on the map: with rooms calibrated, someone is shown only in a room with presence (the one someone walks in now, else the latest to win), the fit is searched for inside that room only, and footprints follow only while room presence says someone walks. Few links cross several rooms each, so the best fit on the whole floor often lay next door while room presence named the right room. Replayed on 5.5 minutes of the owner at the office desk: shown 32% of the time, in three rooms, with 14 jumps; now 99%, all in the office, no walking, no jumps.
 - Sitting and working counts as sitting: a still calibration keeps its seconds with small motion (typing, shifting in a chair), and when links flag motion that no room's walking explains, the still classification decides. A room's presence from walking needs two seconds in a row: one stray second lit a room for a minute.
+- Nobody changes room without walking: someone found keeping still is in the room they last walked in, and the still classification only says whether anyone is there (from the rooms' calibration only when nobody was seen walking, after a restart). Where someone sits shows in the signal only while their body shadows a link, and 30 cm make the difference: the owner, sat at the office desk off the links he shadowed while calibrating, was found still in the play room 77% of the time; now office presence 93%, no other room. On the map, someone still in a room with presence stays where they were last placed in it, or in its middle.
 - Position sensors: on a floor with a plan, x and y of someone moving in the plan's metres (from its top left corner), with the fit's quality as an attribute; unknown while nobody moves.
 
 ### Tools

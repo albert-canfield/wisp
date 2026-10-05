@@ -221,3 +221,18 @@ def test_the_fit_is_searched_for_in_the_room_presence_names() -> None:
         assert fix is not None and (fix.raw_x <= 3.0) == (expect == "office"), (room, fix)
         if room is not None:
             assert all(f.walking is False for f in fixes if f is not None)
+
+
+def test_someone_still_in_a_room_stays_on_the_map() -> None:
+    """Room presence holds someone keeping still in a room no link sees: they stay where they were
+    last placed in it, or in its middle, and nobody shows without a room."""
+    office = [(0.0, 0.0, 3.0, 5.0)]
+    placed = {mac: (p[0] + 0.5, p[1] + 0.25) for mac, p in NODES.items()}
+    floor = FloorModel()
+    floor.set_layout(hive_state(), placed, plan=(6.5, 5.0), nodes=set(NODES), rooms={"office": office})
+    quiet = {k: 1.0 for k in ((t, r) for t in placed for r in NODES if t != r)}
+    assert floor.update(quiet, now=0.0, moving=set()) is None
+    fix = floor.update(quiet, now=1.0, moving=set(), room="office", walking=False)
+    assert (fix.x, fix.y, fix.walking) == (1.5, 2.5, False)
+    floor.spots["office"] = (0.8, 4.0)  # where a fit last put them
+    assert (floor.update(quiet, now=2.0, moving=set(), room="office", walking=False).x) == 0.8

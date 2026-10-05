@@ -91,6 +91,7 @@ class FloorModel:
     _flags: deque = field(default_factory=deque, init=False)  # (time, links reporting motion)
     walking: bool = field(default=False, init=False)
     rooms: dict[str, list[Rect]] = field(default_factory=dict, init=False)  # on a plan, by area
+    spots: dict[str, Point] = field(default_factory=dict, init=False)  # by area: where someone was last still
     streak: int = field(default=0, init=False)
     positions: dict[str, Point] = field(default_factory=dict, init=False)
     fit: Similarity | None = field(default=None, init=False)  # hive layout to plan, on a floor plan
@@ -125,6 +126,7 @@ class FloorModel:
             self._plan = plan
             self.track = Track()
             self._aps = {}
+            self.spots = {}
         # What the user did not place stays on the plan (in the house, with rooms drawn): the
         # layout and the access points come from signal strength, which can put them far out.
         positions = {key: p if key in (placed or {}) else self._keep_in(*p) for key, p in positions.items()}
@@ -216,14 +218,25 @@ class FloorModel:
             last = self.fits[-1]
             return FloorFix(x, y, last[1], last[2], last[3])
         window = [f for f in self.fits if now - f[0] < self.still_window]
-        if rects := self.rooms.get(room or ""):  # fits from before someone was in this room do not count
+        rects = self.rooms.get(room or "")
+        if rects:  # fits from before someone was in this room do not count
             window = [f for f in window if inside(rects, f[1], f[2]) == (f[1], f[2])]
         if len(window) < self.still_min:
-            return None
+            if not rects:
+                return None
+            # Room presence says someone is in the room, keeping still: no link sees them, so they
+            # stay where they were last placed in it, else in the middle of its largest rectangle
+            spot = self.spots.get(room or "")
+            if spot is None:
+                rx, ry, rw, rh = max(rects, key=lambda r: r[2] * r[3])
+                spot = (rx + rw / 2, ry + rh / 2)
+            return FloorFix(spot[0], spot[1], spot[0], spot[1], 0.0, walking=False)
         weight = sum(f[3] for f in window)
         cx = sum(f[1] * f[3] for f in window) / weight
         cy = sum(f[2] * f[3] for f in window) / weight
         x, y = self._keep_in(cx, cy, room)
+        if rects:
+            self.spots[room or ""] = (x, y)
         last = window[-1]
         return FloorFix(x, y, last[1], last[2], weight / len(window), walking=False)
 
