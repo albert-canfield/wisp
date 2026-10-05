@@ -227,6 +227,7 @@ class RoomPresence:
         self.models.pop(floor, None)
         if floor in self.floors:
             self._layout(floor, self.hub.hive.current(self.hub.clock()))
+        self._async_entities_changed()  # a floor with a plan has position sensors
         self._async_notify()
 
     def placed(self, floor: str) -> set[str]:

@@ -5,7 +5,7 @@ from functools import partial
 from typing import Any
 
 from homeassistant.components.sensor import SensorDeviceClass, SensorEntity, SensorStateClass
-from homeassistant.const import PERCENTAGE, SIGNAL_STRENGTH_DECIBELS_MILLIWATT, EntityCategory
+from homeassistant.const import PERCENTAGE, SIGNAL_STRENGTH_DECIBELS_MILLIWATT, EntityCategory, UnitOfLength
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 
@@ -34,6 +34,10 @@ async def async_setup_entry(
         for floor in hub.presence.floors_in_use():
             for cls in (Room, Calibration):
                 out[room_unique_id(hub, floor_scope(floor), cls.key)] = partial(cls, hub, floor)
+        for floor in hub.presence.floors:  # positions mean something on a floor plan
+            if floor in hub.presence.plans.floors:
+                for cls in (PositionX, PositionY):
+                    out[room_unique_id(hub, floor_scope(floor), cls.key)] = partial(cls, hub, floor)
         return out
 
     entry.async_on_unload(async_follow_rooms(hub, "sensor", wanted, async_add_entities))
@@ -153,3 +157,42 @@ class Calibration(FloorSensor):
     def _urgent(self, value: tuple[str, dict[str, Any]]) -> bool:
         state, attrs = self._written[1]
         return value[0] != state or value[1]["recording"] != attrs["recording"]  # a run starts or ends
+
+
+class Position(FloorSensor):
+    """Where someone moves on the floor's plan, in metres from its top left corner; unknown while
+    nobody moves."""
+
+    axis: int
+    _attr_native_unit_of_measurement = UnitOfLength.METERS
+    _attr_state_class = SensorStateClass.MEASUREMENT
+    _attr_suggested_display_precision = 1
+
+    @property
+    def available(self) -> bool:
+        return self.hub.transport is not None
+
+    @property
+    def native_value(self) -> float | None:
+        return self.value()[0]
+
+    def value(self) -> tuple[float | None, dict[str, Any]]:
+        fix = self.presence.fixes.get(self.floor)
+        if fix is None:
+            return None, {"quality": None}
+        return round((fix.x, fix.y)[self.axis], 2), {"quality": round(fix.quality, 2)}
+
+    def _urgent(self, value: tuple[float | None, dict[str, Any]]) -> bool:
+        return (value[0] is None) != (self._written[1][0] is None)  # someone appears or is gone
+
+
+class PositionX(Position):
+    key = "x"
+    axis = 0
+    _attr_icon = "mdi:axis-x-arrow"
+
+
+class PositionY(Position):
+    key = "y"
+    axis = 1
+    _attr_icon = "mdi:axis-y-arrow"

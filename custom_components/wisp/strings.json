@@ -104,6 +104,18 @@
           "idle": "Idle",
           "recording": "Recording"
         }
+      },
+      "x": {
+        "name": "Position x"
+      },
+      "floor_x": {
+        "name": "{floor} position x"
+      },
+      "y": {
+        "name": "Position y"
+      },
+      "floor_y": {
+        "name": "{floor} position y"
       }
     }
   },

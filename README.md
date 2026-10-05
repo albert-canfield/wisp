@@ -53,7 +53,7 @@ Everything stays on your local network.
 | Each node (ESPHome) | Motion on the link to its access point, grid size, hive in sync, AP CSI rate, restart, safe mode, identify, firmware update | `binary_sensor.wisp_a8c77c_ap_motion` |
 | Wisp integration | Motion score and motion per link, signal and spread (disabled by default) | `sensor.hall_ap_58_04_4f_1d_12_f9_motion_score` |
 | Wisp integration, once calibrated | Room per floor, presence per room, calibration progress per floor | `sensor.wisp_floor_2_room`, `binary_sensor.wisp_office_presence` |
-| Planned | Position per floor | `sensor.wisp_floor_2_x` |
+| Wisp integration, on a floor with a plan | Position x and y of someone moving, in the plan's metres, with the fit's quality | `sensor.wisp_floor_2_position_x` |
 
 ## Try it
 

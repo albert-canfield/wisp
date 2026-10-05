@@ -66,6 +66,7 @@ async def test_someone_moving_lands_on_the_plan(
     (person,) = hub.map_snapshot()["people"]
     assert -2.5 <= person["x"] <= 2.5 and abs(person["y"]) < 1.5  # the hive's layout
     assert "floors" not in hub.map_snapshot()
+    assert hass.states.get("sensor.wisp_position_x") is None  # no plan, no position sensors
 
     client = await hass_ws_client(hass)
     view = await ok(client, type="wisp/floor/set_plan", url=URL, width=10, height=6)
@@ -88,6 +89,9 @@ async def test_someone_moving_lands_on_the_plan(
     snapshot = hub.map_snapshot()
     (person,) = snapshot["people"]
     assert 2.0 <= person["x"] <= 8.0 and abs(person["y"] - 4.0) < 1.5  # on the Hall to Office line of the plan
+    x, y = hass.states.get("sensor.wisp_position_x"), hass.states.get("sensor.wisp_position_y")
+    assert x.attributes["unit_of_measurement"] == "m" and 0 < x.attributes["quality"] <= 1
+    assert abs(float(x.state) - person["x"]) < 0.5 and abs(float(y.state) - person["y"]) < 0.5
     assert snapshot["floors"] == [{
         "floor": None,
         "name": "Wisp",
