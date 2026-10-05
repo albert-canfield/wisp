@@ -250,7 +250,7 @@ class RoomPresence:
             live[floor] = len(scores)
             signal = self.signal(floor, now)
             active = self._active(floor, moving, now)
-            ended.append(self.engine.step(floor, self.floor_areas(floor), scores, now, bool(moving), signal, active))
+            ended.append(self.engine.step(floor, self.floor_areas(floor), scores, now, bool(moving), signal, bool(active), active))
             # Room presence first: with rooms calibrated, the map shows someone only in a room with
             # presence (the one someone walks in now, else the latest to win), walking only while
             # room presence says so. The empty floor winning, or no room with presence, is nobody,
@@ -333,8 +333,8 @@ class RoomPresence:
             "error": round(fit.error, digits),
         }
 
-    def _active(self, floor: str, moving: set[LinkKey], now: float) -> bool:
-        """Activity this second: a link moving in both directions within ACTIVE_WITHIN s (someone
+    def _active(self, floor: str, moving: set[LinkKey], now: float) -> set[LinkKey]:
+        """The links active this second (empty: no activity): a link moving in both directions within ACTIVE_WITHIN s (someone
         working, shifting in a chair). A body changes a link both ways; a node's own noise shows
         on what it sends or receives. On the owner's empty floor any two links together came 10
         to 17 times in 3 minutes, a link and its reverse never, against 3 or more at a quiet desk.
@@ -342,7 +342,8 @@ class RoomPresence:
         Node firmware 0.1.6 and later confirms motion itself, from the scores in each other's
         beacons (ten a second, none lost on the way here), and flags the links it confirms (see
         docs/PROTOCOL.md). A floor whose live links all come from such nodes is active while one of
-        them is confirmed; with a node on older firmware (its reports say so) the check here runs too."""
+        them is confirmed; with a node on older firmware (its reports say so) the check here runs too.
+        The links are returned so a room is held only by activity on its own links."""
         seen = self._flags.setdefault(floor, deque())
         seen.append((now, frozenset(moving)))
         while seen and now - seen[0][0] > ACTIVE_WITHIN:
@@ -350,25 +351,28 @@ class RoomPresence:
         floor_nodes = self.floors[floor].nodes
         live = [link for _, link in self._live_links(floor, now)]
         if len(floor_nodes) >= MIN_FLOOR_NODES:  # fewer nodes: no third one to confirm, see below
-            if any(link.confirmed_at is not None and now - link.confirmed_at <= CONFIRMED_WITHIN for link in live):
-                return True
+            confirmed = {
+                (link.transmitter, link.receiver)
+                for link in live
+                if link.confirmed_at is not None and now - link.confirmed_at <= CONFIRMED_WITHIN
+            }
             nodes = self.hub.table.nodes
-            if live and all((node := nodes.get(link.receiver)) is not None and node.confirms for link in live):
-                return False
+            if confirmed or (live and all((node := nodes.get(link.receiver)) is not None and node.confirms for link in live)):
+                return confirmed
         links = set().union(*(m for _, m in seen))
+        active: set[LinkKey] = set()
         for a, b in moving:
             if a not in floor_nodes or (b, a) not in links:
                 continue
             # The pair moves both ways; a nearby third node must see motion on a link to a or b, as
             # the nodes' own check does (firmware core_confirm.h). With no third node: the pair alone
             others = floor_nodes - {a, b}
-            if not others:
-                return True
-            nearby = self._nearest(floor, a, b, others)
+            nearby = self._nearest(floor, a, b, others) if others else set()
             support = {c for key in links for c in key if c in nearby and {a, b} & set(key)}
-            if len(support) >= (CONFIRM_SUPPORT_FEW_NEED if len(nearby) <= CONFIRM_SUPPORT_FEW else CONFIRM_SUPPORT_MANY_NEED):
-                return True
-        return False
+            need = CONFIRM_SUPPORT_FEW_NEED if len(nearby) <= CONFIRM_SUPPORT_FEW else CONFIRM_SUPPORT_MANY_NEED
+            if not others or len(support) >= need:
+                active |= {(a, b), (b, a)}
+        return active
 
     def _nearest(self, floor: str, a: str, b: str, others: set[str]) -> set[str]:
         """The nodes that may confirm the pair a, b: all of them on small floors, else the

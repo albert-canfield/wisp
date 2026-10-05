@@ -158,19 +158,22 @@ async def test_calibrate_rooms_then_presence(hass: HomeAssistant, house: House, 
     assert hass.states.get(KITCHEN).attributes["device_class"] == "occupancy"
     await house.seconds(2, "office")
     assert state(hass, ROOM) == "Office"
-    assert (state(hass, OFFICE_PRESENCE), state(hass, KITCHEN)) == ("on", "on")  # two rooms, two people maybe
+    assert (state(hass, OFFICE_PRESENCE), state(hass, KITCHEN)) == ("on", "on")
 
-    # Nobody moving: the floor is empty at once, presence holds 60 s after a room last won
+    # Nobody moving: the floor is empty at once; the office holds 60 s after it last won, the
+    # kitchen 10 s once its walker was seen walking in the office (nobody changes room unseen)
     await house.seconds(1, None)
     room = hass.states.get(ROOM)
     assert room.state == "none" and room.attributes == {
         "confidence": None, "probabilities": {}, "icon": "mdi:floor-plan", "friendly_name": "Wisp Room"
     }
-    await house.seconds(57, None)
+    await house.seconds(8, None)
     assert (state(hass, KITCHEN), state(hass, OFFICE_PRESENCE)) == ("on", "on")
-    await house.seconds(1, None)
+    await house.seconds(2, None)
     assert (state(hass, KITCHEN), state(hass, OFFICE_PRESENCE)) == ("off", "on")
     assert hass.states.get(KITCHEN).attributes["confidence"] is None
+    await house.seconds(48, None)
+    assert state(hass, OFFICE_PRESENCE) == "on"
     await house.seconds(2, None)
     assert state(hass, OFFICE_PRESENCE) == "off"
 

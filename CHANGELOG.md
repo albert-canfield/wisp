@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.1.14 (unreleased)
+## 0.1.15 (unreleased)
 Versions count up with each round of changes until the first release.
 
 First working version: the grid, the hive and motion per link, with the Home Assistant integration and the map card.
@@ -70,6 +70,7 @@ First working version: the grid, the hive and motion per link, with the Home Ass
 - Each node checks the other's motion: activity that holds someone sitting is a link moving in both directions within 2 s, the node at each end agreeing. A body changes a link both ways; one node's own noise shows on what it sends or receives. On the owner's empty floor, any two links moving together came 10 to 17 times in 3 minutes, a link and its reverse never, against 3 or more at his quietest desk stretch. A walk counts as activity, a sitting presence ends as soon as 3 minutes pass without activity, and without a walk seen (after a restart) nobody is held: the still classification, which named a room then, lit the play room on an empty floor. Replayed: the guided test right in every step, nothing on the floor in 7.8 minutes with the owner two floors up.
 - Activity that holds someone sitting comes from the nodes when they confirm motion themselves (firmware 0.1.6 and later): a floor whose nodes all do is active while one of its links is confirmed; with a node on older firmware the check in Home Assistant runs too.
 - The check here follows the nodes' rule for floors with older firmware: a pair moving both ways counts only when a nearby third node sees motion on a link to either of them (any of the others on small floors, the 6 nearest from 9 nodes, 2 needed from 5 candidates). On the owner's recordings: confirmed seconds on the empty floor fell from 3 to 4 in 7 minutes to none in 11, sitting at the desk kept 48 to 118 per few minutes. A floor of 2 nodes, with no third, keeps the pair rule. Walking counts only in seconds the nodes confirm: all 54 seconds of the owner's real walks were.
+- A room is held by its own links: someone who walked into a room keeps its sitting presence only through activity on the links its walking calibration disturbs most, not through motion anywhere on the floor (the owner walking the hallway kept the office occupied). And seen walking in another room, the room left keeps its presence 10 s more instead of 60: the owner's walk through four rooms lit up to four at once; now each clears within 10 s of him walking on.
 - Position sensors: on a floor with a plan, x and y of someone moving in the plan's metres (from its top left corner), with the fit's quality as an attribute; unknown while nobody moves.
 
 ### Tools

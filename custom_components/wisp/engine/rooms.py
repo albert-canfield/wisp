@@ -48,7 +48,9 @@ SIGNAL_LINKS = 4  # links a still body weakens, about: the signal's mean log-lik
 # counts once per this many live links, so a few weakened links are not diluted on a large floor
 MOVE_SECONDS = 2  # s of walking (gaps up to WALK_GAP) before its seconds count: one stray second lit a room for HOLD
 WALK_GAP = 2.0  # s without a walking second that still continue a walk
-ACTIVE_HOLD = 180.0  # s: someone sitting keeps a room's presence while the floor shows activity this often
+ACTIVE_HOLD = 180.0  # s: someone sitting keeps a room's presence while its links show activity this often
+HANDOFF = 10.0  # s a room's walking presence holds once someone is seen walking in another room
+OWN_LINKS = 0.5  # a room's own links: those its walking class disturbs at least this share of its most disturbed
 STILL_FIT = 4.0  # mean squared z-score of the winner's signal at most: beyond, the signal is unlike
 # every class (a node moved, the empty floor changed) and the still classification cannot tell
 SEPARATION_SAMPLES = 60  # samples tried per class in the separation check, spread over its recording
@@ -308,9 +310,11 @@ class Rooms:
         self.cap = cap
         self.move_seconds = move_seconds
         self.active_hold = active_hold
-        self.active_at: dict[str, float] = {}  # by floor: when two links last moved together
+        self.active_at: dict[str, float] = {}  # by floor: when the nodes last confirmed motion
+        self.link_active: dict[str, dict[LinkKey, float]] = {}  # by floor: when each link last was active
         self.moves: dict[str, tuple[int, float]] = {}  # by floor: seconds of the current walk, and its last
         self.walked: dict[str, str] = {}  # by floor: the room someone last walked in, where they sit down
+        self.walked_at: dict[str, float] = {}  # by floor: when they last walked there
         self.areas: dict[str, deque[Vector]] = {}  # moving samples, by area
         self.still: dict[str, deque[Vector]] = {}  # still samples, by area
         self.empty: dict[str, deque[Vector]] = {}  # by floor
@@ -346,7 +350,9 @@ class Rooms:
             self.wins.clear()
             self.moves.clear()
             self.walked.clear()
+            self.walked_at.clear()
             self.active_at.clear()
+            self.link_active.clear()
             self._models.clear()
             return
         self.areas.pop(area, None)
@@ -371,7 +377,9 @@ class Rooms:
         self.still_decisions.pop(floor, None)
         self.moves.pop(floor, None)
         self.walked.pop(floor, None)
+        self.walked_at.pop(floor, None)
         self.active_at.pop(floor, None)
+        self.link_active.pop(floor, None)
         self._signal.pop(floor, None)
 
     def _record(self, run: Run, vector: Vector, motion: float, moving: bool | None) -> None:
@@ -452,6 +460,7 @@ class Rooms:
         moving: bool | None = None,
         signal: Mapping[LinkKey, float | None] | None = None,
         active: bool | None = None,
+        active_links: Iterable[LinkKey] = (),
     ) -> Run | None:
         """One second of one floor: record for its run, then decide (moving: see decide; signal: RSSI
         per live link this second; active: whether the nodes confirm motion this second, a link
@@ -461,6 +470,10 @@ class Rooms:
         areas = list(areas)
         if active:
             self.active_at[floor] = now
+        if active_links:
+            seen = self.link_active.setdefault(floor, {})
+            for key in active_links:
+                seen[key] = now
         vector = features(scores) | signal_features(self._average(floor, signal or {}))
         live = [score for score in scores.values() if score is not None]
         motion = max(live, default=0.0)
@@ -490,7 +503,12 @@ class Rooms:
             self.moves[floor] = (count, now)
             if count >= self.move_seconds:
                 self.wins[decision.room] = (now, decision.confidence, False)
+                left = self.walked.get(floor)
+                if left is not None and left != decision.room and (win := self.wins.get(left)) is not None:
+                    # Seen walking here: the room left keeps its presence HANDOFF s more, not HOLD
+                    self.wins[left] = (min(win[0], now - self.hold + HANDOFF), win[1], win[2])
                 self.walked[floor] = decision.room
+                self.walked_at[floor] = now
                 self.active_at[floor] = now  # walking in is activity: sitting down starts from it
         if not live:
             self.still_decisions[floor] = None
@@ -521,6 +539,7 @@ class Rooms:
             self.wins[run.area] = (now, 1.0, False)
         if run.area is not None:
             self.walked[floor] = run.area
+            self.walked_at[floor] = now
             self.active_at[floor] = now
 
     def _still_step(self, floor: str, areas: list[str], vector: Vector, motion: float, now: float) -> None:
@@ -534,7 +553,7 @@ class Rooms:
         (after a restart) nobody is held: the still classification lit empty rooms. With no
         activity for active_hold, the walk is forgotten and a sitting presence ends."""
         self.still_decisions[floor] = decide_still(vector, self.still_models(floor, areas), motion)
-        last = self.active_at.get(floor)
+        last = self._last_activity(floor, self.walked.get(floor))
         if last is None or now - last > self.active_hold:
             walked = self.walked.pop(floor, None)
             if walked is not None and (win := self.wins.get(walked)) is not None and win[2]:
@@ -543,6 +562,28 @@ class Rooms:
         walked = self.walked.get(floor)
         if walked in areas and self._model(STILL, walked) is not None:
             self.wins[walked] = (now, self.confidence, True)
+
+    def own_links(self, area: str) -> set[LinkKey]:
+        """The links someone walking in the area disturbs most, from its walking class: activity on
+        them is someone in it; activity elsewhere on the floor is not."""
+        model = self._model(MOVING, area)
+        if model is None:
+            return set()
+        means = {key: gauss[0] for key, gauss in model.links.items() if len(key) == 2}
+        top = max(means.values(), default=0.0)
+        own = {key for key, mean in means.items() if top > 0 and mean >= OWN_LINKS * top}
+        return own | {(b, a) for a, b in own}
+
+    def _last_activity(self, floor: str, area: str | None) -> float | None:
+        """When the area's own links last showed activity (the walk into it counts), else, without
+        per-link activity or a walking class, when the floor did."""
+        last = self.active_at.get(floor)
+        seen = self.link_active.get(floor)
+        own = self.own_links(area) if area is not None else set()
+        if not seen or not own:
+            return last
+        times = [seen[key] for key in own if key in seen] + [self.walked_at.get(floor, -math.inf)]
+        return max(times)
 
     def presence(self, area: str, now: float) -> float | None:
         """Confidence of the area's latest win while its presence holds, else None."""

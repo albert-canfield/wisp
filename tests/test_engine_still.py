@@ -309,3 +309,22 @@ def test_separation_finds_classes_that_look_alike():
     assert office.correct < 0.8 and study.correct < 0.8 and office.correct + office.confused == pytest.approx(1.0)
     assert den.confused_with == (EMPTY, None) and den.correct < 0.8
     assert by_class[(STILL, "kitchen")].correct >= 0.9 and by_class[(MOVING, "hall")].correct >= 0.9
+
+
+def test_only_a_rooms_own_links_hold_someone_sitting(engine: Rooms):
+    """Someone walked into the kitchen; activity on the office's links is someone else's or noise
+    there, not theirs: the kitchen ends ACTIVE_HOLD after its own links last moved."""
+    rooms, floor, now = fresh(engine), Floor(seed=55), 1000.0
+    kitchen, office = rooms.own_links("kitchen"), rooms.own_links("office")
+    assert kitchen and office and kitchen != office
+    elsewhere = sorted(office - kitchen)
+    for _ in range(3):
+        now += 1
+        step(rooms, floor, now, "kitchen", walking=True)
+    on = []
+    for _ in range(int(ACTIVE_HOLD) + 20):
+        now += 1
+        rooms.step(FLOOR, list(ROOMS), floor.scores("kitchen", strength=SITTING), now,
+                   signal=floor.signal("kitchen", False), active=True, active_links=elsewhere)
+        on.append(rooms.presence("kitchen", now) is not None)
+    assert all(on[: int(ACTIVE_HOLD) - 5]) and not on[-1]
