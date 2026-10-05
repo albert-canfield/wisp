@@ -136,14 +136,16 @@ async def test_calibrate_rooms_then_presence(hass: HomeAssistant, house: House, 
         "recording": None, "seconds_left": None, "samples": {"Kitchen": 25},
         "device_class": "enum", "options": ["idle", "recording"], "friendly_name": "Wisp Calibration", "icon": "mdi:walk",
     }
-    assert state(hass, KITCHEN) == "on"  # the only room: any motion is in it
+    assert state(hass, KITCHEN) == "on"  # the recording said someone walked in it
     assert sorted(store(hass_storage, house.entry)["data"]["areas"]) == ["kitchen"]
 
     await house.calibrate("office")
     await house.calibrate(None)  # the empty floor, nobody moving
     assert hass.states.get(CALIBRATION).attributes["samples"] == {"Kitchen": 25, "Office": 25, "empty": 25}
+    await house.seconds(61, None)  # the presence the recordings gave has ended
+    assert (state(hass, KITCHEN), state(hass, OFFICE_PRESENCE)) == ("off", "off")
 
-    await house.seconds(1, "kitchen")
+    await house.seconds(2, "kitchen")  # a room's presence takes two seconds of walking in a row
     room = hass.states.get(ROOM)
     assert room.state == "Kitchen" and room.attributes["confidence"] >= 0.9
     probabilities = room.attributes["probabilities"]
@@ -151,7 +153,7 @@ async def test_calibrate_rooms_then_presence(hass: HomeAssistant, house: House, 
     assert room.attributes["friendly_name"] == "Wisp Room"
     assert state(hass, KITCHEN) == "on" and hass.states.get(KITCHEN).attributes["confidence"] >= 0.9
     assert hass.states.get(KITCHEN).attributes["device_class"] == "occupancy"
-    await house.seconds(1, "office")
+    await house.seconds(2, "office")
     assert state(hass, ROOM) == "Office"
     assert (state(hass, OFFICE_PRESENCE), state(hass, KITCHEN)) == ("on", "on")  # two rooms, two people maybe
 
@@ -161,12 +163,12 @@ async def test_calibrate_rooms_then_presence(hass: HomeAssistant, house: House, 
     assert room.state == "none" and room.attributes == {
         "confidence": None, "probabilities": {}, "icon": "mdi:floor-plan", "friendly_name": "Wisp Room"
     }
-    await house.seconds(58, None)
+    await house.seconds(57, None)
     assert (state(hass, KITCHEN), state(hass, OFFICE_PRESENCE)) == ("on", "on")
     await house.seconds(1, None)
     assert (state(hass, KITCHEN), state(hass, OFFICE_PRESENCE)) == ("off", "on")
     assert hass.states.get(KITCHEN).attributes["confidence"] is None
-    await house.seconds(1, None)
+    await house.seconds(2, None)
     assert state(hass, OFFICE_PRESENCE) == "off"
 
     # Every room entity is on the hub's device, not a node's
@@ -266,6 +268,8 @@ async def test_restless_links_make_no_presence(hass: HomeAssistant, house: House
     await house.seconds(5, "restless")
     assert (state(hass, ROOM), state(hass, KITCHEN)) == ("none", "off")
     await house.seconds(1, "kitchen")
+    assert (state(hass, ROOM), state(hass, KITCHEN)) == ("Kitchen", "off")  # one second: not yet
+    await house.seconds(1, "kitchen")
     assert (state(hass, ROOM), state(hass, KITCHEN)) == ("Kitchen", "on")
 
 
@@ -284,8 +288,11 @@ async def test_no_walker_when_the_empty_floor_wins(hass: HomeAssistant, house: H
     await house.hass.services.async_call(DOMAIN, "calibrate_empty", {"duration": 25}, blocking=True)
     await house.seconds(25, "upstairs")  # the empty floor learns what the floor above does to it
     hub = house.entry.runtime_data
-    await house.seconds(25, "upstairs")  # the last fixes, from the recording, fade after 20 s
-    assert state(hass, ROOM) == "none" and "people" not in hub.map_snapshot()
+    await house.seconds(5, "upstairs")  # the Office's presence from its recording still holds:
+    (person,) = hub.map_snapshot()["people"]  # someone shown there, still, as its presence sensor says
+    assert person["walking"] is False and state(hass, OFFICE_PRESENCE) == "on"
+    await house.seconds(60, "upstairs")  # once it ends, nobody: the motion is the floor above's
+    assert state(hass, ROOM) == "none" and state(hass, OFFICE_PRESENCE) == "off" and "people" not in hub.map_snapshot()
     await house.seconds(5, "kitchen")  # someone walking in a room still shows
     assert state(hass, ROOM) == "Kitchen" and hub.map_snapshot()["people"]
 
@@ -305,6 +312,7 @@ async def test_room_writes(hass: HomeAssistant, house: House) -> None:
     assert writes(KITCHEN) == 1
     await house.seconds(1, "office", step=0.3)
     assert state(hass, ROOM) == "Office" and writes(ROOM) == 2  # another room is written at once
+    await house.seconds(1, "office", step=0.3)  # its presence, from two seconds in a row
     assert state(hass, OFFICE_PRESENCE) == "on" and writes(OFFICE_PRESENCE) == 1
 
 
@@ -329,7 +337,7 @@ async def test_calibration_survives_a_restart(hass: HomeAssistant, house: House,
     assert hass.states.get(CALIBRATION).attributes["samples"] == {"Kitchen": 25, "Office": 25}
     await house.seconds(1, None)
     assert state(hass, KITCHEN) == "off" and state(hass, ROOM) == "none"
-    await house.seconds(1, "office")
+    await house.seconds(2, "office")
     assert state(hass, ROOM) == "Office" and state(hass, OFFICE_PRESENCE) == "on"
 
     # Deleting the hub deletes its calibration

@@ -19,6 +19,12 @@ reports motion within corroborate seconds: on real recordings a long link throug
 motion alone 22 to 29% of the time, against 2 to 6% for the others, and each lone flag became
 someone along it on the map.
 
+Room presence comes first when it has calibration (presence.py): it says whether anyone is on
+the floor and in which room, and the fit is searched for inside that room only. Few links cross
+several rooms each, so the best fit on the whole floor often lay in the room next door while
+room presence named the right one. Footprints follow only while room presence says someone walks
+(walking=False draws them still), and with no room named the map shows nobody.
+
 Someone sitting and working makes short, scattered disturbances on the same few links, each one
 a fit somewhere along them: drawn as they come, that is someone darting about. So fits are kept
 for a while and read together. Walking: fits in most of the last 6 s, and the centre of their
@@ -142,28 +148,30 @@ class FloorModel:
         now: float,
         moving: Collection[LinkKey] | None = None,
         room: str | None = None,
+        walking: bool = True,
     ) -> FloorFix | None:
         """scores: motion score per link (1 = quiet, None = unknown). moving: the links reporting
-        motion (None: no such gate). room: the area room presence is sure someone moves in.
-        Returns the fix, or None when nobody is moving, the fit is too unsure, or the layout
-        cannot place anyone yet."""
+        motion (None: no such gate). room: the area room presence puts someone in: the fit is
+        searched for inside it when it is drawn. walking: whether room presence lets them walk;
+        False shows them still. Returns the fix, or None when nobody is moving, the fit is too
+        unsure, or the layout cannot place anyone yet."""
         usable = sorted(k for k, s in scores.items() if s is not None and k[0] in self.positions and k[1] in self.positions)
         key = (tuple(usable), tuple(sorted((m, round(p[0], 1), round(p[1], 1)) for m, p in self.positions.items())))
         if key != self._key:
             self._key = key
             self._locator = Locator(self.positions, usable, width=self.width) if len(usable) >= 2 else None
         if self._locator is None:
-            return self._read(None, now, room)
+            return self._read(None, now, room, walking)
         if moving is not None:
             moving = self._corroborated(moving, now)
             if not any(k in moving for k in usable):
-                return self._read(None, now, room)
+                return self._read(None, now, room, walking)
         values = {k: math.log(max(scores[k], 1.0)) for k in usable}
-        spot = self._locator.locate(values, self.min_disturbance)
+        spot = self._locator.locate(values, self.min_disturbance, self.rooms.get(room or "") or None)
         raw: tuple[float, float, float] | None = None
         if spot is not None and spot.contrast >= self.min_quality:
             raw = (*self._keep_in(spot.x, spot.y, room), spot.contrast)
-        return self._read(raw, now, room)
+        return self._read(raw, now, room, walking)
 
     def _corroborated(self, moving: Collection[LinkKey], now: float) -> set[LinkKey]:
         """The links reporting motion that another link backs up within corroborate seconds."""
@@ -181,9 +189,12 @@ class FloorModel:
         house = [r for rects in self.rooms.values() for r in rects]
         return inside(self.rooms.get(room or "") or house, x, y) if house else (x, y)
 
-    def _read(self, raw: tuple[float, float, float] | None, now: float, room: str | None = None) -> FloorFix | None:
-        """This second's fit (or none) read with the recent ones: walking, still, or nobody. The
-        position shown stays in the room room presence is sure of, as each fit does."""
+    def _read(
+        self, raw: tuple[float, float, float] | None, now: float, room: str | None = None, walking: bool = True
+    ) -> FloorFix | None:
+        """This second's fit (or none) read with the recent ones: walking (when room presence
+        lets them walk), still, or nobody. The position shown stays in the room room presence
+        names, as each fit does, and a still spot is the centre of the fits in that room."""
         if raw is not None:
             self.fits.append((now, *raw))
             self.track.update(raw[0], raw[1], now, raw[2])
@@ -200,11 +211,13 @@ class FloorModel:
             self.walking = True
         elif len(recent) < self.walk_min - 1 or travel < self.walk_travel / 2:
             self.walking = False
-        if self.walking and self.track.state is not None and (raw is None or self.streak >= self.min_streak):
+        if walking and self.walking and self.track.state is not None and (raw is None or self.streak >= self.min_streak):
             x, y = self._keep_in(self.track.state[0], self.track.state[1], room)
             last = self.fits[-1]
             return FloorFix(x, y, last[1], last[2], last[3])
         window = [f for f in self.fits if now - f[0] < self.still_window]
+        if rects := self.rooms.get(room or ""):  # fits from before someone was in this room do not count
+            window = [f for f in window if inside(rects, f[1], f[2]) == (f[1], f[2])]
         if len(window) < self.still_min:
             return None
         weight = sum(f[3] for f in window)

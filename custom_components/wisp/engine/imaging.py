@@ -27,6 +27,7 @@ from dataclasses import dataclass, field
 import math
 
 Point = tuple[float, float]
+Rect = tuple[float, float, float, float]  # x, y, width, height
 LinkKey = tuple[Hashable, Hashable]  # (transmitter, receiver)
 
 
@@ -159,6 +160,10 @@ class Imager:
         return Location(sx / sw, sy / sw, img[best], contrast)
 
 
+def _in_rects(rects: Sequence[Rect], x: float, y: float) -> bool:
+    return any(rx <= x <= rx + rw and ry <= y <= ry + rh for rx, ry, rw, rh in rects)
+
+
 def line_distance(p: Point, a: Point, b: Point) -> float:
     """Distance from p to the segment a-b."""
     dx, dy = b[0] - a[0], b[1] - a[1]
@@ -212,10 +217,13 @@ class Locator:
                 self._norm.append(sum(v * v for v in row))
                 self._near.append(max(row, default=0.0) >= reach)
 
-    def locate(self, values: Mapping[LinkKey, float], min_disturbance: float = 0.3) -> Location | None:
+    def locate(
+        self, values: Mapping[LinkKey, float], min_disturbance: float = 0.3, within: Sequence[Rect] | None = None
+    ) -> Location | None:
         """values: disturbance per link (for example log(score)); missing links count as quiet.
-        Location.strength is the fitted scale, Location.contrast the share of the observed
-        pattern the fit explains (0 to 1)."""
+        within: rectangles (x, y, width, height) the spot must lie in, for example the room room
+        presence puts someone in. Location.strength is the fitted scale, Location.contrast the
+        share of the observed pattern the fit explains (0 to 1)."""
         y = [max(0.0, values.get(k, 0.0)) for k in self.links]
         total = sum(y)
         if total < min_disturbance:
@@ -226,9 +234,12 @@ class Locator:
         # larger scale fits (with a free scale both fit the pattern equally well).
         s0, mu = max(y), SCALE_PRIOR
         best = None
+        nx = len(self.xs)
         for i, row in enumerate(self._pred):
             norm = self._norm[i]
             if norm < 1e-9 or not self._near[i]:  # far from every link: only a huge scale would fit
+                continue
+            if within is not None and not _in_rects(within, self.xs[i % nx], self.ys[i // nx]):
                 continue
             dot = sum(a * b for a, b in zip(row, y))
             if dot <= 0:

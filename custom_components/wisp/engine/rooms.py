@@ -45,6 +45,7 @@ SIGNAL_VAR_FLOOR = 1.0  # dB squared, per link: one link's noise does not domina
 SIGNAL_LINKS = 4  # links a still body weakens, about: the signal's mean log-likelihood per link
 # counts once per this many live links, so a few weakened links are not diluted on a large floor
 STILL_SECONDS = 10  # s in a row a room must win the still classification before it holds presence
+MOVE_SECONDS = 2  # s in a row a room must win the moving classification: one stray second lit a room for HOLD
 STILL_FIT = 4.0  # mean squared z-score of the winner's signal at most: beyond, the signal is unlike
 # every class (a node moved, the empty floor changed) and the still classification cannot tell
 SEPARATION_SAMPLES = 60  # samples tried per class in the separation check, spread over its recording
@@ -295,6 +296,7 @@ class Rooms:
         min_samples: int = MIN_SAMPLES,
         cap: int = SAMPLE_CAP,
         still_seconds: int = STILL_SECONDS,
+        move_seconds: int = MOVE_SECONDS,
     ) -> None:
         self.hold = hold
         self.quiet = quiet
@@ -302,6 +304,8 @@ class Rooms:
         self.min_samples = min_samples
         self.cap = cap
         self.still_seconds = still_seconds
+        self.move_seconds = move_seconds
+        self.moves: dict[str, tuple[str, int]] = {}  # by floor: the room winning moving, seconds in a row
         self.areas: dict[str, deque[Vector]] = {}  # moving samples, by area
         self.still: dict[str, deque[Vector]] = {}  # still samples, by area
         self.empty: dict[str, deque[Vector]] = {}  # by floor
@@ -337,6 +341,7 @@ class Rooms:
             self.runs.clear()
             self.wins.clear()
             self.streaks.clear()
+            self.moves.clear()
             self._models.clear()
             return
         self.areas.pop(area, None)
@@ -360,14 +365,15 @@ class Rooms:
         self.decisions.pop(floor, None)
         self.still_decisions.pop(floor, None)
         self.streaks.pop(floor, None)
+        self.moves.pop(floor, None)
         self._signal.pop(floor, None)
 
     def _record(self, run: Run, vector: Vector, motion: float, moving: bool | None) -> None:
         """moving: as in decide, so a class learns from the seconds it will be asked about."""
         moves = _moving(motion, self.quiet, moving)
-        if not vector or (run.area is not None and moves == run.still):
-            run.skipped += 1  # a room's moving class skips still moments, its still class motion
-            return
+        if not vector or (run.area is not None and not run.still and not moves):
+            run.skipped += 1  # a room's moving class skips still moments; still keeps small motion,
+            return  # since sitting and working (typing, shifting in a chair) is never motionless
         kind = EMPTY if run.area is None else STILL if run.still else MOVING
         key = run.floor if run.area is None else run.area
         classes = self._samples(kind)
@@ -459,14 +465,23 @@ class Rooms:
             return ended
         decision = decide(scores, self.models(floor, areas), self.quiet, moving)
         self.decisions[floor] = decision
-        if decision and decision.room is not None and decision.confidence >= self.confidence:
-            self.wins[decision.room] = (now, decision.confidence, False)
+        walks = decision is not None and decision.room is not None and decision.confidence >= self.confidence
+        if walks:
+            room, count = self.moves.get(floor, (decision.room, 0))
+            count = count + 1 if room == decision.room else 1
+            self.moves[floor] = (decision.room, count)
+            if count >= self.move_seconds:
+                self.wins[decision.room] = (now, decision.confidence, False)
+        else:
+            self.moves.pop(floor, None)
         if not live:
             self.still_decisions[floor] = None
             self.streaks.pop(floor, None)
-        elif _moving(motion, self.quiet, moving):
-            self.still_decisions[floor] = None  # not asked: a streak waits through motion
+        elif walks:
+            self.still_decisions[floor] = None  # not asked: a streak waits through walking
         else:
+            # Nobody moving, or motion no room's walking explains (the empty floor wins, or no room
+            # clearly): someone sitting and working, shifting in a chair, is asked for still
             self._still_step(floor, areas, vector, motion, now)
         return ended
 
@@ -475,6 +490,7 @@ class Rooms:
         room, or off the floor for the empty floor. Presence and the map follow that instead of
         classifying with the classes being recorded, which lit up other rooms meanwhile."""
         self.streaks.pop(floor, None)
+        self.moves.pop(floor, None)
         if run.area is None:  # the empty floor: nobody, and the map places nobody walking
             self.decisions[floor] = Decision(None, None, {None: 1.0}, motion, links)
             self.still_decisions[floor] = None

@@ -239,13 +239,17 @@ class RoomPresence:
             live[floor] = len(scores)
             signal = self.signal(floor, now)
             ended.append(self.engine.step(floor, self.floor_areas(floor), scores, now, bool(moving), signal))
-            decision = self.engine.decisions.get(floor)
-            if decision is not None and decision.room is None and decision.probabilities:
-                # Room presence weighed the motion and the empty floor won (people upstairs, someone
-                # shifting in a chair): nobody walks here, whatever the links' geometry would say
+            # Room presence first: with rooms calibrated, the map shows someone only in a room with
+            # presence (the one someone walks in now, else the latest to win), walking only while
+            # room presence says so. The empty floor winning, or no room with presence, is nobody,
+            # whatever the links' geometry says (people upstairs, someone shifting in a chair).
+            sure = self.sure_room(floor)
+            room = sure or self.presence_room(floor, now)
+            calibrated = any(self.engine.areas.get(area) for area in self.floor_areas(floor))
+            if calibrated and room is None:
                 moving = set()
             model = self._layout(floor, hive)
-            if (fix := model.update(scores, now, moving, self.sure_room(floor))) is not None:
+            if (fix := model.update(scores, now, moving, room, walking=sure is not None or not calibrated)) is not None:
                 self.fixes[floor] = fix
             else:
                 self.fixes.pop(floor, None)
@@ -316,6 +320,12 @@ class RoomPresence:
             "mirror_guessed": fit.guessed,
             "error": round(fit.error, digits),
         }
+
+    def presence_room(self, floor: str, now: float) -> str | None:
+        """The floor's room whose presence won last, while it holds: where someone is when room
+        presence is not sure of anyone moving this second."""
+        held = [(win[0], area) for area in self.floor_areas(floor) if (win := self.engine.wins.get(area)) and self.engine.presence(area, now) is not None]
+        return max(held)[1] if held else None
 
     def sure_room(self, floor: str) -> str | None:
         """The area room presence is sure someone moves in on the floor, to keep the map in it."""

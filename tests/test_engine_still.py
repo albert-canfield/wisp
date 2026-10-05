@@ -184,8 +184,8 @@ def test_still_calibration_records_still_seconds():
     assert engine.start(FLOOR, "kitchen", 0.0, 6, still=True) is None
     assert engine.runs[FLOOR].still
     for t in range(1, 7):
-        ended = step(engine, floor, float(t), "kitchen", walking=t in (2, 5))  # fidgeting: those seconds go
-    assert (ended.recorded, ended.skipped, ended.still) == (4, 2, True)
+        ended = step(engine, floor, float(t), "kitchen", walking=t in (2, 5))  # fidgeting: sitting, kept
+    assert (ended.recorded, ended.skipped, ended.still) == (6, 0, True)
     assert list(engine.still) == ["kitchen"] and engine.areas == {}
     assert all(len(vector) == 18 for vector in engine.still["kitchen"])  # 9 log scores, 9 signals
     engine.start(FLOOR, "kitchen", 10.0, 5, still=True)
@@ -219,6 +219,8 @@ def test_samples_from_before_signal_still_load_and_classify():
     engine.load(data)
     assert sorted(engine.areas) == sorted(ROOMS) and engine.still == {}
     floor, now = Floor(seed=101), 1000.0
+    step(engine, floor, now, "office", walking=True)
+    now += 1
     step(engine, floor, now, "office", walking=True)
     assert engine.decisions[FLOOR].room == "office" and engine.presence("office", now) >= CONFIDENCE
     assert engine.still_models(FLOOR, ROOMS) == {}  # no signal in the empty class: no reference yet

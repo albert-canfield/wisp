@@ -312,6 +312,8 @@ def test_presence_holds_after_the_last_win(engine: Rooms):
     rooms = Rooms()
     rooms.areas, rooms.empty = engine.areas, engine.empty
     assert rooms.presence("kitchen", 0.0) is None
+    rooms.step(FLOOR, ROOMS, floor.scores("kitchen"), 99.0)
+    assert rooms.decisions[FLOOR].room == "kitchen" and rooms.presence("kitchen", 99.0) is None  # one second: not yet
     rooms.step(FLOOR, ROOMS, floor.scores("kitchen"), 100.0)
     confidence = rooms.presence("kitchen", 100.0)
     assert confidence >= CONFIDENCE and rooms.decisions[FLOOR].room == "kitchen"
@@ -321,6 +323,7 @@ def test_presence_holds_after_the_last_win(engine: Rooms):
     assert rooms.presence("kitchen", 100.0 + HOLD) == confidence
     assert rooms.presence("kitchen", 100.0 + HOLD + 0.5) is None
     # Another room winning does not end it: two people can be in two rooms
+    rooms.step(FLOOR, ROOMS, floor.scores("office"), 109.0)
     rooms.step(FLOOR, ROOMS, floor.scores("office"), 110.0)
     assert rooms.presence("kitchen", 110.0) and rooms.presence("office", 110.0)
     # A win below the confidence threshold does not count
