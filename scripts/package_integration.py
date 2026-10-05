@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
-"""Zip the integration for a manual install, stamped with the commit it was built from.
+"""Zip the integration for a manual install.
 
-    python scripts/package_integration.py        -> dist/wisp-<version>+<commit>.zip
+    python scripts/package_integration.py            -> dist/wisp-<version>.zip
+    python scripts/package_integration.py --stamp    -> dist/wisp-<version>+<commit>.zip
 
-The zip holds custom_components/wisp/ as committed (git archive, so no caches or local edits);
-its manifest version becomes <version>+<commit>, which Home Assistant shows on the integration
-page, so two builds of the same version can be told apart. Releases use the plain version.
+The zip holds custom_components/wisp/ as committed (git archive, so no caches or local edits).
+Each round of changes handed out gets its own version (bump it in manifest.json, const.py and
+firmware/common/base.yaml). --stamp adds the commit to the manifest version, which Home
+Assistant shows, for builds in between.
 """
 from __future__ import annotations
 
@@ -31,7 +33,7 @@ def main() -> int:
     commit = git("rev-parse", "--short=7", "HEAD").decode().strip()
     archive = zipfile.ZipFile(io.BytesIO(git("archive", "--format=zip", "HEAD", "custom_components/wisp")))
     manifest = json.loads(archive.read(MANIFEST))
-    version = f"{manifest['version']}+{commit}"
+    version = f"{manifest['version']}+{commit}" if "--stamp" in sys.argv[1:] else manifest["version"]
     manifest["version"] = version
     out = ROOT / "dist" / f"wisp-{version}.zip"
     out.parent.mkdir(exist_ok=True)

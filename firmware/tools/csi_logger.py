@@ -44,6 +44,8 @@ def main() -> int:
     ap.add_argument("--dir", default="data")
     ap.add_argument("--port", type=int, default=47010)
     ap.add_argument("--raw-only", action="store_true", help="raw CSI only, no link or hive reports")
+    ap.add_argument("--min-free-gb", type=float, default=MIN_FREE_BYTES / 1024**3,
+                    help="stop writing packets below this much free disk (summaries go on)")
     args = ap.parse_args()
     subscribe = SUBSCRIBE if args.raw_only else SUBSCRIBE + bytes((STREAMS_ALL,))
     os.makedirs(args.dir, exist_ok=True)
@@ -73,7 +75,7 @@ def main() -> int:
         except (socket.timeout, OSError):
             data = None
         if now - last_disk >= 60:
-            raw_ok = shutil.disk_usage(args.dir).free > MIN_FREE_BYTES
+            raw_ok = shutil.disk_usage(args.dir).free > args.min_free_gb * 1024**3
             last_disk = now
         if data and len(data) >= HEADER.size and ip in addrs:
             name = addrs[ip].split(".")[0]
