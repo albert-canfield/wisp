@@ -359,6 +359,8 @@ class WispHub:
         }
         if (rooms := self.presence.snapshot()) is not None:
             snapshot["rooms"] = rooms
+        if people := self.presence.people():
+            snapshot["people"] = people
         return snapshot
 
     # Diagnostics

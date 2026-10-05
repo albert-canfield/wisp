@@ -73,7 +73,12 @@ async def test_snapshot_then_changes_at_most_once_a_second(hass: HomeAssistant, 
     udp.receive(encode_report(1, NODE_A, node_links(walking=True)))
     udp.receive(encode_hive_report(1, NODE_A, 0xBEEF, LAYOUT, ROWS))
     await fire(hass, 1)
-    assert await next_map(client, sub) == {
+    snapshot = await next_map(client, sub)
+    # Someone on the busy Office to Hall line, which runs from (-1, 0.5) to (1, -0.5)
+    (person,) = snapshot.pop("people")
+    assert (person["floor"], person["name"]) == (None, "Wisp")
+    assert -1.0 <= person["x"] <= 1.0 and abs(person["y"] + 0.5 * person["x"]) < 0.3
+    assert snapshot == {
         "nodes": [
             {"mac": NODE_A, "name": "Hall", "online": True, "x": -1.0, "y": 0.5},
             {"mac": NODE_B, "name": "Office", "online": False, "x": 1.0, "y": -0.5},

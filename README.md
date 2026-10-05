@@ -74,7 +74,7 @@ rotate: 0       # optional, degrees clockwise
 flip: false     # optional, mirror left to right
 ```
 
-Nodes sit where the grid's own layout puts them, access points beside the nodes that hear them best, and footprints walk along a link while it sees motion. The layout is relative, so turn and mirror it to match your home until floor plans arrive.
+Nodes sit where the grid's own layout puts them, access points beside the nodes that hear them best, and footprints walk along a link while it sees motion. Where someone moves, a pair of footprints stands at the best guess of the spot (it needs three or more nodes to be meaningful). The layout is relative, so turn and mirror it to match your home until floor plans arrive.
 
 ## Room presence (first version)
 

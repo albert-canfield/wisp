@@ -82,6 +82,8 @@ function place(map) {
       y: anchor.y + r * (dx * Math.sin(a) + dy * Math.cos(a)),
     });
   }
+  // Someone moving, per floor, on the same layout
+  for (const p of map.people ?? []) pos.set(`person:${p.floor ?? ""}`, { x: p.x, y: p.y });
   return pos;
 }
 
@@ -188,6 +190,11 @@ function draw(map, config) {
     const placed = n.x != null && n.y != null;
     marks += `<g class="node${n.online ? "" : " off"}${placed ? "" : " loose"}" transform="translate(${n1(p.x)} ${n1(p.y)})"><title>${esc(n.name)}: ${n.online ? "online" : "offline"}${placed ? "" : ", not placed yet"}</title><circle class="ring" r="6.5"/><circle class="dot" r="2.2"/></g>`;
     labels += label(p, c, n.name, `node-label${n.online ? "" : " off"}`, 10, 12);
+  }
+  for (const person of map.people ?? []) {
+    const p = pts.get(`person:${person.floor ?? ""}`);
+    const sure = clamp(person.quality ?? 0, 0, 1);
+    marks += `<g class="person" transform="translate(${n1(p.x)} ${n1(p.y)})" style="opacity:${n1(0.5 + 0.5 * sure)}"><title>Someone moving here, ${Math.round(sure * 100)}% sure</title><circle class="halo" r="15"/><g transform="translate(-5 2) rotate(-10) scale(.55)"><path d="${SOLE}"/><path d="${HEEL}"/></g><g transform="translate(5 -2) rotate(8) scale(.55)"><path d="${SOLE}"/><path d="${HEEL}"/></g></g>`;
   }
   const loose = map.nodes.filter((n) => n.x == null || n.y == null).length;
   const summary = `${plural(map.nodes.length, "node", "nodes")}${loose ? ` (${loose} not placed yet)` : ""}, ${plural(map.access_points.length, "access point", "access points")}`;
@@ -359,6 +366,8 @@ const STYLE = `
   .dot { fill: var(--wisp-ink); }
   .waves { fill: none; stroke: var(--wisp-ink); stroke-width: 1.5; stroke-linecap: round; opacity: .75; }
   .ap .ring { stroke-width: 1.8; }
+  .person path { fill: var(--wisp-hot); }
+  .person .halo { fill: var(--wisp-hot); opacity: .12; }
   .node.off { opacity: .5; }
   .node.off .ring, .node.loose .ring { stroke-dasharray: 2.5 2; }
   text { font-family: var(--wisp-serif); fill: var(--wisp-ink); text-anchor: middle;

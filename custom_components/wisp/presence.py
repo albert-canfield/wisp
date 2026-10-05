@@ -1,5 +1,6 @@
 """Room presence in Home Assistant: floors from the area and floor registries, calibration runs kept
-in storage, and a decision per floor every second (the maths is in engine/rooms.py).
+in storage, and a decision per floor every second (the maths is in engine/rooms.py). The same tick
+also places one moving person per floor on the hive's layout (engine/floor.py), for the map.
 
 Rooms are areas. A node's floor is the floor of its area; nodes and areas without a floor share one
 floor named after the hub. A link belongs to the floor of the node that receives it.
@@ -28,6 +29,7 @@ from .const import (
     STORE_VERSION,
 )
 from .engine import Decision, LinkKey, Rooms, Run
+from .engine.floor import FloorFix, FloorModel
 from .engine.rooms import HOLD
 
 if TYPE_CHECKING:
@@ -64,6 +66,8 @@ class RoomPresence:
         self.store: Store[dict[str, Any]] = Store(self.hass, STORE_VERSION, store_key(self.entry.entry_id))
         self.floors: dict[str, Floor] = {}
         self.live: dict[str, int] = {}  # live links per floor, at the latest second
+        self.models: dict[str, FloorModel] = {}  # position per floor, on the hive's layout
+        self.fixes: dict[str, FloorFix] = {}
         self._listeners: list[Callable[[], None]] = []
         self._entity_listeners: list[Callable[[], None]] = []
         self._unsubs: list[CALLBACK_TYPE] = []
@@ -175,10 +179,20 @@ class RoomPresence:
         now = self.hub.clock()
         ended: list[Run | None] = [self.engine.stop(floor) for floor in list(self.engine.runs) if floor not in self.floors]
         live = {}
+        hive = self.hub.hive.current(now)
         for floor in self.floors:
             scores = self.scores(floor, now)
             live[floor] = len(scores)
             ended.append(self.engine.step(floor, self.floor_areas(floor), scores, now))
+            model = self.models.setdefault(floor, FloorModel())
+            model.set_layout(hive)
+            if (fix := model.update(scores, now)) is not None:
+                self.fixes[floor] = fix
+            else:
+                self.fixes.pop(floor, None)
+        for floor in [f for f in self.models if f not in self.floors]:
+            del self.models[floor]
+            self.fixes.pop(floor, None)
         self.live = live
         if any(ended):
             if any(run and run.recorded for run in ended):
@@ -300,6 +314,20 @@ class RoomPresence:
             })
         return out
 
+    def people(self) -> list[dict[str, Any]]:
+        """Where someone moves, per floor, in the layout's metres; empty when nobody moves."""
+        return [
+            {
+                "floor": key or None,
+                "name": self.floors[key].name,
+                "x": round(fix.x, 2),
+                "y": round(fix.y, 2),
+                "quality": round(fix.quality, 2),
+            }
+            for key, fix in self.fixes.items()
+            if key in self.floors
+        ]
+
     def diagnostics(self) -> dict[str, Any]:
         engine = self.engine
         now = self.hub.clock()
@@ -336,7 +364,18 @@ class RoomPresence:
                 } if run else None,
                 "decision": decision(engine.decisions.get(key)),
             })
+        positions = {
+            key or "": {
+                "placed": {m: [round(p[0], 2), round(p[1], 2)] for m, p in model.positions.items()},
+                "fix": None if (fix := self.fixes.get(key)) is None else {
+                    "x": round(fix.x, 2), "y": round(fix.y, 2), "raw": [round(fix.raw_x, 2), round(fix.raw_y, 2)],
+                    "quality": round(fix.quality, 2),
+                },
+            }
+            for key, model in self.models.items()
+        }
         return {
+            "positions": positions,
             "settings": {
                 "quiet": engine.quiet,
                 "confidence": engine.confidence,
