@@ -1,13 +1,15 @@
 #pragma once
 // wisp-core: every link this node receives on (from access points and other nodes), each with
-// its own motion score, and the link report that carries them to Home Assistant
-// (type 2 in docs/PROTOCOL.md), with the node pairs the hive confirms (core_confirm.h).
+// its own motion score and threshold (QuietThreshold), optionally breathing (core_breathing.h),
+// and the link report that carries them to Home Assistant (type 2 in docs/PROTOCOL.md), with the
+// node pairs the hive confirms (core_confirm.h).
 
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
 
+#include "core_breathing.h"
 #include "core_csi_record.h"
 #include "core_grid.h"
 #include "core_link_motion.h"
@@ -22,6 +24,8 @@ constexpr size_t LINK_REPORT_ENTRY_BYTES = 14;
 constexpr uint32_t LINK_EXPIRE_MS = 10 * 60 * 1000;  // a link silent this long frees its entry
 constexpr uint8_t LINK_FLAG_MOTION = 0x01;
 constexpr uint8_t LINK_FLAG_CONFIRMED = 0x02;  // the hive confirms its motion
+constexpr uint8_t LINK_FLAG_BREATHING = 0x04;  // breathing seen on it (core_breathing.h)
+constexpr uint32_t QUIET_HOLD_MS = 10000;  // after motion the hive confirmed, seconds this long are not quiet
 constexpr uint8_t REPORT_FLAG_CONFIRMS = 0x01;  // links carry LINK_FLAG_CONFIRMED, confirmed pairs follow
 constexpr uint8_t REPORT_FLAG_PAIRS_TRUNCATED = 0x02;
 constexpr int MAX_REPORT_PAIRS = 16;
@@ -44,21 +48,51 @@ struct Link {
   LinkKind kind;
   LinkMotion motion{};
   MotionDetector detector{};
+  QuietThreshold quiet{};
   float score{NAN};
+  float threshold{DEFAULT_THRESHOLD};  // its own: the user's, or higher for a noisy link
   bool active{false};
   bool confirmed{false};  // set after each tick_second() by core_confirm.h
+  bool breathing{false};
+  float breath_rate{NAN};  // a minute, while breathing
   uint32_t last_frame_ms{0};
   int32_t rssi_sum{0};  // since the last report
   uint16_t frames{0};   // since the last report
   float rssi_avg{0.0f};  // slow average, for the hive row
 };
 
+// The score a beacon carries for a link, x 10: normalised so the link's own threshold reads
+// DEFAULT_THRESHOLD, measured from a quiet 1.0 as the hysteresis is, so a node judging it at
+// DEFAULT_THRESHOLD (on at it, off halfway back to 1) follows the receiver's own flag exactly.
+// Equal to the score itself while the link uses the default threshold.
+inline uint8_t beacon_score10(const Link &l) {
+  if (std::isnan(l.score))
+    return SCORE_UNKNOWN;
+  const float span = l.threshold > 1.0f ? l.threshold - 1.0f : DEFAULT_THRESHOLD - 1.0f;
+  const float n = 1.0f + (l.score - 1.0f) * (DEFAULT_THRESHOLD - 1.0f) / span;
+  return static_cast<uint8_t>(std::fmin(254.0f, std::fmax(0.0f, n * 10.0f)));
+}
+
 class LinkTable {
  public:
+  // The user's Motion threshold: the least any link uses.
   void set_threshold(float t) {
     this->threshold_ = t;
-    for (int i = 0; i < this->count_; i++)
-      this->links_[i].detector.set_threshold(t);
+    for (int i = 0; i < this->count_; i++) {
+      Link &l = this->links_[i];
+      l.threshold = l.quiet.threshold(t);
+      l.detector.set_threshold(l.threshold);
+    }
+  }
+  float threshold() const { return this->threshold_; }
+
+  // Breathing detection on (a bank the caller owns) or off (nullptr).
+  void set_breathing(BreathingBank *bank) {
+    this->breathing_ = bank;
+    for (int i = 0; i < this->count_; i++) {
+      this->links_[i].breathing = false;
+      this->links_[i].breath_rate = NAN;
+    }
   }
 
   // Adds one CSI frame. Returns false when the table is full.
@@ -67,7 +101,12 @@ class LinkTable {
     if (l == nullptr)
       return false;
     l->kind = kind;
-    l->motion.add_frame(r);
+    float shape[SHAPE_LEN];
+    if (lltf_shape(r, shape)) {
+      l->motion.add_shape(shape);
+      if (this->breathing_ != nullptr)
+        this->breathing_->add_shape(l->source, shape, now_ms);
+    }
     l->last_frame_ms = now_ms;
     l->rssi_sum += r.rssi;
     l->frames++;
@@ -75,24 +114,56 @@ class LinkTable {
     return true;
   }
 
-  // Once a second: score every link, and drop links that have been silent for a long time.
+  // Once a second: score every link at its own threshold, follow its breathing, and drop links
+  // that have been silent for a long time.
   void tick_second(uint32_t now_ms) {
     for (int i = 0; i < this->count_;) {
       Link &l = this->links_[i];
       if (now_ms - l.last_frame_ms > LINK_EXPIRE_MS) {
+        if (this->breathing_ != nullptr)
+          this->breathing_->release(l.source);
         this->links_[i] = this->links_[--this->count_];
         continue;
       }
       l.score = l.motion.tick();
       l.confirmed = false;
+      l.threshold = l.quiet.threshold(this->threshold_);
+      l.detector.set_threshold(l.threshold);
       if (std::isnan(l.score)) {
         l.detector.reset();  // a silent link reports no motion, it does not keep the last state
         l.active = false;
       } else {
         l.active = l.detector.update(l.score);
       }
+      l.breathing = this->breathing_ != nullptr && this->breathing_->tick(l.source, l.active, now_ms);
+      l.breath_rate = l.breathing ? this->breathing_->rate(l.source) : NAN;
       i++;
     }
+  }
+
+  // Once a second, after the hive's confirmation: whether it confirms motion anywhere. Seconds
+  // without, QUIET_HOLD_MS after the last, teach each link that is not flagged its quiet scores.
+  void learn_quiet(bool hive_moving, uint32_t now_ms) {
+    if (hive_moving) {
+      this->moving_ms_ = now_ms;
+      this->moved_ = true;
+    }
+    if (this->moved_ && now_ms - this->moving_ms_ <= QUIET_HOLD_MS)
+      return;
+    this->moved_ = false;
+    for (int i = 0; i < this->count_; i++) {
+      Link &l = this->links_[i];
+      if (!l.active && !std::isnan(l.score))
+        l.quiet.learn(l.score);
+    }
+  }
+
+  // The highest threshold any link uses.
+  float max_threshold() const {
+    float t = this->threshold_;
+    for (int i = 0; i < this->count_; i++)
+      t = std::fmax(t, this->links_[i].threshold);
+    return t;
   }
 
   // Writes a link report and starts a new interval. Returns its length, or 0 if it does not fit.
@@ -122,7 +193,8 @@ class LinkTable {
       put_u16(e + 8, to_u16_(l.score * 100.0f));
       put_u16(e + 10, to_u16_(l.motion.spread() * 100.0f));
       e[12] = static_cast<uint8_t>(l.frames > 255 ? 255 : l.frames);
-      e[13] = static_cast<uint8_t>((l.active ? LINK_FLAG_MOTION : 0) | (l.confirmed ? LINK_FLAG_CONFIRMED : 0));
+      e[13] = static_cast<uint8_t>((l.active ? LINK_FLAG_MOTION : 0) | (l.confirmed ? LINK_FLAG_CONFIRMED : 0) |
+                                   (l.breathing ? LINK_FLAG_BREATHING : 0));
       l.rssi_sum = 0;
       l.frames = 0;
     }
@@ -168,6 +240,7 @@ class LinkTable {
     l = Link{};
     l.source = m;
     l.kind = kind;
+    l.threshold = this->threshold_;
     l.detector.set_threshold(this->threshold_);
     l.last_frame_ms = now_ms;
     return &l;
@@ -175,7 +248,10 @@ class LinkTable {
 
   Link links_[MAX_LINKS]{};
   int count_{0};
-  float threshold_{2.0f};
+  float threshold_{DEFAULT_THRESHOLD};
+  BreathingBank *breathing_{nullptr};
+  uint32_t moving_ms_{0};
+  bool moved_{false};
 };
 
 }  // namespace wisp_core

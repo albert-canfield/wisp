@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <new>
 
 #include "esp_mac.h"
 #include "esp_netif.h"
@@ -68,7 +69,6 @@ void WispComponent::setup() {
   this->confirm_.reset(this->self_);
   this->threshold_applied_ = this->motion_threshold_.load();
   this->links_.set_threshold(this->threshold_applied_);
-  this->confirm_.set_threshold(this->threshold_applied_);
   this->csi_queue_ = xQueueCreate(CSI_QUEUE_DEPTH, sizeof(wisp_core::CsiRecord));
   this->espnow_queue_ = xQueueCreate(ESPNOW_QUEUE_DEPTH, sizeof(wisp_platform::EspNowFrame));
   if (this->csi_queue_ == nullptr || this->espnow_queue_ == nullptr) {
@@ -156,6 +156,8 @@ void WispComponent::loop() {
   const bool latched = this->motion_latched_.exchange(false);  // a second confirmed in between counts too
   if (this->motion_binary_sensor_ != nullptr)
     this->motion_binary_sensor_->publish_state(this->motion_.load() || latched);
+  if (this->breathing_binary_sensor_ != nullptr)
+    this->breathing_binary_sensor_->publish_state(this->breathing_.load());
   if (this->channel_sensor_ != nullptr) {
     const float channel = static_cast<float>(this->grid_channel_.load());
     if (channel > 0 && this->channel_sensor_->get_raw_state() != channel)
@@ -366,6 +368,12 @@ void WispComponent::publish_stats_(uint32_t now) {
   const UBaseType_t stack_free = this->task_ != nullptr ? uxTaskGetStackHighWaterMark(this->task_) : 0;  // bytes
   if (this->core_stack_sensor_ != nullptr)
     this->core_stack_sensor_->publish_state(stack_free);
+  if (this->breathing_rate_sensor_ != nullptr)
+    this->breathing_rate_sensor_->publish_state(this->breath_rate_.load());
+  const float max_threshold = this->max_link_threshold_.load();
+  if (this->max_link_threshold_sensor_ != nullptr &&
+      !(std::fabs(this->max_link_threshold_sensor_->get_raw_state() - max_threshold) < 0.01f))
+    this->max_link_threshold_sensor_->publish_state(max_threshold);
   const uint32_t jumps = this->self_jumps_.load();
   if (jumps != this->self_jumps_seen_) {
     this->self_jumps_seen_ = jumps;
@@ -572,9 +580,8 @@ void WispComponent::core_round_(uint32_t now) {
     if (b.row_len >= wisp_core::MAX_ROW)
       return;
     const wisp_core::Link *l = this->links_.find(mac);
-    uint8_t score10 = wisp_core::SCORE_UNKNOWN;
-    if (l != nullptr && !std::isnan(l->score))
-      score10 = static_cast<uint8_t>(std::fmin(254.0f, std::fmax(0.0f, l->score * 10.0f)));
+    // Normalised to the link's own threshold: the others judge it at the default (core_confirm.h)
+    const uint8_t score10 = l != nullptr ? wisp_core::beacon_score10(*l) : wisp_core::SCORE_UNKNOWN;
     b.row[b.row_len++] = wisp_core::RowEntry{mac, static_cast<int8_t>(std::lround(rssi)), score10};
   };
   if (has_bssid) {
@@ -688,17 +695,56 @@ void WispComponent::send_report_(uint32_t now) {
     this->stream_.send(wisp_core::STREAM_LINKS, buf, n, now);
 }
 
+// Breathing detection follows its switch: the bank is made when it is turned on, freed when off.
+void WispComponent::update_breathing_() {
+  const bool want = this->breathing_enabled_.load();
+  if (want && this->breathing_bank_ == nullptr && !this->breathing_no_memory_) {
+    this->breathing_bank_ = new (std::nothrow) wisp_core::BreathingBank();
+    if (this->breathing_bank_ == nullptr) {
+      this->breathing_no_memory_ = true;  // once per switching on
+      ESP_LOGW(TAG, "No memory for breathing detection (%u B)", static_cast<unsigned>(sizeof(wisp_core::BreathingBank)));
+      return;
+    }
+    this->links_.set_breathing(this->breathing_bank_);
+    ESP_LOGI(TAG, "Breathing detection on");
+  } else if (!want) {
+    this->breathing_no_memory_ = false;
+    if (this->breathing_bank_ != nullptr) {
+      this->links_.set_breathing(nullptr);
+      delete this->breathing_bank_;
+      this->breathing_bank_ = nullptr;
+      ESP_LOGI(TAG, "Breathing detection off");
+    }
+  }
+}
+
 void WispComponent::core_second_(uint32_t now) {
   const float threshold = this->motion_threshold_.load();
   if (threshold != this->threshold_applied_) {  // changed from Home Assistant
     this->threshold_applied_ = threshold;
     this->links_.set_threshold(threshold);
-    this->confirm_.set_threshold(threshold);
   }
+  this->update_breathing_();
   this->links_.tick_second(now);
   // The hive's confirmation: this node's flags, the scores in the beacons it hears, the layout.
   const bool motion = this->confirm_.update(this->links_, now, this->layout_, this->layout_count_, &this->hive_);
   this->confirm_.pairs(this->pairs_);
+  // Each link learns its quiet scores while the hive confirms no motion anywhere
+  this->links_.learn_quiet(this->pairs_.n > 0, now);
+  this->max_link_threshold_.store(this->links_.max_threshold());
+  bool breathing = false;
+  float rate = NAN, clearest = 0.0f;
+  for (int i = 0; i < this->links_.count() && this->breathing_bank_ != nullptr; i++) {
+    const wisp_core::Link &l = this->links_.link(i);
+    const float ratio = this->breathing_bank_->ratio(l.source);
+    if (l.breathing && ratio > clearest) {
+      breathing = true;
+      clearest = ratio;
+      rate = l.breath_rate;
+    }
+  }
+  this->breathing_.store(breathing);
+  this->breath_rate_.store(rate);
   this->motion_.store(motion);
   if (motion)
     this->motion_latched_.store(true);
@@ -720,9 +766,11 @@ void WispComponent::dump_config() {
                 "  AP ping interval: %" PRIu32 " ms\n"
                 "  UDP port: %u%s\n"
                 "  Link report interval: %" PRIu32 " ms\n"
-                "  Motion threshold: %.2f",
+                "  Motion threshold: %.2f (noisy links higher)\n"
+                "  Breathing detection: %s",
                 mac, this->ap_ping_interval_ms_, this->raw_stream_port_, this->stream_open_.load() ? "" : " (not open)",
-                this->report_interval_ms_, this->motion_threshold_.load());
+                this->report_interval_ms_, this->motion_threshold_.load(),
+                this->breathing_enabled_.load() ? "on" : "off");
   LOG_SENSOR("  ", "AP CSI rate", this->ap_csi_rate_sensor_);
   LOG_SENSOR("  ", "CSI dropped", this->csi_dropped_sensor_);
   LOG_SENSOR("  ", "AP motion score", this->ap_motion_score_sensor_);
@@ -732,6 +780,9 @@ void WispComponent::dump_config() {
   LOG_SENSOR("  ", "Grid channel", this->channel_sensor_);
   LOG_BINARY_SENSOR("  ", "Hive in sync", this->hive_sync_binary_sensor_);
   LOG_SENSOR("  ", "Core stack free", this->core_stack_sensor_);
+  LOG_BINARY_SENSOR("  ", "Breathing", this->breathing_binary_sensor_);
+  LOG_SENSOR("  ", "Breathing rate", this->breathing_rate_sensor_);
+  LOG_SENSOR("  ", "Highest link threshold", this->max_link_threshold_sensor_);
 }
 
 }  // namespace esphome::wisp

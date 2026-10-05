@@ -78,10 +78,10 @@ Each link:
 | 0 | 6 | transmitter MAC: an access point BSSID or another node's MAC |
 | 6 | 1 | kind: 0 access point, 1 node |
 | 7 | 1 | mean RSSI over the interval, dBm (int8); -128 if no frames |
-| 8 | 2 | motion score × 100 (uint16); 65535 = unknown. 100 means as quiet as usual |
+| 8 | 2 | motion score × 100 (uint16); 65535 = unknown. 100 means as quiet as usual. The raw score: since firmware 0.1.7 each link flags motion at its own threshold (see below), which the entry has no spare byte to carry |
 | 10 | 2 | spread × 100 (uint16), percent: how much the signal shape moves right now |
 | 12 | 1 | frames received in the interval (uint8, capped at 255) |
-| 13 | 1 | flags: bit 0 motion detected on this link, bit 1 the hive confirms that motion (see below; only bit 0 before firmware 0.1.6) |
+| 13 | 1 | flags: bit 0 motion detected on this link, bit 1 the hive confirms that motion (see below; only bit 0 before firmware 0.1.6), bit 2 someone breathing on this link (firmware 0.1.7, while its Breathing detection switch is on; see below) |
 
 A link is identified by (transmitter, receiver). The same pair seen from the other end is a separate link: node A hearing B and node B hearing A are both reported.
 
@@ -94,6 +94,14 @@ With header flag bit 0, the node pairs the hive confirms follow the links:
 
 Older readers stop after the links and never see them.
 
+### Per-link thresholds
+
+From firmware 0.1.7 a link flags motion (bit 0) at its own threshold: the node's Motion threshold, or higher for a noisy link, a margin of 1.1 above the score that 0.5% of its quiet seconds exceed (seconds with no motion confirmed anywhere in the hive for 10 s, and the link not flagged; decayed over about 20 minutes; the node's threshold until about 3 minutes of them are counted). It turns off halfway between that threshold and 1.0, as before. See "Per-link thresholds" in ARCHITECTURE.md.
+
+### Breathing
+
+Bit 2 of a link's flags: someone sitting still is breathing near it (firmware 0.1.7, experimental, off unless the node's Breathing detection switch is on). Set once two 32 s windows in a row, with no motion on the link in them, show a clear peak at 0.16 to 0.59 Hz (about 9 to 36 breaths a minute); cleared after two windows without, at once by motion on the link, and when the link goes silent. It never comes with bit 0 set. See "Breathing" in ARCHITECTURE.md.
+
 ### Hive-confirmed motion
 
 A body changes a link both ways and the links around it; one node's own noise shows only on what it sends or receives. Every node works out, each second, which pairs of nodes (A, B) are confirmed:
@@ -101,7 +109,7 @@ A body changes a link both ways and the links around it; one node's own noise sh
 1. Both ways: one direction (A hearing B, or B hearing A) reports motion now, the other did within 2 s.
 2. A node nearby agrees: of the K = min(6, live nodes - 2) other nodes nearest the pair, at least 1 (K up to 4) or 2 (K from 5) saw motion on a link to A or to B, either direction, within the same 2 s. Nearest by the hive's layout (distance to the segment A-B); a node without a layout position goes by its signal strength to the nearer of A and B. Ties go by MAC.
 
-What each node hears comes from the scores in the beacons it hears directly (below), at most 1.5 s old, judged as each receiver's own motion flag would be at this node's threshold (on at it, off halfway back to 1); for its own links a node uses its own flags. So every node that hears the same beacons holds the same pairs, with no extra traffic. A node's link from another node carries bit 1 while it reports motion and that pair is confirmed; its link from the access point (no reverse direction) while it reports motion and a pair with this node was confirmed within 2 s. Two nodes alone never confirm: there is no third. See "Shared grid knowledge: the hive" in ARCHITECTURE.md for the numbers behind the rule.
+What each node hears comes from the scores in the beacons it hears directly (below), at most 1.5 s old, judged at 2.0 (on at it, off halfway back to 1); for its own links a node uses its own flags. From firmware 0.1.7 a beacon carries each score normalised to its link's own threshold, 1 + (score - 1) × (2.0 - 1) / (threshold - 1), so judging it at 2.0 follows the receiver's own flag, on and off; at a threshold of 2.0 that is the score itself. Nodes before 0.1.7 sent raw scores and judged them at their own Motion threshold, the same with the default everywhere. So every node that hears the same beacons holds the same pairs, with no extra traffic. A node's link from another node carries bit 1 while it reports motion and that pair is confirmed; its link from the access point (no reverse direction) while it reports motion and a pair with this node was confirmed within 2 s. Two nodes alone never confirm: there is no third. See "Shared grid knowledge: the hive" in ARCHITECTURE.md for the numbers behind the rule.
 
 ## Type 3: hive report
 
@@ -123,5 +131,5 @@ Rows include access points as neighbours; layout points are nodes only.
 
 ## ESP-NOW frames between nodes
 
-Not for computers, listed for completeness. Defined in `core_grid.h` (beacon, type 1) and `core_hive.h` (hive row, type 2), magic `WG`, grid protocol version 3. Every node broadcasts one beacon per 100 ms round in its slot, carrying its own hive row with its live motion score (× 10) for each neighbour, then one relayed row from another node (no scores), with how long ago that row's origin was last heard directly. The scores are what hive-confirmed motion is worked out from.
+Not for computers, listed for completeness. Defined in `core_grid.h` (beacon, type 1) and `core_hive.h` (hive row, type 2), magic `WG`, grid protocol version 3. Every node broadcasts one beacon per 100 ms round in its slot, carrying its own hive row with its live motion score (× 10, normalised to the link's own threshold from firmware 0.1.7) for each neighbour, then one relayed row from another node (no scores), with how long ago that row's origin was last heard directly. The scores are what hive-confirmed motion is worked out from.
 

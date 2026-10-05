@@ -8,7 +8,8 @@ A line-by-line port of core_link_motion.h (shape, running statistics, settling b
 detector with hysteresis), driven by the host time of each recorded packet. Prints, per link,
 the score distribution and every stretch the detector would have reported motion. Recordings
 that hold the nodes' link reports (csi_logger.py since it asks for them) also show what the
-firmware itself reported, to check the port against it.
+firmware itself reported, to check the port against it. Every link uses --threshold here; the
+per-link thresholds of firmware 0.1.7 (QuietThreshold) are replayed by cfar_study.py.
 """
 
 from __future__ import annotations

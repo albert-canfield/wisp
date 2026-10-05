@@ -227,6 +227,10 @@ class RoomPresence:
         """The floor's live links that report motion."""
         return {key for key, link in self._live_links(floor, now) if link.motion}
 
+    def breathing(self, floor: str, now: float) -> set[LinkKey]:
+        """The floor's live links that show someone breathing (node firmware 0.1.7+, switched on)."""
+        return {key for key, link in self._live_links(floor, now) if link.breathing}
+
     def signal(self, floor: str, now: float) -> dict[LinkKey, int | None]:
         """RSSI of the floor's live links (None without frames)."""
         return {key: link.rssi for key, link in self._live_links(floor, now)}
@@ -250,7 +254,10 @@ class RoomPresence:
             live[floor] = len(scores)
             signal = self.signal(floor, now)
             active = self._active(floor, moving, now)
-            ended.append(self.engine.step(floor, self.floor_areas(floor), scores, now, bool(moving), signal, bool(active), active))
+            ended.append(self.engine.step(
+                floor, self.floor_areas(floor), scores, now, bool(moving), signal, bool(active), active,
+                breathing_links=self.breathing(floor, now),
+            ))
             # Room presence first: with rooms calibrated, the map shows someone only in a room with
             # presence (the one someone walks in now, else the latest to win), walking only while
             # room presence says so. The empty floor winning, or no room with presence, is nobody,
@@ -791,6 +798,7 @@ class RoomPresence:
                 "still": decision(engine.still_decisions.get(key)),
                 "walked": engine.walked.get(key),
                 "active_s_ago": None if (at := engine.active_at.get(key)) is None else round(now - at),
+                "breathing_s_ago": None if not (b := engine.link_breathing.get(key)) else round(now - max(b.values())),
                 "separation": self.separation_view(key),
             })
         positions = {

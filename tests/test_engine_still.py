@@ -328,3 +328,49 @@ def test_only_a_rooms_own_links_hold_someone_sitting(engine: Rooms):
                    signal=floor.signal("kitchen", False), active=True, active_links=elsewhere)
         on.append(rooms.presence("kitchen", now) is not None)
     assert all(on[: int(ACTIVE_HOLD) - 5]) and not on[-1]
+
+
+def test_breathing_holds_someone_sitting_still(engine: Rooms):
+    """Node firmware 0.1.7 with breathing detection on: someone who walked into the kitchen and sits
+    perfectly still, no shift in the chair, stays while the kitchen's own links show breathing, and
+    is gone ACTIVE_HOLD after it stops. Breathing on another room's links holds no one here, and
+    breathing alone, nobody seen walking in, starts nothing."""
+    rooms, floor, now = fresh(engine), Floor(seed=61), 1000.0
+    kitchen, office = rooms.own_links("kitchen"), rooms.own_links("office")
+    breathing = sorted(kitchen)[:2]
+    for _ in range(3):
+        now += 1
+        step(rooms, floor, now, "kitchen", walking=True)
+    for i in range(900):
+        now += 1
+        rooms.step(FLOOR, list(ROOMS), floor.scores("kitchen", strength=SITTING), now,
+                   signal=floor.signal("kitchen", False), breathing_links=breathing if i % 4 == 0 else ())
+        assert rooms.presence("kitchen", now) is not None
+    assert rooms.still_present("kitchen", now) and rooms.decisions[FLOOR].room is None
+    on = []
+    for _ in range(int(ACTIVE_HOLD) + 10):  # left without a walk seen, or the detection turned off
+        now += 1
+        step(rooms, floor, now, "kitchen")
+        on.append(rooms.presence("kitchen", now) is not None)
+    assert all(on[: int(ACTIVE_HOLD) - 5]) and not on[-1]
+
+    # Breathing on the office's links only: the kitchen ends as if nothing were seen
+    rooms, now = fresh(engine), 1000.0
+    for _ in range(3):
+        now += 1
+        step(rooms, floor, now, "kitchen", walking=True)
+    on = []
+    for _ in range(int(ACTIVE_HOLD) + 20):
+        now += 1
+        rooms.step(FLOOR, list(ROOMS), floor.scores("kitchen", strength=SITTING), now,
+                   signal=floor.signal("kitchen", False), breathing_links=sorted(office - kitchen))
+        on.append(rooms.presence("kitchen", now) is not None)
+    assert all(on[: int(ACTIVE_HOLD) - 5]) and not on[-1]
+
+    # Nobody seen walking in: breathing alone starts nothing
+    rooms, now = fresh(engine), 1000.0
+    for _ in range(300):
+        now += 1
+        rooms.step(FLOOR, list(ROOMS), floor.scores("kitchen", strength=SITTING), now,
+                   signal=floor.signal("kitchen", False), breathing_links=breathing)
+        assert not any(rooms.presence(area, now) for area in ROOMS)

@@ -15,6 +15,7 @@ import esphome.config_validation as cv
 from esphome.const import (
     CONF_ID,
     DEVICE_CLASS_MOTION,
+    DEVICE_CLASS_OCCUPANCY,
     ENTITY_CATEGORY_DIAGNOSTIC,
     STATE_CLASS_MEASUREMENT,
     STATE_CLASS_TOTAL_INCREASING,
@@ -41,6 +42,9 @@ CONF_CHANNEL = "channel"
 CONF_FTM_PROBE = "ftm_probe"
 CONF_AP_DISTANCE = "ap_distance"
 CONF_CORE_STACK_FREE = "core_stack_free"
+CONF_BREATHING = "breathing"
+CONF_BREATHING_RATE = "breathing_rate"
+CONF_MAX_LINK_THRESHOLD = "max_link_threshold"
 FTM_VARIANTS = (VARIANT_ESP32S2, VARIANT_ESP32S3, VARIANT_ESP32C2, VARIANT_ESP32C3, VARIANT_ESP32C6)
 
 wisp_ns = cg.esphome_ns.namespace("wisp")
@@ -91,6 +95,24 @@ CONFIG_SCHEMA = cv.Schema(
             entity_category=ENTITY_CATEGORY_DIAGNOSTIC,
         ),
         cv.Optional(CONF_MOTION_THRESHOLD, default=2.0): cv.float_range(min=1.0, min_included=False),
+        # The highest threshold a link uses: noisy links raise theirs from their quiet scores
+        cv.Optional(CONF_MAX_LINK_THRESHOLD): sensor.sensor_schema(
+            icon="mdi:tune-vertical",
+            accuracy_decimals=2,
+            state_class=STATE_CLASS_MEASUREMENT,
+            entity_category=ENTITY_CATEGORY_DIAGNOSTIC,
+        ),
+        # On while a link shows someone breathing (core_breathing.h), once breathing detection is on
+        cv.Optional(CONF_BREATHING): binary_sensor.binary_sensor_schema(
+            device_class=DEVICE_CLASS_OCCUPANCY,
+            icon="mdi:lungs",
+        ),
+        cv.Optional(CONF_BREATHING_RATE): sensor.sensor_schema(
+            unit_of_measurement="breaths/min",
+            icon="mdi:lungs",
+            accuracy_decimals=1,
+            state_class=STATE_CLASS_MEASUREMENT,
+        ),
         cv.Optional(CONF_AP_MOTION_SCORE): sensor.sensor_schema(
             icon="mdi:motion-sensor",
             accuracy_decimals=2,
@@ -178,3 +200,12 @@ async def to_code(config):
     if CONF_CSI_DROPPED in config:
         sens = await sensor.new_sensor(config[CONF_CSI_DROPPED])
         cg.add(var.set_csi_dropped_sensor(sens))
+    if CONF_MAX_LINK_THRESHOLD in config:
+        sens = await sensor.new_sensor(config[CONF_MAX_LINK_THRESHOLD])
+        cg.add(var.set_max_link_threshold_sensor(sens))
+    if CONF_BREATHING in config:
+        bs = await binary_sensor.new_binary_sensor(config[CONF_BREATHING])
+        cg.add(var.set_breathing_binary_sensor(bs))
+    if CONF_BREATHING_RATE in config:
+        sens = await sensor.new_sensor(config[CONF_BREATHING_RATE])
+        cg.add(var.set_breathing_rate_sensor(sens))

@@ -187,7 +187,72 @@ static void test_still_person_is_not_absorbed() {
   CHECK(change_score < 1.3f);  // a lasting change has become the new normal
 }
 
+// One second of a link at its own threshold, as LinkTable does: flagged seconds never count.
+static bool cfar_second(QuietThreshold &q, MotionDetector &d, float score, bool hive_moving = false) {
+  d.set_threshold(q.threshold(2.0f));
+  const bool active = d.update(score);
+  if (!hive_moving && !active)
+    q.learn(score);
+  return active;
+}
+
+// A noisy link (the owner's office corner: 1 to 4% of empty seconds at 2.0 or more) gets its own,
+// higher threshold and flags rarely; a quiet one keeps the user's.
+static void test_quiet_threshold() {
+  std::mt19937 rng(21);
+  std::lognormal_distribution<float> noisy(std::log(1.3f), 0.22f), quiet(std::log(1.05f), 0.05f);
+  QuietThreshold qn, qq;
+  MotionDetector dn, dq;
+  int flagged_before = 0, flagged_after = 0;
+  for (int s = 0; s < 3600; s++) {
+    const float a = noisy(rng);
+    if (s < 600)
+      flagged_before += a >= 2.0f;
+    const bool on = cfar_second(qn, dn, a);
+    if (s >= 2400)
+      flagged_after += on;
+    cfar_second(qq, dq, quiet(rng));
+  }
+  std::printf("  noisy link: threshold %.2f, flagged %.2f%% of its last 20 min (%.2f%% at or above 2.0)\n",
+              qn.threshold(2.0f), 100.0f * flagged_after / 1200, 100.0f * flagged_before / 600);
+  CHECK(flagged_before > 6);  // the case: over 1% at 2.0
+  CHECK(qn.threshold(2.0f) > 2.2f && qn.threshold(2.0f) < 3.5f);
+  CHECK(flagged_after < 12);  // under 1% now
+  CHECK(qq.threshold(2.0f) == 2.0f);
+  CHECK(qq.threshold(3.0f) == 3.0f && qn.threshold(6.0f) == 6.0f);  // never below the user's
+
+  // Warm-up: the user's threshold until QUIET_WARMUP quiet seconds are counted (decayed: about 200)
+  QuietThreshold w;
+  for (int s = 0; s < 190; s++)
+    w.learn(1.95f);
+  CHECK(w.learned() < QUIET_WARMUP && w.threshold(2.0f) == 2.0f);
+  for (int s = 0; s < 20; s++)
+    w.learn(1.95f);
+  CHECK(w.learned() >= QUIET_WARMUP && w.threshold(2.0f) > 2.0f);
+
+  // Decay: the noise goes away (a fridge replaced), the threshold follows within the hour
+  float settled = 0.0f;
+  for (int s = 0; s < 3600; s++) {
+    cfar_second(qn, dn, quiet(rng));
+    if (s == 600)
+      settled = qn.threshold(2.0f);
+  }
+  std::printf("  noise gone: threshold %.2f after 10 min, %.2f after an hour\n", settled, qn.threshold(2.0f));
+  CHECK(settled > 2.0f);
+  CHECK(qn.threshold(2.0f) == 2.0f);
+
+  // People do not raise it: busy seconds the hive confirms are never learned
+  QuietThreshold qp;
+  MotionDetector dp;
+  for (int s = 0; s < 600; s++)
+    cfar_second(qp, dp, quiet(rng));
+  for (int s = 0; s < 1800; s++)  // half an hour of someone moving about: up to 1.9 without a flag
+    cfar_second(qp, dp, 1.2f + 0.7f * static_cast<float>(s % 7) / 6.0f, true);
+  CHECK(qp.threshold(2.0f) == 2.0f && qp.learned() > 400.0f);
+}
+
 int main() {
+  test_quiet_threshold();
   test_raw_packet();
   test_still_person_is_not_absorbed();
   test_detector_hysteresis();

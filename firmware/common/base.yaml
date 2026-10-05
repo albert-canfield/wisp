@@ -3,7 +3,7 @@
 substitutions:
   name: wisp
   friendly_name: Wisp
-  project_version: "0.1.6"
+  project_version: "0.1.7"
   motion_threshold: "2.0" # default; then the Motion threshold entity, kept across reboots
 
 esphome:
@@ -27,6 +27,9 @@ wisp:
   csi_dropped:
     name: CSI dropped
   motion_threshold: ${motion_threshold} # score at which a link reports motion (1 = as quiet as usual)
+  max_link_threshold: # noisy links raise their own threshold above it, from their quiet scores
+    name: Highest link threshold
+    disabled_by_default: true
   ap_motion_score:
     name: AP motion score
     filters:
@@ -45,6 +48,12 @@ wisp:
     name: Hive in sync
   core_stack_free:
     name: Core stack free
+    disabled_by_default: true
+  breathing: # on while a link shows someone breathing; needs the Breathing detection switch
+    name: Breathing
+    disabled_by_default: true
+  breathing_rate:
+    name: Breathing rate
     disabled_by_default: true
 
 logger:
@@ -121,6 +130,16 @@ switch:
       - lambda: id(wisp_node).set_raw_stream_enabled(true);
     on_turn_off:
       - lambda: id(wisp_node).set_raw_stream_enabled(false);
+  - platform: template
+    name: Breathing detection # experimental: someone sitting still, from their breathing; about 7 KB of RAM
+    icon: mdi:lungs
+    entity_category: config
+    optimistic: true
+    restore_mode: RESTORE_DEFAULT_OFF
+    on_turn_on:
+      - lambda: id(wisp_node).set_breathing_enabled(true);
+    on_turn_off:
+      - lambda: id(wisp_node).set_breathing_enabled(false);
 
 button:
   - platform: restart

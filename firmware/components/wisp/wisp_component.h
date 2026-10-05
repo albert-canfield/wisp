@@ -46,7 +46,12 @@ class WispComponent : public Component {
   void set_ap_distance_sensor(sensor::Sensor *s) { this->ap_distance_sensor_ = s; }
   void set_hive_sync_binary_sensor(binary_sensor::BinarySensor *s) { this->hive_sync_binary_sensor_ = s; }
   void set_core_stack_sensor(sensor::Sensor *s) { this->core_stack_sensor_ = s; }
+  void set_breathing_binary_sensor(binary_sensor::BinarySensor *s) { this->breathing_binary_sensor_ = s; }
+  void set_breathing_rate_sensor(sensor::Sensor *s) { this->breathing_rate_sensor_ = s; }
+  void set_max_link_threshold_sensor(sensor::Sensor *s) { this->max_link_threshold_sensor_ = s; }
   void set_raw_stream_enabled(bool enabled) { this->raw_stream_enabled_.store(enabled); }
+  // Breathing detection (core_breathing.h), any task: about 7 KB of RAM while on.
+  void set_breathing_enabled(bool enabled) { this->breathing_enabled_.store(enabled); }
   // 0: automatic (see core_wifi_plan.h), else a fixed channel. Changed while running (from Home
   // Assistant), the node checks its channel again at once and moves if it has to.
   void set_grid_channel(uint8_t channel) {
@@ -68,6 +73,7 @@ class WispComponent : public Component {
   void core_second_(uint32_t now);
   void send_report_(uint32_t now);
   void update_sources_();
+  void update_breathing_();
   bool home_bssid_(wisp_core::Mac &out);
 
   // Main loop.
@@ -93,6 +99,9 @@ class WispComponent : public Component {
   sensor::Sensor *ap_distance_sensor_{nullptr};
   binary_sensor::BinarySensor *hive_sync_binary_sensor_{nullptr};
   sensor::Sensor *core_stack_sensor_{nullptr};
+  binary_sensor::BinarySensor *breathing_binary_sensor_{nullptr};
+  sensor::Sensor *breathing_rate_sensor_{nullptr};
+  sensor::Sensor *max_link_threshold_sensor_{nullptr};
 
   wisp_platform::CsiCapture capture_;
   wisp_platform::GatewayPinger pinger_;
@@ -116,6 +125,8 @@ class WispComponent : public Component {
   wisp_core::Hive hive_{wisp_core::Mac{}};
   wisp_core::MotionConfirm confirm_{wisp_core::Mac{}};
   wisp_core::PairList pairs_{};  // confirmed pairs, for the link reports
+  wisp_core::BreathingBank *breathing_bank_{nullptr};  // while breathing detection is on
+  bool breathing_no_memory_{false};
   wisp_core::LayoutWorkspace layout_ws_;
   wisp_core::LayoutPoint layout_[wisp_core::MAX_POINTS]{};
   int layout_count_{0};
@@ -139,12 +150,16 @@ class WispComponent : public Component {
   std::atomic<bool> csi_started_{false};
   std::atomic<bool> espnow_started_{false};
   std::atomic<bool> raw_stream_enabled_{false};
+  std::atomic<bool> breathing_enabled_{false};
   std::atomic<float> motion_threshold_{2.0f};
   std::atomic<float> ap_score_{NAN};
   std::atomic<bool> ap_active_{false};
   std::atomic<bool> motion_{false};         // one of this node's links is confirmed
   std::atomic<bool> motion_latched_{false};  // ... at some second since the main loop last looked
   std::atomic<int> grid_nodes_{1};
+  std::atomic<bool> breathing_{false};  // a link shows someone breathing
+  std::atomic<float> breath_rate_{NAN};  // a minute, on the clearest such link
+  std::atomic<float> max_link_threshold_{2.0f};
   std::atomic<bool> hive_in_sync_{false};
   std::atomic<uint32_t> ap_frames_{0};
   std::atomic<uint32_t> ap_frames_total_{0};

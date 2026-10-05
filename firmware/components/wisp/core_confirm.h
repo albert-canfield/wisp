@@ -9,11 +9,13 @@
 // Every beacon carries its sender's live score for each neighbour (core_grid.h), so a node knows
 // every direction it hears a beacon about: every node that hears the same beacons holds the same
 // pairs, with no extra traffic. Only beacons heard directly and no older than CONFIRM_FRESH_MS
-// count (relayed rows carry no scores). A direction moves as its receiver's own flag would at
-// this node's threshold (on at it, off halfway back to 1, as MotionDetector), in the beacon's
-// tenths; this node's own directions are its detectors' flags. Nearest goes by the hive's layout,
-// the same on every node in sync: distance from the node to the segment A-B, or, for a node
-// without a layout position, the nearer of A and B by RSSI. Ties go by MAC.
+// count (relayed rows carry no scores). Since firmware 0.1.7 each link has its own threshold
+// (QuietThreshold) and a beacon carries its scores normalised so that threshold reads
+// DEFAULT_THRESHOLD (beacon_score10 in core_links.h): judged at DEFAULT_THRESHOLD (on at it, off
+// halfway back to 1, as MotionDetector), in the beacon's tenths, a direction moves as its
+// receiver's own flag does; this node's own directions are its detectors' flags. Nearest goes by
+// the hive's layout, the same on every node in sync: distance from the node to the segment A-B,
+// or, for a node without a layout position, the nearer of A and B by RSSI. Ties go by MAC.
 //
 // This node's links: one from a node is confirmed while it reports motion and its pair is
 // confirmed; one from an access point (no reverse) while it reports motion and a pair with this
@@ -53,7 +55,9 @@ class MotionConfirm {
     this->self_seen_ = false;
   }
 
-  // This node's motion threshold: the directions other nodes report are judged with it.
+  // The threshold the scores in beacons are judged at: DEFAULT_THRESHOLD (the default here), as
+  // beacons carry scores normalised to it. Nodes before 0.1.7 sent raw scores, judged at the
+  // hearing node's own Motion threshold then; with the default threshold everywhere, the same.
   void set_threshold(float t) {
     const int t10 = static_cast<int>(t * 10.0f + 0.5f);
     this->on10_ = t10 < 11 ? 11 : (t10 > 254 ? 254 : t10);
@@ -357,7 +361,7 @@ class MotionConfirm {
   uint32_t moving_ms_[CONFIRM_NODES][CONFIRM_NODES]{};  // when that direction last moved
   uint32_t pairs_[CONFIRM_NODES]{};                     // bit j of pairs_[i]: pair (i, j) confirmed
   uint32_t own_set_{0};
-  int on10_{20};
+  int on10_{static_cast<int>(DEFAULT_THRESHOLD * 10.0f + 0.5f)};
   bool self_seen_{false};
   uint32_t self_ms_{0};
   // Layout positions, per tick

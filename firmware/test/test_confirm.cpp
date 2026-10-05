@@ -435,7 +435,105 @@ static void test_links_and_report() {
   CHECK(out[19] == (REPORT_FLAG_CONFIRMS | REPORT_FLAG_PAIRS_TRUNCATED));
 }
 
+// Exposes how this node judges the directions other nodes report.
+struct Probe : MotionConfirm {
+  using MotionConfirm::MotionConfirm;
+  bool moving(const Mac &rx, const Mac &tx) const { return this->moving_(this->find(rx), this->find(tx)); }
+};
+
+// A link with a threshold of its own (QuietThreshold): its beacon carries the score normalised to
+// it, and a node judging that at the default threshold follows the receiver's own flag, on and
+// off, whatever the link's threshold. At the default threshold the beacon carries the raw score.
+static void test_normalised_beacon_scores() {
+  const Mac a = mac_n(1), b = mac_n(2);
+  const float scores[] = {1.0f, 1.8f, 2.4f, 2.9f, 3.0f, 3.6f, 2.6f, 2.0f, 1.95f, 1.6f, 3.1f, 1.2f, NAN, 2.2f};
+  for (const float t : {2.0f, 2.6f, 3.0f, 4.5f}) {
+    Probe m(a);
+    Link l{};
+    l.threshold = t;
+    MotionDetector own(t);
+    uint32_t now = 1000;
+    int checked = 0;
+    for (const float sc : scores) {
+      for (int k = 0; k < 4; k++) {  // around each score, a little either side of the edges
+        l.score = sc + 0.03f * static_cast<float>(k - 2);
+        const bool on = own.update(l.score);
+        RowEntry row[1] = {{a, -50, beacon_score10(l)}};
+        m.on_beacon(b, row, 1, now += 100);  // B hears A
+        if (std::isnan(l.score)) {
+          CHECK(row[0].score10 == SCORE_UNKNOWN);
+          own.reset();
+          continue;
+        }
+        // The beacon's tenths round down: within 0.1 of the edges, the reading may lag by a step
+        const float n = 1.0f + (l.score - 1.0f) / (t - 1.0f);
+        if (std::fabs(n - 2.0f) < 0.1f || std::fabs(n - 1.5f) < 0.1f)
+          continue;
+        CHECK(m.moving(b, a) == on);
+        checked++;
+      }
+    }
+    CHECK(checked > 25);
+  }
+  Link l{};
+  l.score = 2.37f;
+  CHECK(beacon_score10(l) == 23);  // the default threshold: the score itself, as before 0.1.7
+  l.threshold = 3.0f;
+  l.score = 3.0f;
+  CHECK(beacon_score10(l) == 20);  // exactly at its threshold: exactly the default
+}
+
+// A link learns its quiet scores only in seconds the hive confirms no motion (and some after),
+// and never while flagged: someone moving about, short of a flag, does not raise its threshold.
+static void test_quiet_learning() {
+  const Mac ap = mac_n(700);
+  for (int confirmed = 0; confirmed < 2; confirmed++) {
+    LinkTable links;
+    std::mt19937 rng(8);
+    uint32_t now = 0;
+    for (int s = 0; s < 1500; s++) {
+      // 6 quiet minutes, then someone near the link: below the threshold, and the hive (when it
+      // can) confirms them moving
+      const bool busy = s >= 360;
+      feed(links, ap, LinkKind::ACCESS_POINT, busy ? 1.8f : 1.0f, rng, now);
+      now += 1000;
+      links.tick_second(now);
+      links.learn_quiet(busy && confirmed, now);
+      if (s == 359)
+        CHECK(links.find(ap)->threshold == 2.0f && links.find(ap)->quiet.learned() > QUIET_WARMUP);
+    }
+    const Link *l = links.find(ap);
+    std::printf("  someone about for 19 min %s: threshold %.2f\n", confirmed ? "(confirmed)" : "(never confirmed)",
+                l->threshold);
+    CHECK(confirmed ? l->threshold == 2.0f : l->threshold > 2.0f);
+    CHECK(links.max_threshold() == l->threshold);
+  }
+  // The hold: seconds within QUIET_HOLD_MS of confirmed motion are not learned either
+  LinkTable links;
+  std::mt19937 rng(9);
+  uint32_t now = 0;
+  feed(links, ap, LinkKind::ACCESS_POINT, 1.0f, rng, now);
+  for (int s = 0; s < 40; s++) {  // past the score's own settling
+    feed(links, ap, LinkKind::ACCESS_POINT, 1.0f, rng, now);
+    links.tick_second(now += 1000);
+  }
+  const float before = links.find(ap)->quiet.learned();
+  links.learn_quiet(true, now);
+  for (uint32_t s = 1; s <= QUIET_HOLD_MS / 1000; s++) {
+    feed(links, ap, LinkKind::ACCESS_POINT, 1.0f, rng, now);
+    links.tick_second(now += 1000);
+    links.learn_quiet(false, now);
+  }
+  CHECK(links.find(ap)->quiet.learned() == before);
+  feed(links, ap, LinkKind::ACCESS_POINT, 1.0f, rng, now);
+  links.tick_second(now += 1000);
+  links.learn_quiet(false, now);
+  CHECK(links.find(ap)->quiet.learned() > before);
+}
+
 int main() {
+  test_normalised_beacon_scores();
+  test_quiet_learning();
   test_four_nodes_need_a_third();
   test_stale_beacons();
   test_window_edges();

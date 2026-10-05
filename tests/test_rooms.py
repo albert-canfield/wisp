@@ -59,11 +59,13 @@ class House:
         self.clock = entry.runtime_data.clock = FakeClock()
 
     async def seconds(
-        self, n: int = 1, room: str | None = None, step: float = 1.0, sitting: str | None = None, fidget: int = 0
+        self, n: int = 1, room: str | None = None, step: float = 1.0, sitting: str | None = None, fidget: int = 0,
+        breathing: bool = False,
     ) -> None:
         """n ticks of the rooms, with the hub's clock moving step seconds each: someone moving in
         room, or sitting still in sitting (quiet scores, weaker links), shifting in the chair every
-        fidget seconds (the link between the nodes moves both ways that second)."""
+        fidget seconds (the link between the nodes moves both ways that second); breathing: every
+        link shows someone breathing (node firmware 0.1.7, detection on)."""
         for _ in range(n):
             self.seq += 1
             jitter, noise = (self.seq * 7) % 11 - 5, self.seq % 3 - 1
@@ -73,13 +75,14 @@ class House:
                 a_b, b_a = 205, 205
             (da_ap, da_b), (db_ap, db_a) = DROPS.get(sitting or room, ((0, 0), (0, 0)))
             (ra_ap, ra_b), (rb_ap, rb_a) = RSSI
+            breath = 0x04 if breathing else 0
             self.udp.receive(encode_report(self.seq, NODE_A, [
-                (AP, 0, ra_ap - da_ap + noise, a_ap, 200, 20, moving(a_ap)),
-                (NODE_B, 1, ra_b - da_b - noise, a_b, 150, 10, moving(a_b)),
+                (AP, 0, ra_ap - da_ap + noise, a_ap, 200, 20, moving(a_ap) | breath),
+                (NODE_B, 1, ra_b - da_b - noise, a_b, 150, 10, moving(a_b) | breath),
             ], uptime=60), IP_A)
             self.udp.receive(encode_report(self.seq, NODE_B, [
-                (AP, 0, rb_ap - db_ap - noise, b_ap, 200, 20, moving(b_ap)),
-                (NODE_A, 1, rb_a - db_a + noise, b_a, 150, 10, moving(b_a)),
+                (AP, 0, rb_ap - db_ap - noise, b_ap, 200, 20, moving(b_ap) | breath),
+                (NODE_A, 1, rb_a - db_a + noise, b_a, 150, 10, moving(b_a) | breath),
             ], uptime=60), IP_B)
             self.clock.now += step
             await fire(self.hass, 1)
@@ -225,6 +228,30 @@ async def test_sitting_presence_from_the_walk_and_activity(hass: HomeAssistant, 
         await house.seconds(50, None)
         house.udp.receive(encode_report(house.seq + 1, NODE_A, [(NODE_B, 1, -60, 230, 150, 10, 1)], uptime=60), IP_A)
     assert state(hass, OFFICE_PRESENCE) == "off"
+
+
+async def test_breathing_holds_someone_sitting_still(hass: HomeAssistant, house: House) -> None:
+    """Node firmware 0.1.7 with breathing detection on: someone who walked into the kitchen and sits
+    perfectly still, never shifting in the chair, stays while its links show breathing, and is gone
+    3 minutes after that stops. Breathing with nobody seen walking in starts nothing."""
+    await house.calibrate("kitchen")
+    await hass.services.async_call(DOMAIN, "calibrate_room", {"area": "kitchen", "mode": "still", "duration": 25}, blocking=True)
+    await house.seconds(25, sitting="kitchen")
+    await house.calibrate("office")
+    await house.calibrate(None)
+    await house.seconds(61, None)
+    await house.seconds(60, sitting="kitchen", breathing=True)  # nobody walked in: nobody
+    assert state(hass, KITCHEN) == "off"
+    await house.seconds(2, "kitchen")
+    await house.seconds(400, sitting="kitchen", breathing=True)
+    kitchen = hass.states.get(KITCHEN)
+    assert kitchen.state == "on" and kitchen.attributes["still"] is True
+    (floor,) = (await async_get_config_entry_diagnostics(hass, house.entry))["rooms"]["floors"]
+    assert floor["breathing_s_ago"] <= 1 and floor["active_s_ago"] > 300
+    await house.seconds(170, sitting="kitchen")
+    assert state(hass, KITCHEN) == "on"
+    await house.seconds(20, sitting="kitchen")
+    assert state(hass, KITCHEN) == "off"
 
 
 async def test_activity_on_a_floor_of_two_nodes(hass: HomeAssistant, house: House) -> None:

@@ -20,6 +20,7 @@ class LinkState:
     motion: bool = False
     confirmed: bool = False  # the hive confirms its motion (node firmware 0.1.6+)
     confirmed_at: float | None = None  # the latest report that said so
+    breathing: bool = False  # someone breathing seen on it (node firmware 0.1.7+)
     updated: float = 0.0
     fresh: bool = True  # a report arrived within the timeout
 
@@ -73,6 +74,7 @@ class LinkTable:
             state.kind = link.kind
             state.rssi, state.score, state.spread = link.rssi, link.score, link.spread
             state.frames, state.motion, state.confirmed = link.frames, link.motion, link.confirmed
+            state.breathing = link.breathing
             if link.confirmed:
                 state.confirmed_at = now
             state.updated, state.fresh = now, True

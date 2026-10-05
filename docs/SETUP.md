@@ -120,7 +120,7 @@ It asks you to stand still, walk across links and leave the room, and prints for
 | Grid nodes stays at 1 | Nodes on different channels: check Grid channel on each; with several access points they settle within a minute |
 | Hive in sync flickers | A node keeps dropping out: check its WiFi signal and power supply |
 | AP CSI rate 0 | The node is not connected, or the gateway does not answer pings |
-| Motion with nobody around | Pets, fans, curtains in a draft, or a washing machine on the line; or raise the node's Motion threshold (a setting on its device page) |
+| Motion with nobody around | Pets, fans, curtains in a draft, or a washing machine on the line; or raise the node's Motion threshold (a setting on its device page). Since node firmware 0.1.7 a noisy link raises its own threshold within about 20 minutes |
 | A node is "unavailable" in Home Assistant | It is offline or rebooting; the grid keeps working without it |
 | "Few Wisp nodes on ..." in Settings > Repairs | That floor has fewer than 3 nodes: motion per link works, rooms and positions need 3 or more. It goes once the floor has them (a node's floor is the floor of its area) |
 

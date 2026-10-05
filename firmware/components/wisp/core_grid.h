@@ -228,7 +228,8 @@ class Grid {
 //                                     motion score x 10 (uint8, 255 = unknown)
 //
 // The row is what the sender hears from each neighbour (nodes and access points): the
-// sender's line of the shared matrix that every node keeps (the hive).
+// sender's line of the shared matrix that every node keeps (the hive). Since firmware 0.1.7 the
+// score is normalised to the link's own threshold (beacon_score10 in core_links.h).
 
 constexpr uint8_t GRID_PROTOCOL_VERSION = 3;
 constexpr uint8_t BEACON_TYPE = 1;

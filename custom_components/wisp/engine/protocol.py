@@ -25,6 +25,7 @@ SCORE_UNKNOWN = 0xFFFF
 RSSI_NO_FRAMES = -128
 LINK_FLAG_MOTION = 0x01
 LINK_FLAG_CONFIRMED = 0x02  # the hive confirms its motion (node firmware 0.1.6+)
+LINK_FLAG_BREATHING = 0x04  # someone breathing seen on it (node firmware 0.1.7+, detection switched on)
 REPORT_FLAG_CONFIRMS = 0x01  # links carry LINK_FLAG_CONFIRMED, the confirmed pairs follow them
 REPORT_FLAG_PAIRS_TRUNCATED = 0x02
 HIVE_FLAG_IN_SYNC = 0x01
@@ -78,6 +79,11 @@ class Link:
     def confirmed(self) -> bool:
         """Motion the hive confirms: both ways and a node nearby (see docs/PROTOCOL.md)."""
         return bool(self.flags & LINK_FLAG_CONFIRMED)
+
+    @property
+    def breathing(self) -> bool:
+        """Someone breathing on it: still, but there (see docs/PROTOCOL.md)."""
+        return bool(self.flags & LINK_FLAG_BREATHING)
 
 
 @dataclass(frozen=True, slots=True)

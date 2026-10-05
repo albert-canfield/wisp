@@ -12,7 +12,9 @@ Replaying 1.5 quiet hours, a link touched QUIET 16 times, the motion flags came 
 classification uses the log scores, among the rooms' moving classes and the empty class.
 
 Nobody changes room without walking: a walk names the room, and someone sitting there keeps its
-presence while the floor shows activity (a link moving both ways, the node at each end agreeing).
+presence while the floor shows activity (a link moving both ways, the node at each end agreeing),
+or while the room's own links show someone breathing (node firmware 0.1.7+, when switched on):
+breathing holds a presence, it never starts one.
 The still classification (log scores and signal, the empty class against each room's still
 class) no longer names rooms: signal strength drifts more with nobody there than a seated person
 changes it. It stays for the separation check and diagnostics.
@@ -312,6 +314,7 @@ class Rooms:
         self.active_hold = active_hold
         self.active_at: dict[str, float] = {}  # by floor: when the nodes last confirmed motion
         self.link_active: dict[str, dict[LinkKey, float]] = {}  # by floor: when each link last was active
+        self.link_breathing: dict[str, dict[LinkKey, float]] = {}  # by floor: when each link last showed breathing
         self.moves: dict[str, tuple[int, float]] = {}  # by floor: seconds of the current walk, and its last
         self.walked: dict[str, str] = {}  # by floor: the room someone last walked in, where they sit down
         self.walked_at: dict[str, float] = {}  # by floor: when they last walked there
@@ -353,6 +356,7 @@ class Rooms:
             self.walked_at.clear()
             self.active_at.clear()
             self.link_active.clear()
+            self.link_breathing.clear()
             self._models.clear()
             return
         self.areas.pop(area, None)
@@ -380,6 +384,7 @@ class Rooms:
         self.walked_at.pop(floor, None)
         self.active_at.pop(floor, None)
         self.link_active.pop(floor, None)
+        self.link_breathing.pop(floor, None)
         self._signal.pop(floor, None)
 
     def _record(self, run: Run, vector: Vector, motion: float, moving: bool | None) -> None:
@@ -461,10 +466,12 @@ class Rooms:
         signal: Mapping[LinkKey, float | None] | None = None,
         active: bool | None = None,
         active_links: Iterable[LinkKey] = (),
+        breathing_links: Iterable[LinkKey] = (),
     ) -> Run | None:
         """One second of one floor: record for its run, then decide (moving: see decide; signal: RSSI
         per live link this second; active: whether the nodes confirm motion this second, a link
-        moving both ways with a nearby node agreeing; None when unknown). A walking second counts
+        moving both ways with a nearby node agreeing; None when unknown; breathing_links: links
+        that show someone breathing, which only hold a sitting presence). A walking second counts
         only when the nodes confirm motion: every second of the owner's real walks was, and a
         node's own noise is not. Returns its run if it just ended."""
         areas = list(areas)
@@ -474,6 +481,10 @@ class Rooms:
             seen = self.link_active.setdefault(floor, {})
             for key in active_links:
                 seen[key] = now
+        if breathing_links:
+            breaths = self.link_breathing.setdefault(floor, {})
+            for key in breathing_links:
+                breaths[key] = now
         vector = features(scores) | signal_features(self._average(floor, signal or {}))
         live = [score for score in scores.values() if score is not None]
         motion = max(live, default=0.0)
@@ -545,8 +556,9 @@ class Rooms:
     def _still_step(self, floor: str, areas: list[str], vector: Vector, motion: float, now: float) -> None:
         """Nobody walks on the floor. Someone who walked into a room people sit in (one with a still
         calibration) keeps its presence while the floor shows activity, a link moving both ways
-        (the nodes at both ends agree), at least every active_hold seconds: nobody changes room
-        without walking, and someone sitting and working moves a little. Signal strength keeps no
+        (the nodes at both ends agree), or the room's own links show breathing, at least every
+        active_hold seconds: nobody changes room without walking, and someone sitting and working
+        moves a little, someone sitting still breathes. Signal strength keeps no
         one: on the owner's floor it drifted more with nobody there than a seated person changes
         it, and the still classification found someone on the empty floor every second. A room
         nobody sits in (a hallway) keeps no one once the walk's own hold ends, and without a walk
@@ -575,14 +587,19 @@ class Rooms:
         return own | {(b, a) for a, b in own}
 
     def _last_activity(self, floor: str, area: str | None) -> float | None:
-        """When the area's own links last showed activity (the walk into it counts), else, without
-        per-link activity or a walking class, when the floor did."""
+        """When the area's own links last showed activity or breathing (the walk into it counts),
+        else, without per-link activity or a walking class, when the floor did (or the area's own
+        links breathed). Breathing elsewhere on the floor holds nobody here."""
         last = self.active_at.get(floor)
         seen = self.link_active.get(floor)
         own = self.own_links(area) if area is not None else set()
-        if not seen or not own:
+        if not own:
             return last
-        times = [seen[key] for key in own if key in seen] + [self.walked_at.get(floor, -math.inf)]
+        breaths = self.link_breathing.get(floor, {})
+        breathed = [breaths[key] for key in own if key in breaths]
+        if not seen:
+            return max([t for t in (last, *breathed) if t is not None], default=None)
+        times = [seen[key] for key in own if key in seen] + breathed + [self.walked_at.get(floor, -math.inf)]
         return max(times)
 
     def presence(self, area: str, now: float) -> float | None:

@@ -338,6 +338,21 @@ def test_table_keeps_confirmation():
     assert not table.nodes[NODE].confirms
 
 
+def test_breathing_bit():
+    """Node firmware 0.1.7 with breathing detection on: link flag bit 2 says someone breathes on it,
+    with or without motion; older reports never set it."""
+    third = "02:57:49:53:50:03"
+    links = [(AP, KIND_AP, -55, 105, 90, 20, 4), (OTHER, KIND_NODE, -60, 290, 800, 10, 5), (third, KIND_NODE, -61, 100, 80, 10, 0)]
+    r = parse_link_report(report(links=links))
+    assert [(link.breathing, link.motion) for link in r.links] == [(True, False), (True, True), (False, False)]
+    table = LinkTable(timeout=10)
+    table.apply(r, now=100.0)
+    assert table.links[(AP, NODE)].breathing and not table.links[(third, NODE)].breathing
+    table.apply(parse_link_report(report(seq=8, links=[(AP, KIND_AP, -55, 105, 90, 20, 0)])), now=101.0)
+    assert not table.links[(AP, NODE)].breathing
+    assert encode_report(7, NODE, links, uptime=42) == report(links=links)
+
+
 def test_table_drops_duplicates_and_counts_gaps():
     table = LinkTable(timeout=10)
     table.apply(r(5), now=0.0)

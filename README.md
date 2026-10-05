@@ -43,14 +43,14 @@ Everything stays on your local network.
 - **Self-forming grid.** Nodes find each other over ESP-NOW, take time slots without a leader, and heal by themselves when a node reboots, leaves or joins.
 - **Homes with several access points.** Nodes agree on one channel and join the best access point on it, so the grid stays together.
 - **The hive.** Every node keeps the same picture of the whole grid and works out the same layout of the nodes.
-- **Motion per link.** Each link from an access point or another node gets a motion score (1 means as quiet as usual) and a motion on/off state.
+- **Motion per link.** Each link from an access point or another node gets a motion score (1 means as quiet as usual) and a motion on/off state, at a threshold of its own: a noisy link raises its threshold from its quiet scores, so every link flags about as rarely with nobody there.
 - **Home Assistant.** Nodes are ESPHome devices (restart, updates, settings, health); the Wisp integration adds the link sensors.
 
 ## Entities
 
 | From | What | Example |
 |---|---|---|
-| Each node (ESPHome) | Motion on the link to its access point, grid size, hive in sync, AP CSI rate, motion threshold, restart, safe mode, identify, firmware update | `binary_sensor.wisp_a8c77c_ap_motion` |
+| Each node (ESPHome) | Motion on the link to its access point, grid size, hive in sync, AP CSI rate, motion threshold, breathing detection (experimental, off), restart, safe mode, identify, firmware update | `binary_sensor.wisp_a8c77c_ap_motion` |
 | Wisp integration | Motion score and motion per link, signal and spread (disabled by default) | `sensor.hall_ap_58_04_4f_1d_12_f9_motion_score` |
 | Wisp integration, once calibrated | Room per floor, presence per room, calibration progress per floor | `sensor.wisp_floor_2_room`, `binary_sensor.wisp_office_presence` |
 | Wisp integration, on a floor with a plan | Position x and y of someone moving, in the plan's metres, with the fit's quality | `sensor.wisp_floor_2_position_x` |
