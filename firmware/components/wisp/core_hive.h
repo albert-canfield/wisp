@@ -14,8 +14,9 @@
 // departed node's row grows old everywhere and expires after a day, even though the remaining
 // nodes keep relaying it to each other: each relay rounds the age up, so a row only grows older
 // on its way around. A node that hears its own row relayed back at a version it has not reached,
-// or at its current version with other readings (it rebooted and its counter restarted), jumps
-// past it, or the others would keep ignoring its new rows as old.
+// or at its current version with other readings (it restarted, and its count began again), takes
+// that row back: its version and its readings, which become the start of its averages. The
+// others already hold it, so nothing changes for them and a restart does not move the layout.
 //
 // A full hive makes room for a new node by dropping the row unheard for longest, once that is
 // longer than ROW_EVICT_MS (a missing node); rows of nodes still heard are never dropped.
@@ -38,6 +39,7 @@ constexpr uint32_t ROW_AGE_UNIT_MS = 4000;  // relayed ages: 16 bits of 4 s, up 
 constexpr uint32_t ROW_AGE_MAX_MS = 65535u * ROW_AGE_UNIT_MS;
 constexpr uint32_t ROW_EVICT_MS = 5 * 60 * 1000;  // a full hive drops a row unheard this long
 constexpr uint32_t SELF_JUMP_MIN_MS = 10 * 1000;  // a duplicate MAC must not make the version race
+constexpr uint32_t ROW_SEED_MS = 60 * 1000;      // a taken-back reading starts a neighbour's average this long
 
 struct HiveEntry {
   Mac mac;
@@ -79,6 +81,7 @@ class Hive {
     this->self_jumps_ = 0;
     this->live_n_ = 0;
     this->own_bumps_ = 0;
+    this->seed_n_ = 0;
   }
 
   // This node's live view, every round. Publishes a new version of its row when a neighbour came
@@ -88,8 +91,13 @@ class Hive {
     if (n > MAX_ROW)
       n = MAX_ROW;
     float avg[MAX_ROW];
+    const bool seeding = this->seed_n_ > 0 && now_ms - this->seed_ms_ < ROW_SEED_MS;
     for (int i = 0; i < n; i++) {
       avg[i] = entries[i].rssi;
+      for (int k = 0; seeding && k < this->seed_n_; k++) {
+        if (this->seed_[k].mac == entries[i].mac)
+          avg[i] = this->seed_[k].rssi;  // a neighbour first heard again since the row was taken back
+      }
       for (int k = 0; k < this->live_n_; k++) {
         if (this->live_[k].mac == entries[i].mac) {
           avg[i] = this->live_avg_[k] + ROW_SMOOTHING * (static_cast<float>(entries[i].rssi) - this->live_avg_[k]);
@@ -142,7 +150,21 @@ class Hive {
         return false;
       if (this->self_jumps_ > 0 && now_ms - this->last_self_jump_ms_ < SELF_JUMP_MIN_MS)
         return false;
-      own->version = static_cast<uint16_t>(version + 1);  // rebooted: move past the old count
+      // Take the row back as the others hold it, and start the averages from its readings.
+      own->version = version;
+      own->len = static_cast<uint8_t>(n);
+      memcpy(own->entries, entries, sizeof(HiveEntry) * n);
+      memcpy(this->seed_, entries, sizeof(HiveEntry) * n);
+      this->seed_n_ = n;
+      this->seed_ms_ = now_ms;
+      for (int k = 0; k < this->live_n_; k++) {
+        for (int i = 0; i < n; i++) {
+          if (this->live_[k].mac == entries[i].mac)
+            this->live_avg_[k] = entries[i].rssi;
+        }
+      }
+      this->last_own_bump_ms_ = now_ms;
+      this->own_bumps_++;
       this->last_self_jump_ms_ = now_ms;
       this->self_jumps_++;
       this->hash_dirty_ = true;
@@ -214,8 +236,8 @@ class Hive {
   int count() const { return this->count_; }
   const HiveRow &row(int i) const { return this->rows_[i]; }
   const Mac &self() const { return this->self_; }
-  // Times this node moved its own version past a copy relayed back: after a reboot, once. Many
-  // more mean another device uses this node's MAC.
+  // Times this node took its own row back from a relayed copy: after a restart, once or twice.
+  // Many more mean another device uses this node's MAC.
   uint32_t self_jumps() const { return this->self_jumps_; }
 
  protected:
@@ -281,6 +303,10 @@ class Hive {
   int live_n_{0};
   uint32_t last_own_bump_ms_{0};
   uint32_t own_bumps_{0};
+  // Readings of a row taken back after a restart, to start the averages of neighbours heard again.
+  HiveEntry seed_[MAX_ROW]{};
+  int seed_n_{0};
+  uint32_t seed_ms_{0};
 };
 
 // ---- ESP-NOW hive row frame (type 2), sent right after the beacon to relay one row ----------

@@ -365,9 +365,9 @@ void WispComponent::publish_stats_(uint32_t now) {
   if (jumps != this->self_jumps_seen_) {
     this->self_jumps_seen_ = jumps;
     if (jumps <= 2)
-      ESP_LOGI(TAG, "Hive: this node's own row came back newer than its count (restarted): moved past it");
+      ESP_LOGI(TAG, "Hive: took this node's row back from the grid after a restart");
     else
-      ESP_LOGW(TAG, "Hive: own row moved past a relayed copy %" PRIu32 " times: does another device use this MAC?",
+      ESP_LOGW(TAG, "Hive: own row taken back from a relayed copy %" PRIu32 " times: does another device use this MAC?",
                jumps);
   }
   if (now - this->last_health_ms_ >= HEALTH_LOG_INTERVAL_MS) {

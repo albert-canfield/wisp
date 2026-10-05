@@ -142,7 +142,8 @@ static void test_gossip_over_a_chain() {
 }
 
 // After a reboot a node's row counter restarts; the others hold its old, higher version and would
-// ignore the new rows. Hearing its own old row relayed back makes it jump past it.
+// ignore the new rows. Hearing its own old row relayed back, it takes that row back, version and
+// readings: nothing changes for the others, and its averages go on from where they were.
 static void test_rebooted_node_gets_back_in_sync() {
   Hive a(mac_n(1)), b(mac_n(2));
   HiveEntry ea[1] = {{mac_n(2), -50}}, eb[1] = {{mac_n(1), -52}};
@@ -159,10 +160,10 @@ static void test_rebooted_node_gets_back_in_sync() {
   CHECK(!a.on_row(mac_n(2), b2.own()->version, b2.own()->entries, 1, 1000));  // looks old to A
   const HiveRow *old = a.find(mac_n(2));
   CHECK(b2.on_row(mac_n(2), old->version, old->entries, old->len, 1100, 0));  // A relays B's old row
-  CHECK(b2.own()->version == static_cast<uint16_t>(old->version + 1));
-  CHECK(a.on_row(mac_n(2), b2.own()->version, b2.own()->entries, 1, 1200));  // now accepted
+  CHECK(b2.own()->version == old->version && b2.own()->entries[0].rssi == old->entries[0].rssi);
   b2.on_row(mac_n(1), a.own()->version, a.own()->entries, 1, 1200);
-  CHECK(a.hash() == b2.hash());
+  CHECK(a.hash() == b2.hash());  // in sync, and A's view of B never changed
+  CHECK(!b2.set_own(eb, 1, 1300) && b2.own()->version == old->version);  // no jump in its readings
 }
 
 // A node that left: the two that remain keep relaying its row to each other, but the age they
@@ -224,19 +225,19 @@ static void test_full_hive_makes_room() {
   CHECK(!h.on_row(mac_n(98), 1, e, 1, now, ROW_EXPIRE_MS));  // a relay older than the expiry
 }
 
-// After two quick reboots the others may hold this node's old row at the very version it
-// reached again: other readings at the same version also make it move on, at most every 10 s.
+// After two quick restarts the others may hold this node's old row at the very version it
+// reached again: other readings at the same version are taken back too, at most every 10 s.
 static void test_stale_copy_of_own_row() {
   Hive a(mac_n(1));
   HiveEntry fresh[1] = {{mac_n(2), -50}}, old[1] = {{mac_n(2), -85}};
   a.set_own(fresh, 1, 0);
   const uint16_t v = a.own()->version;
   CHECK(!a.on_row(mac_n(1), v, fresh, 1, 1000));  // its own row relayed back as it is: nothing
-  CHECK(a.on_row(mac_n(1), v, old, 1, 2000));      // same version, other readings: move past
-  CHECK(a.own()->version == static_cast<uint16_t>(v + 1) && a.self_jumps() == 1);
+  CHECK(a.on_row(mac_n(1), v, old, 1, 2000));      // same version, other readings: taken back
+  CHECK(a.own()->version == v && a.own()->entries[0].rssi == -85 && a.self_jumps() == 1);
   CHECK(!a.on_row(mac_n(1), static_cast<uint16_t>(v + 5), old, 1, 5000));  // within 10 s: waits
   CHECK(a.on_row(mac_n(1), static_cast<uint16_t>(v + 5), old, 1, 13000));
-  CHECK(a.own()->version == static_cast<uint16_t>(v + 6) && a.self_jumps() == 2);
+  CHECK(a.own()->version == static_cast<uint16_t>(v + 5) && a.self_jumps() == 2);
 }
 
 // Random floors with noisy RSSI: the layout must keep two dimensions (it used to collapse onto
