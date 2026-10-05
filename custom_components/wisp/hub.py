@@ -158,7 +158,7 @@ class WispHub:
         dev_reg = dr.async_get(self.hass)
         changed = False
         for mac, sub in wanted.items():
-            host, name = sub.data[CONF_HOST], sub.data.get(CONF_NAME) or sub.title
+            host, name = sub.data[CONF_HOST], self.node_name(mac, sub.data.get(CONF_NAME) or sub.title)
             node = self.nodes.get(mac)
             if node is None:
                 self.nodes[mac] = node = Node(mac, host, name, sub.subentry_id)
@@ -192,11 +192,23 @@ class WispHub:
                 return device.area_id
         return legacy
 
+    def node_name(self, mac: str, own: str) -> str:
+        """The name the user gave the node's device in Home Assistant (Wisp's own device first,
+        then ESPHome's), else Wisp's own: renaming the device renames the node everywhere in Wisp."""
+        devices = node_devices(self.hass, mac)
+        ours = [d for d in devices if self.entry.entry_id in d.config_entries]
+        for device in ours + [d for d in devices if d not in ours]:
+            if device.name_by_user:
+                return device.name_by_user
+        return own
+
     @callback
     def _async_device_updated(self, _event: Event[dr.EventDeviceRegistryUpdatedData]) -> None:
         changed = False
         for node in self.nodes.values():
             sub = self.entry.subentries.get(node.subentry_id) if node.subentry_id else None
+            if sub is not None:
+                node.name = self.node_name(node.mac, sub.data.get(CONF_NAME) or sub.title)
             area = self.node_area(node.mac, sub.data.get(CONF_AREA) if sub else None)
             if area != node.area:
                 node.area, changed = area, True

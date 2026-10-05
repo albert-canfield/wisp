@@ -263,3 +263,29 @@ async def test_empty_floor_of_the_hub_by_its_name(hass: HomeAssistant, udp: Fake
     with pytest.raises(ServiceValidationError) as err:
         await hass.services.async_call(DOMAIN, "calibrate_empty", {"floor": "Wisp"}, blocking=True)
     assert err.value.translation_key == "unknown_floor"
+
+
+async def test_renamed_devices_rename_their_nodes(hass: HomeAssistant, udp: FakeUdp) -> None:
+    """A node takes the name its device is given in Home Assistant, Wisp's own device first, and
+    its own name again when that is cleared: the map, the panel and the sensors follow."""
+    entry = await setup_hub(hass, HALL, OFFICE)
+    hub = entry.runtime_data
+    registry = dr.async_get(hass)
+    esphome = MockConfigEntry(domain="esphome", unique_id=NODE_A)
+    esphome.add_to_hass(hass)
+    theirs = registry.async_get_or_create(
+        config_entry_id=esphome.entry_id, connections={(CONNECTION_NETWORK_MAC, NODE_A)}, name="Wisp 535001"
+    )
+    registry.async_update_device(theirs.id, name_by_user="Desk node")
+    await hass.async_block_till_done()
+    assert hub.nodes[NODE_A].name == "Desk node"
+    ours = next(
+        d for d in dr.async_entries_for_config_entry(registry, entry.entry_id) if (CONNECTION_NETWORK_MAC, NODE_B) in d.connections
+    )
+    registry.async_update_device(ours.id, name_by_user="Hall corner")
+    await hass.async_block_till_done()
+    assert [n["name"] for n in hub.panel_snapshot()["nodes"]] == ["Desk node", "Hall corner"]
+    assert [n["name"] for n in hub.map_snapshot()["nodes"]] == ["Desk node", "Hall corner"]
+    registry.async_update_device(ours.id, name_by_user=None)
+    await hass.async_block_till_done()
+    assert hub.nodes[NODE_B].name == "Office"
