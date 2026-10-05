@@ -76,6 +76,21 @@ Tools are in [firmware/tools](firmware/tools): a guided walk test that reports h
 - Your existing WiFi router or access point, which also takes part in the sensing.
 - Home Assistant 2026.3 or newer.
 
+## Access point settings
+
+Each node pings the access point it joins and measures the replies, so its motion score is only as steady as that access point. Nodes reach each other on one 2.4 GHz channel, which they agree on by themselves. Recommended 2.4 GHz settings, none required:
+
+| Setting | Why |
+|---|---|
+| The same channel on every access point: 1, 6 or 11, the quietest | Each node then joins its nearest access point; nodes follow the channel by themselves |
+| 20 MHz width | 40 MHz overlaps the other 2.4 GHz channels and can fall back to 20 MHz on its own |
+| Fixed transmit power, the same on every access point, never Auto (lower it if access points are close) | Power changes look like motion; with equal power the strongest access point is the nearest |
+| No automatic channel or power optimisation | A channel change moves the whole grid, a power change looks like motion |
+| No minimum RSSI kick, load balancing or client limit on the nodes' network | Nodes choose their own access point; a kicked node stops sensing until it reconnects |
+| Optional: disable 802.11b (CCK) rates | Beacons then carry usable CSI too; ping replies already do |
+
+OFDMA, band steering and the wireless mode do not matter for the nodes, as long as their network keeps 2.4 GHz with 802.11n. The trade-off: access points on one 2.4 GHz channel share its airtime, but most phones and laptops use 5 or 6 GHz anyway. Where each setting is on TP-Link Omada, Ubiquiti UniFi and consumer routers: [docs/SETUP.md](docs/SETUP.md#5-access-points).
+
 ## Web flasher
 
 Nodes are flashed from the browser, with nothing to install. Open the Wisp web flasher in Chrome or Edge, plug the board in by USB, click Install and enter your WiFi details. Home Assistant then discovers the node by itself. The flasher goes live with the first firmware release at [albert-canfield.github.io/wisp](https://albert-canfield.github.io/wisp).

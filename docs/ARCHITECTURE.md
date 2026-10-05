@@ -130,6 +130,8 @@ The access point is a free extra point in the grid: always on, never moves, and 
 
 Many homes have more than one access point under the same WiFi name: a mesh system, or several APs on one controller. Each AP radio has its own MAC address (BSSID), so nodes can tell them apart, and every AP becomes another fixed point.
 
+**Built so far:** the grid channel (below), and each node's own AP as its CSI source, from the replies to its pings. **Planned:** the rest of this list.
+
 - **Telling APs apart.** One physical AP often has several BSSIDs on the same radio (main, guest and IoT networks). Nodes group BSSIDs into one AP when they share the channel, their MACs differ only in the last digits or the "locally administered" bit, and every node hears them at the same strength. Each physical AP gets an id in the hive (AP1, AP2, AP3).
 - **Recognising them in Home Assistant.** Each AP is listed with its BSSIDs and the node that hears it best, so the user can tell which is which and mark it on the floor plan once.
 - **Home AP per node.** Each node locks to the strongest AP on the grid channel. The hive spreads the nodes' home APs across the APs, so every AP sends regular ping replies.
@@ -141,13 +143,13 @@ Many homes have more than one access point under the same WiFi name: a mesh syst
 
 **Grid channel (built).** Every node applies one rule to the APs of its own network that it heard while connecting: the grid channel is the channel of the lowest BSSID heard at -80 dBm or better, and the node joins the strongest AP on that channel. The choice is saved, and that AP gets a one-step priority boost in ESPHome's AP ranking, so later boots join it directly; one failed attempt puts it level with the others again, so a dead AP never strands a node. A node that lands on another channel disconnects once and lets ESPHome reconnect with the boost (at most three times per boot). ESPHome's own roaming is off. `grid_channel` in the YAML can force a channel. In the owner's home (APs on 1, 6 and 11) both test nodes moved to channel 1 and formed a grid.
 
-**Same channel or not.** Best results come when every AP's 2.4 GHz radio uses the same channel: then all of them are live sensing points. If they use different channels, nodes stay on the grid channel; APs on other channels only contribute signal strength from a quick scan every few minutes, which helps placement but not live sensing. The setup flow shows which case a home is in and what moving the APs to one channel would gain.
+**Same channel or not.** Best results come when every AP's 2.4 GHz radio uses the same channel: then each node joins its nearest AP, so every AP serves the nodes around it. If they use different channels, nodes stay on the grid channel; APs on other channels only contribute signal strength from a quick scan every few minutes, which helps placement but not live sensing. The setup flow shows which case a home is in and what moving the APs to one channel would gain.
 
 **Access point settings that help.** None are required; each one makes sensing better. Example names are from TP-Link Omada.
 
 | Setting | Why | In Omada |
 |---|---|---|
-| Same fixed 2.4 GHz channel on every AP (1, 6 or 11, 20 MHz) | All APs become live sensing points for the whole grid | Devices > AP > Config > Radios |
+| Same fixed 2.4 GHz channel on every AP (1, 6 or 11, 20 MHz) | Each node joins its nearest AP | Devices > AP > Config > Radios |
 | Fixed 2.4 GHz transmit power, not auto | Automatic power changes look like people moving | Same place |
 | Disable 802.11b (CCK) rates, keep beacons above 1 Mbps | Beacons and management frames then carry CSI | WLAN > SSID > 802.11 Rate Control |
 | No automatic channel changes on 2.4 GHz | Every change forces the grid to move channel | Channel and WLAN optimisation settings |

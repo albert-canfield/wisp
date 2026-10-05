@@ -47,19 +47,45 @@ Then mark them on a floor plan, so the map and positions match your home:
 
 ## 5. Access points
 
-Wisp works with any access point, and uses it as an extra fixed point. Homes with several access points work too: nodes agree on one channel by themselves and join the best access point on it.
+Wisp works with any access point, and uses it as an extra fixed point. Each node pings the access point it joins 20 times a second, and the replies carry the signal detail (CSI) for that link. A node only uses its own access point, so its motion score depends on that access point transmitting steadily.
 
-These settings help, none is required (names from TP-Link Omada):
+Nodes reach each other on one 2.4 GHz channel, the grid channel, and every node picks it with the same rule: the channel of the lowest BSSID (radio MAC address) of your network heard at -80 dBm or better. Each node then joins the strongest access point on that channel. With every access point on the same channel, each node joins its nearest one; with access points on different channels, all nodes crowd onto the access points of one channel. Nodes choose their access point themselves (ESPHome's roaming is off), so an access point that kicks weak clients or balances load can drop a node.
+
+These 2.4 GHz settings help, none is required:
 
 | Setting | Why |
 |---|---|
-| The same 2.4 GHz channel on every access point (1, 6 or 11, 20 MHz) | Every access point then becomes a live sensing point for the whole grid |
-| Fixed 2.4 GHz transmit power, not Auto | Automatic power changes look like people moving |
-| Disable 802.11b (CCK) rates (Omada: WLAN > SSID > 802.11 Rate Control) | Beacons then carry the signal detail Wisp uses |
-| No automatic channel optimisation on 2.4 GHz | Each channel change forces the grid to move |
-| No minimum-signal kick or load balancing for the nodes' network | Stops access points from dropping a weak node |
+| The same channel on every access point: 1, 6 or 11, the quietest one | Each node then joins its nearest access point; nodes follow the channel by themselves |
+| 20 MHz channel width | 40 MHz overlaps the other 2.4 GHz channels and can fall back to 20 MHz on its own |
+| Fixed transmit power, the same on every access point, never Auto (lower it if access points are close) | Power changes look like motion; with equal power the strongest access point is the nearest |
+| No automatic channel or power optimisation | A channel change moves the whole grid; a power change looks like motion |
+| No minimum RSSI, load balancing or client limit on the nodes' network | A kicked node stops sensing until it reconnects |
+| Optional: no 802.11b (CCK) rates, 2.4 GHz minimum rate 6 Mbps | Beacons then carry usable CSI too; ping replies already do |
 
-2.4 GHz must be on for the network the nodes use: ESP32 boards only use 2.4 GHz.
+OFDMA, band steering and the wireless mode do not matter for the nodes, as long as their network keeps 2.4 GHz with 802.11n: ESP32 boards only use 2.4 GHz, up to 802.11n. Without 802.11b rates, only devices that support nothing newer lose access, and those are rare today.
+
+The trade-off: access points sharing one 2.4 GHz channel share its airtime. Most phones and laptops use 5 or 6 GHz anyway, so the cost is usually small.
+
+### TP-Link Omada
+
+- **Channel, width and power:** Devices > the access point > Config > Radios (Wireless on some versions): 2.4 GHz channel, Channel Width 20 MHz, Tx Power Custom. Repeat on every access point.
+- **Optimisation:** in the site settings, WLAN Optimization off.
+- **802.11b rates:** edit the SSID, Advanced Settings > 802.11 Rate Control: 2.4 GHz minimum rate 6 Mbps.
+- **Kicks and limits:** RSSI Threshold off, and Maximum Associated Clients off on each access point.
+
+### Ubiquiti UniFi
+
+- **Channel, width and power:** Radio Manager, or each access point's radio settings: 2.4 GHz channel, Channel Width 20 MHz (HT20), Transmit Power Custom.
+- **Optimisation:** Nightly Channel Optimization off, and Auto-Optimize Network off.
+- **Kicks:** Minimum RSSI off on the 2.4 GHz radios.
+- **802.11b rates:** in the WiFi network's settings, Legacy Support off, or a 2.4 GHz minimum data rate of 6 Mbps.
+- Band Steering does not matter.
+
+### Consumer routers and mesh systems
+
+- Pick a fixed 2.4 GHz channel (1, 6 or 11) instead of Auto, and 20 MHz width. If transmit power has a setting, pick a fixed level.
+- Smart Connect (one network name for both bands) can stay on; turn it off only if it leaves the nodes without 2.4 GHz.
+- Some mesh systems (Eero, Deco, Orbi) choose their channels themselves and cannot be fixed. Wisp still works: nodes follow a channel change by themselves, with a short pause while they move.
 
 ## 6. Checking that it works
 
