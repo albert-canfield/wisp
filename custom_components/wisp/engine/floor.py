@@ -106,5 +106,10 @@ class FloorModel:
         spot = self._locator.locate(values, self.min_disturbance)
         if spot is None:
             return None
-        x, y = self.track.update(spot.x, spot.y, now, spot.contrast)
-        return FloorFix(x, y, spot.x, spot.y, spot.contrast)
+        sx, sy = spot.x, spot.y
+        if self._plan is not None:  # someone on this floor is inside its plan, not beyond its walls
+            sx, sy = min(max(sx, 0.0), self._plan[0]), min(max(sy, 0.0), self._plan[1])
+        x, y = self.track.update(sx, sy, now, spot.contrast)
+        if self._plan is not None:
+            x, y = min(max(x, 0.0), self._plan[0]), min(max(y, 0.0), self._plan[1])
+        return FloorFix(x, y, sx, sy, spot.contrast)

@@ -88,3 +88,17 @@ def test_no_one_without_a_link_in_motion() -> None:
     moving = {k for k, v in busy.items() if v >= 2.0}
     fix = floor.update(busy, now=2.0, moving=moving)
     assert moving and fix is not None and math.dist((fix.raw_x, fix.raw_y), person) < 1.0
+
+
+def test_positions_stay_on_the_plan() -> None:
+    """On a floor plan, someone is placed inside it, even when the links point past its edge."""
+    floor = FloorModel()
+    placed = {mac: (p[0] + 0.5, p[1] + 0.5) for mac, p in NODES.items()}
+    floor.set_layout(hive_state(), placed, plan=(6.5, 5.0), nodes=set(NODES))
+    positions = {**floor.positions}
+    links = [(t, r) for t in positions for r in NODES if t != r]
+    person = (7.0, 2.7)  # just past the right wall, by the nodes standing on it
+    fixes = [floor.update({k: score(person, *k, positions) for k in links}, now=float(i), moving=set(links)) for i in range(5)]
+    fixes = [f for f in fixes if f is not None]
+    assert fixes and all(0 <= f.x <= 6.5 and 0 <= f.y <= 5.0 and 0 <= f.raw_x <= 6.5 for f in fixes)
+    assert max(f.raw_x for f in fixes) == 6.5  # held at the wall

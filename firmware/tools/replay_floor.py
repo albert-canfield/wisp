@@ -59,6 +59,7 @@ def main() -> int:
     ap.add_argument("--port", type=int, default=47010)
     ap.add_argument("--since", help="only packets from this local time on, HH:MM")
     ap.add_argument("--threshold", type=float, default=2.0, help="the nodes' motion threshold")
+    ap.add_argument("--nodes", help="only these nodes (comma separated MACs), as one floor of a house")
     ap.add_argument("--min-disturbance", type=float, nargs="+", default=[0.3, 0.5, 0.8, 1.2],
                     help="sum of log scores below which nobody is moving (FloorModel's default: 0.3)")
     args = ap.parse_args()
@@ -73,12 +74,14 @@ def main() -> int:
         return 1
     models = {(m, gated): FloorModel(min_disturbance=m) for m in args.min_disturbance for gated in (True, False)}
     detectors: dict[tuple, Detector] = {}
+    floor_nodes = set(args.nodes.lower().split(",")) if args.nodes else None
     for model in models.values():
-        model.set_layout(hive)
+        model.set_layout(hive, nodes=floor_nodes)
     print("positions (m): " + ", ".join(f"{mac[-8:]} ({x:.1f}, {y:.1f})" for mac, (x, y) in
                                        sorted(next(iter(models.values())).positions.items())))
 
     fixes: dict[tuple, list[tuple[float, float, float, float]]] = {key: [] for key in models}
+    raw: dict[tuple, list[tuple[float, float, float]]] = {key: [] for key in models}
     total = 0
     disturbance = []
     for t, tick in seconds(packets):
@@ -90,6 +93,7 @@ def main() -> int:
         for (m, gated), model in models.items():
             if (fix := model.update(scores, t, moving if gated else None)) is not None:
                 fixes[(m, gated)].append((t, fix.x, fix.y, fix.quality))
+                raw[(m, gated)].append((t, fix.raw_x, fix.raw_y))
 
     if not total:
         print("less than a second of packets")
@@ -109,6 +113,14 @@ def main() -> int:
         print(f"{m:16.2f} {'link motion' if gated else 'sum only':>12s} {len(rows):7d} {len(rows) / max(total, 1):7.2%} "
               f"{stretches:10d} {longest:10d}")
     default = (min(args.min_disturbance), True)
+    # How far the position moves from one second to the next, while someone moves: a person walks
+    # about 1 m a second, so longer steps are noise the map shows as jumps.
+    for label, rows in (("smoothed", [(t, x, y) for t, x, y, _ in fixes[default]]), ("raw fit", raw[default])):
+        steps = [math.dist(a[1:], b[1:]) for a, b in zip(rows, rows[1:]) if b[0] - a[0] <= 1.01]
+        if steps:
+            st = sorted(steps)
+            print(f"{label:9s} steps a second: p50 {st[len(st) // 2]:.2f} m, p90 {st[int(0.9 * len(st))]:.2f} m, "
+                  f"max {st[-1]:.2f} m, over 1.5 m {sum(x > 1.5 for x in st) / len(st):.0%} of {len(st)}")
     for t, x, y, q in fixes[default][:20]:
         print(f"   {time.strftime('%H:%M:%S', time.localtime(t))} at ({x:5.1f}, {y:5.1f}), quality {q:.2f}")
     return 0
