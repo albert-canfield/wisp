@@ -49,20 +49,50 @@ def test_user_placed_positions_win() -> None:
 
 
 def test_follows_a_walk() -> None:
+    """Walking at a normal pace across the room: footsteps follow within a few seconds."""
     floor = FloorModel()
     floor.set_layout(hive_state())
     truth_positions = {**NODES, AP[0]: AP[1]}
     links = [(t, r) for t in truth_positions for r in NODES if t != r]
     rng = random.Random(8)
-    errors = []
-    for i in range(40):  # walking diagonally across the room, one reading a second
-        person = (0.8 + 0.11 * i, 0.8 + 0.07 * i)
+    errors, walking = [], []
+    for i in range(16):  # 0.6 m/s diagonally across the room, one reading a second
+        person = (0.6 + 0.3 * i, 0.6 + 0.2 * i)
         scores = {k: score(person, *k, truth_positions) * rng.uniform(0.9, 1.1) for k in links}
         fix = floor.update(scores, now=float(i))
-        assert fix is not None or i == 0  # the first second alone shows nobody: it could be noise
-        if i >= 5:
+        walking.append(fix is not None and fix.walking)
+        if fix is not None and fix.walking:
             errors.append(math.dist((fix.x, fix.y), person))
+    assert not walking[0] and all(walking[6:]), walking  # one second is not a walk; then it follows
     assert sum(errors) / len(errors) < 0.8, errors
+
+
+def test_sitting_still_stays_put() -> None:
+    """Someone sitting and working: a fit now and then along the links near them, scattered by
+    noise. One steady spot near them, not someone darting about."""
+    floor = FloorModel()
+    floor.set_layout(hive_state())
+    positions = {**NODES, AP[0]: AP[1]}
+    links = [(t, r) for t in positions for r in NODES if t != r]
+    rng = random.Random(3)
+    desk = (1.5, 1.2)
+    quiet = {k: 1.0 for k in links}
+    spots = []
+    for i in range(60):
+        if i % 3 == 0:  # typing, turning: a disturbance every few seconds, never in the same spot
+            near = (desk[0] + rng.uniform(-0.8, 0.8), desk[1] + rng.uniform(-0.8, 0.8))
+            scores = {k: score(near, *k, positions) for k in links}
+        else:
+            scores = quiet
+        fix = floor.update(scores, now=float(i))
+        if i >= 10:
+            assert fix is not None and not fix.walking, i  # present, and still
+            spots.append((fix.x, fix.y))
+    assert max(math.dist(a, b) for a, b in zip(spots, spots[1:])) < 0.6  # it does not jump around
+    assert math.dist(spots[-1], desk) < 1.0
+    for i in range(60, 85):  # gone: nobody after the still window
+        fix = floor.update(quiet, now=float(i))
+    assert fix is None
 
 
 def test_quiet_floor_and_unknown_links() -> None:
@@ -76,13 +106,15 @@ def test_quiet_floor_and_unknown_links() -> None:
 
 def test_no_one_without_a_link_in_motion() -> None:
     """Quiet links add up to a phantom now and then: a fix needs a link that reports motion."""
-    floor = FloorModel(min_streak=1)
+    floor = FloorModel(min_streak=1, still_min=1)
     floor.set_layout(hive_state())
     positions = {**NODES, AP[0]: AP[1]}
     links = [(t, r) for t in positions for r in NODES if t != r]
     noisy = {k: 1.0 + 0.12 * (i % 3) for i, k in enumerate(links)}  # every link a bit restless
     assert floor.update(noisy, now=0.0) is not None  # enough for the sum alone
-    assert floor.update(noisy, now=1.0, moving=set()) is None
+    gated = FloorModel(min_streak=1, still_min=1)
+    gated.set_layout(hive_state())
+    assert gated.update(noisy, now=1.0, moving=set()) is None  # but no link reports motion
     person = (2.0, 2.0)
     busy = {k: score(person, *k, positions) for k in links}
     moving = {k for k, v in busy.items() if v >= 2.0}
@@ -112,7 +144,7 @@ def test_rooms_keep_someone_in_the_house_and_in_the_room_room_presence_is_sure_o
     assert inside(office + hall, 4.8, 0.5) == (4.0, 0.5)  # in the corner the L leaves out: nearest wall
     assert inside(office + hall, -2.0, 6.0) == (0.0, 5.0)  # outside the house
 
-    floor = FloorModel(min_streak=1)
+    floor = FloorModel(min_streak=1, still_min=1)
     placed = {mac: (p[0] + 0.5, p[1] + 0.5) for mac, p in NODES.items()}
     floor.set_layout(hive_state(), placed, plan=(6.5, 5.0), nodes=set(NODES), rooms={"office": office, "hall": hall})
     positions = dict(floor.positions)
@@ -121,20 +153,21 @@ def test_rooms_keep_someone_in_the_house_and_in_the_room_room_presence_is_sure_o
     scores = {k: score(person, *k, positions) for k in links}
     fix = floor.update(scores, now=0.0, moving=set(links))
     assert fix is not None and fix.raw_x >= 3.0  # where the links say: the hall
-    floor = FloorModel(min_streak=1)
+    floor = FloorModel(min_streak=1, still_min=1)
     floor.set_layout(hive_state(), placed, plan=(6.5, 5.0), nodes=set(NODES), rooms={"office": office, "hall": hall})
     fix = floor.update(scores, now=0.0, moving=set(links), room="office")  # room presence is sure: office
     assert fix is not None and fix.raw_x <= 3.0 and fix.x <= 3.0
 
 
 def test_unsure_fits_and_single_seconds_show_nobody() -> None:
-    floor = FloorModel()  # min_streak 2
+    floor = FloorModel()
     floor.set_layout(hive_state())
     positions = {**NODES, AP[0]: AP[1]}
     links = [(t, r) for t in positions for r in NODES if t != r]
     busy = {k: score((2.0, 2.0), *k, positions) for k in links}
-    assert floor.update(busy, now=0.0) is None and floor.update(busy, now=1.0) is not None
-    assert floor.update({k: 1.0 for k in links}, now=2.0) is None  # quiet: the streak starts over
-    assert floor.update(busy, now=3.0) is None
-    floor.min_quality = 1.01  # nothing explains the pattern that well
-    assert floor.update(busy, now=4.0) is None and floor.update(busy, now=5.0) is None
+    quiet = {k: 1.0 for k in links}
+    assert floor.update(busy, now=0.0) is None  # one fit is nobody yet
+    assert floor.update(quiet, now=1.0) is None
+    floor.min_quality = 1.01  # nothing explains the pattern that well: unsure fits count for nothing
+    for t in range(2, 8):
+        assert floor.update(busy, now=float(t)) is None

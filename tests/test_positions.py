@@ -38,7 +38,8 @@ async def test_someone_moving_is_placed(hass: HomeAssistant, udp: FakeUdp) -> No
     people = hub.map_snapshot()["people"]
     assert len(people) == 1
     person = people[0]
-    assert set(person) == {"floor", "name", "x", "y", "quality"}
+    assert set(person) == {"floor", "name", "x", "y", "quality", "walking"}
+    assert person["walking"] is False  # the same line disturbed again and again: someone in place
     assert -2.5 <= person["x"] <= 2.5  # somewhere along the Hall to Office line, not at the access point
     assert abs(person["y"]) < 1.5
     diagnostics = await async_get_config_entry_diagnostics(hass, entry)

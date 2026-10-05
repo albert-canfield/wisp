@@ -493,6 +493,7 @@ class RoomPresence:
                 "x": round(fix.x, 2),
                 "y": round(fix.y, 2),
                 "quality": round(fix.quality, 2),
+                "walking": fix.walking,  # False: present and still; the map draws no footsteps
             }
             for key, fix in self.fixes.items()
             if key in self.floors

@@ -342,7 +342,7 @@ function walker(tr, to, s, now) {
   const sure = clamp(newest.q, 0, 1);
   const r = 12 + 18 * clamp((1 - sure) / 0.7, 0, 1); // 12 px sure, 30 px at 30% and less
   const angle = segs.length ? heading(segs[0].ux, segs[0].uy) : 0; // toes up before the first step
-  const tip = tr.gone ? "Someone moved here" : `Someone moving here, ${Math.round(sure * 100)}% sure`;
+  const tip = tr.gone ? "Someone was here" : tr.still ? "Someone here, keeping still" : `Someone moving here, ${Math.round(sure * 100)}% sure`;
   const mark = `<g class="person" transform="translate(${n1(head.x)} ${n1(head.y)})"><title>${tip}</title><circle class="halo" r="${n1(r)}"/><g transform="rotate(${n1(angle)})"><g transform="translate(-4.6 2.5) rotate(-9) scale(.55)">${FOOT}</g><g transform="translate(4.6 -2.5) rotate(9) scale(.55)">${FOOT}</g></g></g>`;
   // Nobody moves: the trail fades out; a negative delay keeps it fading across redraws
   const fade = tr.gone ? ` style="animation-delay:${((tr.gone - now) / 1000).toFixed(2)}s"` : "";
@@ -534,7 +534,8 @@ class WispMapCard extends HTMLElement {
   }
 
   /* Per floor, the last fixes of whoever moves: a step too long or a pause too long starts a new
-     trail; a floor nobody moves on any more keeps its trail while it fades. */
+     trail; a floor nobody moves on any more keeps its trail while it fades. Someone present and
+     still (walking false: the engine's steady spot) adds no steps: the mark stays where they are. */
   _track(map, now) {
     const trails = (this._trails ??= new Map());
     const seen = new Set();
@@ -543,19 +544,20 @@ class WispMapCard extends HTMLElement {
       const key = p.floor ?? "";
       seen.add(key);
       const fix = { x: p.x, y: p.y, t: now, q: clamp(p.quality ?? 0, 0, 1) };
+      const still = p.walking === false;
       let tr = trails.get(key);
       const last = tr?.fixes[tr.fixes.length - 1];
       const d = last ? Math.hypot(fix.x - last.x, fix.y - last.y) : 0;
       if (!last || d > JUMP_M || now - tr.seen > GAP_S * 1000) {
         tr = { fixes: [fix], walked: 0 };
         trails.set(key, tr);
-      } else if (d < 0.02) {
-        last.q = fix.q; // standing still
+      } else if (still || d < 0.02) {
+        Object.assign(last, { x: fix.x, y: fix.y, q: fix.q }); // present and still: no new steps
       } else {
         tr.fixes.push(fix);
         tr.walked += d;
       }
-      Object.assign(tr, { seen: now, gone: null });
+      Object.assign(tr, { seen: now, gone: null, still });
       tr.fixes = tr.fixes.filter((f, i, all) => i === all.length - 1 || now - f.t <= TRAIL_S * 1000).slice(-TRAIL_N);
     }
     for (const [key, tr] of trails) if (!seen.has(key) && tr.gone == null) tr.gone = now;

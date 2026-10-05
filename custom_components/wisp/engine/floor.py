@@ -11,13 +11,19 @@ Track. The gate keeps the map in step with the motion sensors: quiet links alone
 phantom now and then, more often the more links a floor has.
 
 Few links leave the best fit coarse, and WiFi bounces off walls, so links away from someone react
-too. So a fit that explains little of the pattern (min_quality) is dropped, someone appears only
-after fits in min_streak seconds in a row, and with rooms drawn on the plan a fit is kept inside
-the house, and inside the room that room presence is sure of when there is one.
+too. So a fit that explains little of the pattern (min_quality) is dropped, and with rooms drawn
+on the plan a fit is kept inside the house, and inside the room that room presence is sure of.
+
+Someone sitting and working makes short, scattered disturbances on the same few links, each one
+a fit somewhere along them: drawn as they come, that is someone darting about. So fits are kept
+for a while and read together. Walking: fits in most of the last 6 s, and the centre of their
+newer half a metre or more from the centre of their older half; the Track follows them. Still: a few fits in
+the last 20 s without that travel; the spot is their centre, weighted by quality, and stays put.
 """
 
 from __future__ import annotations
 
+from collections import deque
 from collections.abc import Collection, Mapping
 from dataclasses import dataclass, field
 import math
@@ -55,6 +61,7 @@ class FloorFix:
     raw_x: float  # this second's best fit
     raw_y: float
     quality: float  # share of the link pattern the fit explains, 0 to 1
+    walking: bool = True  # False: someone present and still, at the centre of recent fits
 
 
 @dataclass
@@ -62,7 +69,14 @@ class FloorModel:
     width: float = 0.4  # metres a person reaches from a link's line, see Locator
     min_disturbance: float = 0.3  # sum of log scores below which nobody is moving
     min_quality: float = 0.35  # a fit explaining less of the link pattern is too unsure to show
-    min_streak: int = 2  # seconds in a row with a fit before someone appears
+    min_streak: int = 2  # seconds in a row with a fit before someone appears walking
+    still_window: float = 20.0  # seconds of fits behind a still person's spot
+    still_min: int = 3  # fits in that window for someone present and still
+    walk_span: float = 6.0  # seconds of fits that tell walking: their older half against the newer
+    walk_min: int = 4  # fits in the last walk_span seconds for walking
+    walk_travel: float = 1.0  # metres between the centres of the two halves, for walking
+    fits: deque = field(default_factory=deque, init=False)  # (time, x, y, quality)
+    walking: bool = field(default=False, init=False)
     rooms: dict[str, list[Rect]] = field(default_factory=dict, init=False)  # on a plan, by area
     streak: int = field(default=0, init=False)
     positions: dict[str, Point] = field(default_factory=dict, init=False)
@@ -128,28 +142,56 @@ class FloorModel:
             self._key = key
             self._locator = Locator(self.positions, usable, width=self.width) if len(usable) >= 2 else None
         if self._locator is None:
-            self.streak = 0
-            return None
+            return self._read(None, now)
         if moving is not None and not any(k in moving for k in usable):
-            self.streak = 0
-            return None
+            return self._read(None, now)
         values = {k: math.log(max(scores[k], 1.0)) for k in usable}
         spot = self._locator.locate(values, self.min_disturbance)
-        if spot is None or spot.contrast < self.min_quality:
-            self.streak = 0
-            return None
-        sx, sy = spot.x, spot.y
+        raw: tuple[float, float, float] | None = None
+        if spot is not None and spot.contrast >= self.min_quality:
+            raw = (*self._keep_in(spot.x, spot.y, room), spot.contrast)
+        return self._read(raw, now)
+
+    def _keep_in(self, x: float, y: float, room: str | None = None) -> Point:
+        """On a plan: inside it, and with rooms drawn inside the house (the sure room first)."""
+        if self._plan is None:
+            return x, y
+        x, y = min(max(x, 0.0), self._plan[0]), min(max(y, 0.0), self._plan[1])
         house = [r for rects in self.rooms.values() for r in rects]
-        if self._plan is not None:  # someone on this floor is inside its plan, not beyond its walls
-            sx, sy = min(max(sx, 0.0), self._plan[0]), min(max(sy, 0.0), self._plan[1])
-            if house:  # inside the house, and inside the room room presence is sure of
-                sx, sy = inside(self.rooms.get(room or "") or house, sx, sy)
-        x, y = self.track.update(sx, sy, now, spot.contrast)
-        if self._plan is not None:
-            x, y = min(max(x, 0.0), self._plan[0]), min(max(y, 0.0), self._plan[1])
-            if house:
-                x, y = inside(house, x, y)
-        self.streak += 1
-        if self.streak < self.min_streak:
+        return inside(self.rooms.get(room or "") or house, x, y) if house else (x, y)
+
+    def _read(self, raw: tuple[float, float, float] | None, now: float) -> FloorFix | None:
+        """This second's fit (or none) read with the recent ones: walking, still, or nobody."""
+        if raw is not None:
+            self.fits.append((now, *raw))
+            self.track.update(raw[0], raw[1], now, raw[2])
+            self.streak += 1
+        else:
+            self.streak = 0
+        while self.fits and now - self.fits[0][0] >= max(self.still_window, self.walk_span):
+            self.fits.popleft()
+        recent = [f for f in self.fits if now - f[0] < self.walk_span]
+        older = [f for f in recent if now - f[0] >= self.walk_span / 2]
+        newer = [f for f in recent if now - f[0] < self.walk_span / 2]
+        travel = math.dist(_centre(older), _centre(newer)) if older and newer else 0.0
+        if len(recent) >= self.walk_min and travel >= (self.walk_travel / 2 if self.walking else self.walk_travel):
+            self.walking = True
+        elif len(recent) < self.walk_min - 1 or travel < self.walk_travel / 2:
+            self.walking = False
+        if self.walking and self.track.state is not None and (raw is None or self.streak >= self.min_streak):
+            x, y = self._keep_in(self.track.state[0], self.track.state[1])
+            last = self.fits[-1]
+            return FloorFix(x, y, last[1], last[2], last[3])
+        window = [f for f in self.fits if now - f[0] < self.still_window]
+        if len(window) < self.still_min:
             return None
-        return FloorFix(x, y, sx, sy, spot.contrast)
+        weight = sum(f[3] for f in window)
+        cx = sum(f[1] * f[3] for f in window) / weight
+        cy = sum(f[2] * f[3] for f in window) / weight
+        x, y = self._keep_in(cx, cy)
+        last = window[-1]
+        return FloorFix(x, y, last[1], last[2], weight / len(window), walking=False)
+
+
+def _centre(fits: list[tuple[float, float, float, float]]) -> Point:
+    return sum(f[1] for f in fits) / len(fits), sum(f[2] for f in fits) / len(fits)
