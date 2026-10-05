@@ -59,7 +59,7 @@ def test_follows_a_walk() -> None:
         person = (0.8 + 0.11 * i, 0.8 + 0.07 * i)
         scores = {k: score(person, *k, truth_positions) * rng.uniform(0.9, 1.1) for k in links}
         fix = floor.update(scores, now=float(i))
-        assert fix is not None
+        assert fix is not None or i == 0  # the first second alone shows nobody: it could be noise
         if i >= 5:
             errors.append(math.dist((fix.x, fix.y), person))
     assert sum(errors) / len(errors) < 0.8, errors
@@ -76,7 +76,7 @@ def test_quiet_floor_and_unknown_links() -> None:
 
 def test_no_one_without_a_link_in_motion() -> None:
     """Quiet links add up to a phantom now and then: a fix needs a link that reports motion."""
-    floor = FloorModel()
+    floor = FloorModel(min_streak=1)
     floor.set_layout(hive_state())
     positions = {**NODES, AP[0]: AP[1]}
     links = [(t, r) for t in positions for r in NODES if t != r]
@@ -102,3 +102,39 @@ def test_positions_stay_on_the_plan() -> None:
     fixes = [f for f in fixes if f is not None]
     assert fixes and all(0 <= f.x <= 6.5 and 0 <= f.y <= 5.0 and 0 <= f.raw_x <= 6.5 for f in fixes)
     assert max(f.raw_x for f in fixes) == 6.5  # held at the wall
+
+
+def test_rooms_keep_someone_in_the_house_and_in_the_room_room_presence_is_sure_of() -> None:
+    from custom_components.wisp.engine.floor import inside
+
+    office, hall = [(0.0, 0.0, 3.0, 5.0)], [(3.0, 2.0, 3.5, 3.0), (3.0, 0.0, 1.0, 2.0)]  # an L-shaped hall
+    assert inside(office + hall, 1.0, 1.0) == (1.0, 1.0)  # inside: as it is
+    assert inside(office + hall, 4.8, 0.5) == (4.0, 0.5)  # in the corner the L leaves out: nearest wall
+    assert inside(office + hall, -2.0, 6.0) == (0.0, 5.0)  # outside the house
+
+    floor = FloorModel(min_streak=1)
+    placed = {mac: (p[0] + 0.5, p[1] + 0.5) for mac, p in NODES.items()}
+    floor.set_layout(hive_state(), placed, plan=(6.5, 5.0), nodes=set(NODES), rooms={"office": office, "hall": hall})
+    positions = dict(floor.positions)
+    links = [(t, r) for t in positions for r in NODES if t != r]
+    person = (4.8, 3.5)  # in the hall
+    scores = {k: score(person, *k, positions) for k in links}
+    fix = floor.update(scores, now=0.0, moving=set(links))
+    assert fix is not None and fix.raw_x >= 3.0  # where the links say: the hall
+    floor = FloorModel(min_streak=1)
+    floor.set_layout(hive_state(), placed, plan=(6.5, 5.0), nodes=set(NODES), rooms={"office": office, "hall": hall})
+    fix = floor.update(scores, now=0.0, moving=set(links), room="office")  # room presence is sure: office
+    assert fix is not None and fix.raw_x <= 3.0 and fix.x <= 3.0
+
+
+def test_unsure_fits_and_single_seconds_show_nobody() -> None:
+    floor = FloorModel()  # min_streak 2
+    floor.set_layout(hive_state())
+    positions = {**NODES, AP[0]: AP[1]}
+    links = [(t, r) for t in positions for r in NODES if t != r]
+    busy = {k: score((2.0, 2.0), *k, positions) for k in links}
+    assert floor.update(busy, now=0.0) is None and floor.update(busy, now=1.0) is not None
+    assert floor.update({k: 1.0 for k in links}, now=2.0) is None  # quiet: the streak starts over
+    assert floor.update(busy, now=3.0) is None
+    floor.min_quality = 1.01  # nothing explains the pattern that well
+    assert floor.update(busy, now=4.0) is None and floor.update(busy, now=5.0) is None

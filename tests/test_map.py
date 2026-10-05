@@ -76,6 +76,8 @@ async def test_snapshot_then_changes_at_most_once_a_second(hass: HomeAssistant, 
     udp.receive(encode_report(1, NODE_A, node_links(walking=True)))
     udp.receive(encode_hive_report(1, NODE_A, 0xBEEF, LAYOUT, ROWS))
     await fire(hass, 1)
+    assert "people" not in await next_map(client, sub)  # someone shows after two seconds of fits in a row
+    await fire(hass, 1)
     snapshot = await next_map(client, sub)
     # Someone on the busy Office to Hall line, which runs from (-1, 0.5) to (1, -0.5)
     (person,) = snapshot.pop("people")

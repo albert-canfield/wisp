@@ -113,6 +113,7 @@ async def test_someone_moving_lands_on_the_plan(
         "url": URL, "width": 10.0, "height": 6.0,
         "nodes": {NODE_A: [2.0, 4.0], NODE_B: [8.0, 4.0]},
         "access_points": {AP: [5.0, 0.5]},
+        "rooms": {},
     }}}
     assert await hass.config_entries.async_reload(entry.entry_id)
     await hass.async_block_till_done()
@@ -343,3 +344,35 @@ async def test_plan_images_are_uploaded_served_and_cleaned_up(
     await ok(ws_client, type="wisp/floor/clear")
     assert (await client.get(second)).status == 404
 
+
+
+async def test_rooms_drawn_on_a_plan(hass: HomeAssistant, udp: FakeUdp, hass_ws_client, hass_storage: dict) -> None:
+    areas = ar.async_get(hass)
+    areas.async_create("Office")
+    areas.async_create("Hall")
+    entry = await setup_hub(hass, HALL, OFFICE)
+    hub = entry.runtime_data
+    client = await hass_ws_client(hass)
+    rooms = {"office": [[0, 0, 4, 6]], "hall": [[4, 2, 6, 4], [4, 0, 2, 2]]}
+    assert await error(client, type="wisp/floor/set_rooms", rooms=rooms) == ("not_found", "This floor has no plan yet.")
+    await ok(client, type="wisp/floor/set_plan", url=URL, width=10, height=6)
+    assert await error(client, type="wisp/floor/set_rooms", rooms={"garage": [[0, 0, 1, 1]]}) == ("not_found", "No area garage.")
+    assert await error(client, type="wisp/floor/set_rooms", rooms={"office": [[8, 0, 4, 6]]}) == (
+        "invalid_format", "A rectangle of Office is off the plan, which is 10 by 6 m."
+    )
+    for bad in ([[0, 0, 0.1, 2]], [[0, 0, 2]], [["a", 0, 1, 1]]):
+        assert (await error(client, type="wisp/floor/set_rooms", rooms={"office": bad}))[0] == "invalid_format", bad
+
+    view = await ok(client, type="wisp/floor/set_rooms", rooms=rooms)
+    assert view["rooms"] == [
+        {"area": "hall", "name": "Hall", "rects": [[4.0, 2.0, 6.0, 4.0], [4.0, 0.0, 2.0, 2.0]]},
+        {"area": "office", "name": "Office", "rects": [[0.0, 0.0, 4.0, 6.0]]},
+    ]
+    stored = hass_storage[f"wisp.{entry.entry_id}.plans"]["data"]["floors"][""]["rooms"]
+    assert stored == {"hall": [[4.0, 2.0, 6.0, 4.0], [4.0, 0.0, 2.0, 2.0]], "office": [[0.0, 0.0, 4.0, 6.0]]}
+    assert hub.presence.models[""].rooms["office"] == [(0.0, 0.0, 4.0, 6.0)]
+    (floor,) = hub.presence.map_floors()
+    assert [r["name"] for r in floor["rooms"]] == ["Hall", "Office"]
+    await ok(client, type="wisp/floor/set_rooms", rooms={"office": []})  # a room with no rectangles goes
+    assert (await ok(client, type="wisp/floor/set_rooms", rooms={}))["rooms"] == []
+    assert "rooms" not in hub.presence.map_floors()[0]

@@ -13,7 +13,7 @@ See who is where in your home, room by room and as footprints moving across your
 
 ## See it
 
-<p align="center"><img src="https://raw.githubusercontent.com/albert-canfield/wisp/main/docs/images/map-card.png" alt="The Wisp map card in light and dark: nodes, an access point, links that redden with motion, footprints walking along them and a mark where someone moves" width="100%"></p>
+<p align="center"><img src="https://raw.githubusercontent.com/albert-canfield/wisp/main/docs/images/map-card.png" alt="The Wisp map card in light and dark: nodes, an access point, links that redden with motion and a trail of footprints where someone walks" width="100%"></p>
 
 <table>
   <tr>
@@ -103,14 +103,14 @@ The integration brings its own dashboard card and loads it by itself. Add it fro
 type: custom:wisp-map-card
 title: Wisp     # optional
 floor: Upstairs # optional, floor id or name; the first floor with nodes by default
-rotate: 0       # optional, degrees clockwise (not on a floor plan)
-flip: false     # optional, mirror left to right (not on a floor plan)
+rotate: 0       # optional, degrees clockwise: 0, 90, 180 or 270
+flip: false     # optional, mirror left to right
 plan_photo: false # optional, the floor plan is a photo: dimmed, not inverted, in dark mode
 ```
 
-Nodes sit where the grid's own layout puts them, access points beside the nodes that hear them best, and footprints walk along a link while it sees motion. Where someone moves, a pair of footprints stands at the best guess of the spot (it needs three or more nodes to be meaningful). With several floors, a card shows one floor; add a card per floor.
+Nodes sit where the grid's own layout puts them, access points where the nodes' signal puts them, and a link reddens while it sees motion. Where someone moves, a trail of footprints follows the best guess of the spot, with a wider halo when Wisp is less sure (it needs three or more nodes on the floor to be meaningful). With several floors, a card shows one floor; add a card per floor.
 
-Without a floor plan the layout is relative, so turn and mirror it to match your home. With one (set in the Wisp panel, below), the card draws the plan's image inked onto the parchment, at its size in metres, with a scale bar, and the nodes, access points, links and footprints where they are on it. Nodes you have not placed follow the placed ones and are drawn dashed.
+Without a floor plan the layout is relative, so turn and mirror it to match your home. With one (set in the Wisp panel, below), the card draws the plan's image inked onto the parchment, at its size in metres, with a scale bar, and the nodes, access points, links and footprints where they are on it; turn and mirror apply to the plan too. Nodes you have not placed follow the placed ones and are drawn dashed. With rooms drawn on the plan, someone moving is kept inside the house, and inside the room room presence is sure of.
 
 ## Room presence (first version)
 
@@ -126,7 +126,7 @@ Each floor then gets a room sensor (the room someone moves in, `none` while nobo
 
 The integration adds a Wisp page to the sidebar for administrators, so calibration needs no Developer tools. It shows, live:
 
-- **The map**, the same as the card, a button per floor when there are several, and without a floor plan buttons to turn and mirror it (remembered per browser).
+- **The map**, the same as the card, a button per floor when there are several, and buttons to turn and mirror it (remembered per browser).
 - **Rooms per floor:** every area with a node or a calibration, its samples and whether it is occupied, and the room someone moves in now. Calibrate starts `wisp.calibrate_room` (60 seconds by default) and counts down with what to do; Calibrate empty floor gives 30 seconds to leave the floor before it records (`wisp.calibrate_empty` with `delay`); Clear asks first. Areas on a floor without a node can be picked and calibrated too.
 - **A floor plan per floor:** Add floor plan takes an image address and the floor's width in metres (the height follows the image's proportions, or give it). Place nodes then shows the plan: drag each node, and the access points you know, to where it stands (by touch too, or with the arrow keys), then Save. Nodes you leave are fitted to the placed ones: from two placed nodes Wisp turns, scales and if needed mirrors its own layout to match, and a third one away from the line between the first two settles the mirror. Change sets another image or size and keeps the positions; Remove asks first.
 - **Nodes:** name, area, floor, online, whether the hive has placed it, whether it is placed on its floor's plan, and a link to its ESPHome device.

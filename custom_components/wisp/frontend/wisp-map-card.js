@@ -1,15 +1,15 @@
 /*
  * Wisp map card: the grid drawn in ink on parchment, live from the Wisp integration.
  * Nodes sit where the hive's layout puts them, access points beside the nodes that hear them
- * best, links darken and thicken with their motion score, and footprints walk along a link while
- * it sees motion. On a floor with a plan (set in the Wisp panel) everything is drawn on the plan,
- * in its metres. Shipped and registered by the integration, no build step.
+ * best, links darken and thicken with their motion score and glow while they see motion, and
+ * footprints follow whoever moves. On a floor with a plan (set in the Wisp panel) everything is
+ * drawn on the plan, in its metres. Shipped and registered by the integration, no build step.
  *
  *   type: custom:wisp-map-card
  *   title: Wisp     # optional
  *   floor: Upstairs # optional, floor id or name; the first floor with nodes by default
- *   rotate: 0       # optional, degrees clockwise, to match your home (not on a floor plan)
- *   flip: false     # optional, mirror left to right (not on a floor plan)
+ *   rotate: 0       # optional, degrees clockwise, to match your home (a plan turns in 90° steps)
+ *   flip: false     # optional, mirror left to right
  *   plan_photo: false # optional, the floor plan is a photo: dimmed, not inverted, in dark mode
  */
 
@@ -21,10 +21,19 @@ const MAX_H = 400;
 const PLAN_PAD = 24; // around a floor plan; labels may overlap it
 const PLAN_MAX_H = 560;
 const SCALES = [0.5, 1, 2, 5, 10, 20, 50, 100]; // metres a scale bar may show
-const STEP_S = 0.42; // seconds per footprint
+const STRIDE = 16; // px between footprints on a trail
+const HEAD_GAP = 15; // px clear behind the pair of prints where someone is now
+const TRAIL_N = 8; // fixes a trail keeps, one a second while someone moves
+const TRAIL_S = 10; // s a trail reaches back
+const JUMP_M = 3; // m between two fixes that is no step: a new trail
+const GAP_S = 4; // s without a fix that ends a trail
+const FADE_S = 4; // s a trail takes to fade once nobody moves
+const STEP_IN = 0.6; // s the newest stretch of prints takes to appear
+const PULSE_S = 2.4; // s a moving link's glow takes to pulse
 // The logo's footprint, toes up
 const SOLE = "M0-13c4.6 0 6.4 4.4 6.4 8.6 0 4.6-2.2 7.9-6.4 7.9s-6.4-3.3-6.4-7.9C-6.4-8.6-4.6-13 0-13Z";
 const HEEL = "M0 5.6c3.3 0 4.8 2.1 4.8 4.4 0 2.6-2 4-4.8 4s-4.8-1.4-4.8-4c0-2.3 1.5-4.4 4.8-4.4Z";
+const FOOT = `<path d="${SOLE}"/><path d="${HEEL}"/>`;
 
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => `&#${c.charCodeAt(0)};`);
 const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
@@ -128,28 +137,42 @@ function pickFloor(map, wanted) {
   };
 }
 
-/* Plan metres (y down) to the viewBox: the plan scaled to fit, nodes without a place in a row below. */
-function projectPlan(map, floor) {
+/* Plan metres (x right, y down, from the top left) to the viewBox: the plan turned a quarter at a
+   time clockwise, mirrored left to right, scaled to fit; nodes without a place in a row below. */
+function projectPlan(map, floor, rotate, flip) {
   const plan = floor.plan, positions = floor.positions ?? {};
+  const turn = ((Math.round(rotate / 90) % 4) + 4) % 4;
+  const [pw, ph] = turn % 2 ? [plan.height, plan.width] : [plan.width, plan.height]; // as drawn
   const inner = W - 2 * PLAN_PAD;
-  const s = Math.min(inner / plan.width, (PLAN_MAX_H - 2 * PLAN_PAD) / plan.height);
-  const frame = { x: (W - plan.width * s) / 2, y: PLAN_PAD, w: plan.width * s, h: plan.height * s, s };
+  const s = Math.min(inner / pw, (PLAN_MAX_H - 2 * PLAN_PAD) / ph);
+  const x0 = (W - pw * s) / 2, y0 = PLAN_PAD;
+  const to = (p) => {
+    const [u, v] = [[p.x, p.y], [plan.height - p.y, p.x], [plan.width - p.x, plan.height - p.y], [p.y, plan.width - p.x]][turn];
+    return { x: x0 + (flip ? pw - u : u) * s, y: y0 + v * s };
+  };
+  const frame = { x: x0, y: y0, w: pw * s, h: ph * s, s, turn, flip, plan, to };
   const pts = new Map();
-  const at = (p) => ({ x: frame.x + p.x * s, y: frame.y + p.y * s });
-  for (const [id, p] of Object.entries(positions)) pts.set(id, at(p));
-  for (const p of map.people ?? []) pts.set(`person:${p.floor ?? ""}`, at(p));
+  for (const [id, p] of Object.entries(positions)) pts.set(id, to(p));
+  for (const p of map.people ?? []) pts.set(`person:${p.floor ?? ""}`, to(p));
   const loose = map.nodes.filter((n) => !pts.has(n.mac));
   const gap = Math.min(80, inner / Math.max(loose.length, 1));
   loose.forEach((n, i) => pts.set(n.mac, { x: W / 2 + (i - (loose.length - 1) / 2) * gap, y: frame.y + frame.h + 26 }));
-  return { pts, frame, h: Math.round(frame.y + frame.h + PLAN_PAD + (loose.length ? 30 : 0)) };
+  return { pts, frame, to, s, h: Math.round(frame.y + frame.h + PLAN_PAD + (loose.length ? 30 : 0)) };
 }
 
-/* A plan without an image: a grid of whole metres (or halves, or a few), about 14 px or more apart. */
+/* A plan without an image: a grid of whole metres (or halves, or a few) from the plan's top left,
+   about 14 px or more apart, turned with the plan. */
 function gridPath(f) {
+  const { plan, to } = f;
   const step = [0.5, 1, 2, 5, 10].find((v) => v * f.s >= 14) ?? 10;
+  const end = 0.5 / f.s; // no line on the edge
   let d = "";
-  for (let x = step; x * f.s < f.w - 0.5; x += step) d += `M${n1(f.x + x * f.s)} ${n1(f.y)}v${n1(f.h)}`;
-  for (let y = step; y * f.s < f.h - 0.5; y += step) d += `M${n1(f.x)} ${n1(f.y + y * f.s)}h${n1(f.w)}`;
+  const line = (a, b) => {
+    const p = to(a), q = to(b);
+    d += `M${n1(p.x)} ${n1(p.y)}L${n1(q.x)} ${n1(q.y)}`;
+  };
+  for (let x = step; x < plan.width - end; x += step) line({ x, y: 0 }, { x, y: plan.height });
+  for (let y = step; y < plan.height - end; y += step) line({ x: 0, y }, { x: plan.width, y });
   return d;
 }
 
@@ -165,18 +188,21 @@ function planLayer(f, grid = false) {
 /* Metres to the viewBox: turn, mirror, then scale to fit. */
 function project(pos, rotate, flip) {
   const a = (rotate * Math.PI) / 180, cos = Math.cos(a), sin = Math.sin(a);
-  const turned = new Map();
-  for (const [key, p] of pos) {
+  const turn = (p) => {
     const x = p.x * cos + p.y * sin, y = p.x * sin - p.y * cos; // screen y points down, clockwise
-    turned.set(key, { x: flip ? -x : x, y });
-  }
-  const b = bounds([...turned.values()]);
+    return { x: flip ? -x : x, y };
+  };
+  const b = bounds([...pos.values()].map(turn));
   const inner = W - 2 * PAD_X;
   const h = clamp(Math.round(inner * (b.h / Math.max(b.w, 1e-6)) + 2 * PAD_Y), MIN_H, MAX_H);
   const s = Math.min(inner / Math.max(b.w, 1e-6), (h - 2 * PAD_Y) / Math.max(b.h, 1e-6));
+  const to = (p) => {
+    const q = turn(p);
+    return { x: W / 2 + (q.x - b.cx) * s, y: h / 2 + (q.y - b.cy) * s };
+  };
   const pts = new Map();
-  for (const [key, p] of turned) pts.set(key, { x: W / 2 + (p.x - b.cx) * s, y: h / 2 + (p.y - b.cy) * s });
-  return { pts, h };
+  for (const [key, p] of pos) pts.set(key, to(p));
+  return { pts, h, to, s };
 }
 
 /* One line per pair: the two directions of a node pair share it, the busier one sets the ink. */
@@ -185,9 +211,9 @@ function pairs(links, pts) {
   for (const l of links) {
     if (!pts.has(l.transmitter) || !pts.has(l.receiver)) continue;
     const [a, b] = [l.transmitter, l.receiver].sort();
-    const g = out.get(`${a} ${b}`) ?? { a, b, kind: l.kind, score: null, motion: false, from: l.transmitter, to: l.receiver };
+    const g = out.get(`${a} ${b}`) ?? { a, b, kind: l.kind, score: null, motion: false };
     if (l.score != null && (g.score == null || l.score > g.score)) g.score = l.score;
-    if (l.motion && !g.motion) Object.assign(g, { motion: true, from: l.transmitter, to: l.receiver });
+    if (l.motion) g.motion = true;
     out.set(`${a} ${b}`, g);
   }
   // Quiet lines first, so busy ones are drawn on top
@@ -201,31 +227,69 @@ function curve(p0, p1) {
   return { p0, p1, len, c: { x: (p0.x + p1.x) / 2 - (dy / len) * bow, y: (p0.y + p1.y) / 2 + (dx / len) * bow } };
 }
 
-function at(q, t, reverse) {
-  const { c } = q, p0 = reverse ? q.p1 : q.p0, p1 = reverse ? q.p0 : q.p1, u = 1 - t;
-  return {
-    x: u * u * p0.x + 2 * u * t * c.x + t * t * p1.x,
-    y: u * u * p0.y + 2 * u * t * c.y + t * t * p1.y,
-    tx: 2 * u * (c.x - p0.x) + 2 * t * (p1.x - c.x),
-    ty: 2 * u * (c.y - p0.y) + 2 * t * (p1.y - c.y),
-  };
-}
-
-/* Footprints walking from one end to the other. Negative delays keep the walk in step across redraws. */
-function footprints(q, reverse) {
-  const n = clamp(Math.round((q.len * 0.64) / 21), 3, 10);
-  const period = n * STEP_S;
-  const phase = (performance.now() / 1000) % period;
-  let out = "";
-  for (let i = 0; i < n; i++) {
-    const p = at(q, 0.18 + (0.64 * i) / (n - 1), reverse);
-    const tl = Math.hypot(p.tx, p.ty) || 1, ux = p.tx / tl, uy = p.ty / tl;
-    const side = i % 2 ? 1 : -1; // left, right, left: astride the line
-    const x = p.x - uy * 6.5 * side, y = p.y + ux * 6.5 * side;
-    const angle = (Math.atan2(ux, -uy) * 180) / Math.PI + side * 8; // toes a little out
-    out += `<g class="step" transform="translate(${n1(x)} ${n1(y)}) rotate(${n1(angle)}) scale(.58)" style="animation-duration:${n1(period)}s;animation-delay:${(i * STEP_S - phase).toFixed(2)}s"><path d="${SOLE}"/><path d="${HEEL}"/></g>`;
+/* Corners cut twice (Chaikin), the ends kept, so a jittery path walks smoothly. */
+function smooth(pts) {
+  let out = pts;
+  for (let k = 0; k < 2 && out.length > 2; k++) {
+    const next = [out[0]];
+    for (let i = 0; i < out.length - 1; i++) {
+      const a = out[i], b = out[i + 1];
+      const mix = (w) => ({ x: a.x + (b.x - a.x) * w, y: a.y + (b.y - a.y) * w, t: a.t + (b.t - a.t) * w });
+      if (i > 0) next.push(mix(0.25));
+      if (i < out.length - 2) next.push(mix(0.75));
+    }
+    next.push(out[out.length - 1]);
+    out = next;
   }
   return out;
+}
+
+const heading = (ux, uy) => (Math.atan2(ux, -uy) * 180) / Math.PI; // toes up is 0, clockwise
+
+/* Someone walking: footprints along their last fixes, left and right in turn, older ones fainter,
+   and where they are now a pair of prints in a halo that grows with the doubt. The prints sit at
+   whole strides of the distance walked, so they stay put while the trail grows. */
+function walker(tr, to, s, now) {
+  const pts = smooth(tr.fixes.map((f) => ({ ...to(f), t: f.t })));
+  const head = pts[pts.length - 1], newest = tr.fixes[tr.fixes.length - 1];
+  const segs = []; // from the head back
+  let len = 0;
+  for (let i = pts.length - 1; i > 0; i--) {
+    const a = pts[i], b = pts[i - 1], l = Math.hypot(a.x - b.x, a.y - b.y);
+    if (l < 1e-3) continue;
+    segs.push({ a, b, l, from: len, ux: (a.x - b.x) / l, uy: (a.y - b.y) / l });
+    len += l;
+  }
+  const ref = tr.gone ?? now;
+  const prev = tr.fixes.length > 1 ? tr.fixes[tr.fixes.length - 2].t : null;
+  const walked = tr.walked * s;
+  let prints = "";
+  for (let back = walked % STRIDE; back <= len; back += STRIDE) {
+    if (back < HEAD_GAP) continue;
+    const g = segs.find((g) => back <= g.from + g.l) ?? segs[segs.length - 1];
+    const w = (back - g.from) / g.l;
+    const p = { x: g.a.x + (g.b.x - g.a.x) * w, y: g.a.y + (g.b.y - g.a.y) * w, t: g.a.t + (g.b.t - g.a.t) * w };
+    const opacity = 0.9 * Math.min(1 - (ref - p.t) / 1000 / TRAIL_S, 1 - (0.85 * back) / len);
+    if (opacity < 0.04) continue;
+    const side = Math.round((walked - back) / STRIDE) % 2 ? 1 : -1; // right, left, right
+    const x = p.x - g.uy * 4.2 * side, y = p.y + g.ux * 4.2 * side;
+    // The stretch walked since the last fix steps in, print after print
+    let delay = "";
+    if (!tr.gone && prev != null && p.t > prev && newest.t > prev) {
+      const d = ((p.t - prev) / (newest.t - prev)) * STEP_IN - (now - newest.t) / 1000;
+      if (d > -0.5) delay = `;animation-delay:${d.toFixed(2)}s`;
+    }
+    prints += `<g class="print${delay ? " new" : ""}" transform="translate(${n1(x)} ${n1(y)}) rotate(${n1(heading(g.ux, g.uy) + side * 8)}) scale(.5)" style="opacity:${opacity.toFixed(2)}${delay}">${FOOT}</g>`;
+  }
+  const sure = clamp(newest.q, 0, 1);
+  const r = 12 + 18 * clamp((1 - sure) / 0.7, 0, 1); // 12 px sure, 30 px at 30% and less
+  const angle = segs.length ? heading(segs[0].ux, segs[0].uy) : 0; // toes up before the first step
+  const tip = tr.gone ? "Someone moved here" : `Someone moving here, ${Math.round(sure * 100)}% sure`;
+  const mark = `<g class="person" transform="translate(${n1(head.x)} ${n1(head.y)})"><title>${tip}</title><circle class="halo" r="${n1(r)}"/><g transform="rotate(${n1(angle)})"><g transform="translate(-4.6 2.5) rotate(-9) scale(.55)">${FOOT}</g><g transform="translate(4.6 -2.5) rotate(9) scale(.55)">${FOOT}</g></g></g>`;
+  // Nobody moves: the trail fades out; a negative delay keeps it fading across redraws
+  const fade = tr.gone ? ` style="animation-delay:${((tr.gone - now) / 1000).toFixed(2)}s"` : "";
+  const wrap = (cls, html) => `<g class="${cls}${tr.gone ? " gone" : ""}"${fade}>${html}</g>`;
+  return { prints: wrap("trail", prints), mark: wrap("walker", mark) };
 }
 
 /* Label away from the drawing's middle, below or above its mark; on the other side, or a line
@@ -242,28 +306,46 @@ function label(p, c, text, cls, below, above, size, taken) {
   return `<text class="${cls}" x="${n1(p.x)}" y="${n1(y)}">${esc(t)}</text>`;
 }
 
-function draw(map, config, floor) {
+/* The trails to draw: the floor's, or all of them on a feed without floors. */
+function trailsOf(trails, floor) {
+  if (!floor) return [...trails];
+  const key = floor.floor ?? "";
+  return trails.has(key) ? [[key, trails.get(key)]] : [];
+}
+
+function draw(map, config, floor, trails = new Map(), now = Date.now()) {
   const plan = floor?.plan;
-  const { pts, h, frame } = plan ? projectPlan(map, floor) : project(place(map), Number(config.rotate) || 0, !!config.flip);
+  const rotate = Number(config.rotate) || 0, flip = !!config.flip;
+  const walks = trailsOf(trails, floor);
+  let projected;
+  if (plan) projected = projectPlan(map, floor, rotate, flip);
+  else {
+    const pos = place(map);
+    // A trail fading out keeps the drawing where it was
+    for (const [key, tr] of walks) if (!pos.has(`person:${key}`)) pos.set(`person:${key}`, tr.fixes[tr.fixes.length - 1]);
+    projected = project(pos, rotate, flip);
+  }
+  const { pts, h, frame, to, s } = projected;
   const names = new Map(map.nodes.map((n) => [n.mac, n.name]));
   const centre = frame ? { cx: frame.x + frame.w / 2, cy: frame.y + frame.h / 2 } : bounds([...pts.values()]);
   const c = { x: centre.cx, y: centre.cy };
   // On a plan, placed means placed by the user; the rest is fitted to them, or waits below it
   const placed = (id) => (plan ? !!floor.positions?.[id]?.placed : true);
-  let lines = "", steps = "", marks = "", labels = "";
+  let lines = "", steps = "", marks = "", walkers = "", labels = "";
   const moving = [], taken = [];
+  const pulse = `animation-delay:-${((performance.now() / 1000) % PULSE_S).toFixed(2)}s`; // in step across redraws
   for (const g of pairs(map.links, pts)) {
     const q = curve(pts.get(g.a), pts.get(g.b));
     if (q.len < 1) continue;
-    const t = g.score == null ? 0 : clamp((g.score - 1) / 2, 0, 1); // 1 quiet, 3 and up busy
-    const opacity = g.score == null ? 0.35 : (0.45 + 0.5 * t) * (g.motion ? 0.7 : 1); // footprints show over it
+    const score = g.score == null ? 0 : clamp((g.score - 1) / 2, 0, 1); // 1 quiet, 3 and up busy
+    const t = g.motion ? Math.max(score, 0.75) : score; // a link that sees motion lights up
+    const opacity = g.score == null && !g.motion ? 0.35 : 0.45 + 0.5 * t;
     const style = `stroke-width:${n1(1.1 + 3.2 * t)};opacity:${n1(opacity)};stroke:color-mix(in srgb,var(--wisp-hot) ${Math.round(t * 100)}%,var(--wisp-ink))`;
     const cls = `link ${g.kind}${g.score == null ? " unknown" : ""}`;
-    lines += `<path class="${cls}" d="M${n1(q.p0.x)} ${n1(q.p0.y)}Q${n1(q.c.x)} ${n1(q.c.y)} ${n1(q.p1.x)} ${n1(q.p1.y)}" style="${style}"><title>${esc(names.get(g.a) ?? g.a)} and ${esc(names.get(g.b) ?? g.b)}: ${g.score == null ? "no score yet" : `motion score ${g.score}`}</title></path>`;
-    if (g.motion) {
-      steps += footprints(q, g.from !== g.a);
-      moving.push(`${names.get(g.from) ?? "access point"} to ${names.get(g.to) ?? "access point"}`);
-    }
+    const d = `M${n1(q.p0.x)} ${n1(q.p0.y)}Q${n1(q.c.x)} ${n1(q.c.y)} ${n1(q.p1.x)} ${n1(q.p1.y)}`;
+    if (g.motion) lines += `<path class="glow" d="${d}" style="stroke-width:${n1(7 + 3.2 * t)};${pulse}"/>`;
+    lines += `<path class="${cls}" d="${d}" style="${style}"><title>${esc(names.get(g.a) ?? g.a)} and ${esc(names.get(g.b) ?? g.b)}: ${g.score == null ? "no score yet" : `motion score ${g.score}`}${g.motion ? ", motion" : ""}</title></path>`;
+    if (g.motion) moving.push(`${names.get(g.a) ?? "access point"} and ${names.get(g.b) ?? "access point"}`);
   }
   for (const ap of map.access_points) {
     const p = pts.get(ap.bssid);
@@ -281,10 +363,11 @@ function draw(map, config, floor) {
     marks += `<g class="node${n.online ? "" : " off"}${fixed ? "" : " loose"}" transform="translate(${n1(p.x)} ${n1(p.y)})"><title>${esc(n.name)}: ${n.online ? "online" : "offline"}${where}</title><circle class="ring" r="6.5"/><circle class="dot" r="2.2"/></g>`;
     labels += label(p, c, n.name, `node-label${n.online ? "" : " off"}`, 10, 12, 13, taken);
   }
-  for (const person of map.people ?? []) {
-    const p = pts.get(`person:${person.floor ?? ""}`);
-    const sure = clamp(person.quality ?? 0, 0, 1);
-    marks += `<g class="person" transform="translate(${n1(p.x)} ${n1(p.y)})" style="opacity:${n1(0.5 + 0.5 * sure)}"><title>Someone moving here, ${Math.round(sure * 100)}% sure</title><circle class="halo" r="15"/><g transform="translate(-5 2) rotate(-10) scale(.55)"><path d="${SOLE}"/><path d="${HEEL}"/></g><g transform="translate(5 -2) rotate(8) scale(.55)"><path d="${SOLE}"/><path d="${HEEL}"/></g></g>`;
+  // Where someone moves, and the way they came
+  for (const [, tr] of walks) {
+    const w = walker(tr, to, s, now);
+    steps += w.prints;
+    walkers += w.mark;
   }
   const pending = unplaced ? ` (${unplaced} not placed ${plan ? "on the plan" : "yet"})` : "";
   const summary = `${floor ? `${floor.name}: ` : ""}${plural(map.nodes.length, "node", "nodes")}${pending}, ${plural(map.access_points.length, "access point", "access points")}`;
@@ -293,11 +376,19 @@ function draw(map, config, floor) {
   const where = rooms.length ? `${rooms.length > 1 ? "Rooms" : "Room"}: ${rooms.join(", ")}. ` : "";
   const motion = where + (moving.length ? `Motion: ${moving.join(", ")}` : "All quiet");
   return {
-    svg: `<svg viewBox="0 0 ${W} ${h}" role="img" aria-label="${esc(`Map of ${summary}. ${motion}.`)}">${plan ? planLayer(frame, !plan.url) : ""}<g class="lines">${lines}</g><g class="steps">${steps}</g><g class="marks">${marks}</g><g class="labels">${labels}</g></svg>`,
+    svg: `<svg viewBox="0 0 ${W} ${h}" role="img" aria-label="${esc(`Map of ${summary}. ${motion}.`)}">${plan ? planLayer(frame, !plan.url) : ""}<g class="lines">${lines}</g><g class="steps">${steps}</g><g class="marks">${marks}${walkers}</g><g class="labels">${labels}</g></svg>`,
     summary,
     motion,
-    // Where the plan's image goes, in shares of the drawing
-    plan: plan && { url: plan.url, left: frame.x / W, top: frame.y / h, width: frame.w / W, height: frame.h / h },
+    // Where the plan's image goes, in shares of the drawing: unturned, centred on the frame, then
+    // turned and mirrored about its centre to lie as the frame does
+    plan: plan && {
+      url: plan.url,
+      left: (frame.x + frame.w / 2 - (plan.width * s) / 2) / W,
+      top: (frame.y + frame.h / 2 - (plan.height * s) / 2) / h,
+      width: (plan.width * s) / W,
+      height: (plan.height * s) / h,
+      transform: frame.turn || frame.flip ? `${frame.flip ? "scaleX(-1) " : ""}rotate(${frame.turn * 90}deg)` : "",
+    },
   };
 }
 
@@ -320,8 +411,8 @@ class WispMapCard extends HTMLElement {
       computeLabel: (s) => ({ title: "Title", floor: "Floor", rotate: "Rotate", flip: "Mirror", plan_photo: "Photo floor plan" })[s.name],
       computeHelper: (s) => ({
         floor: "Name or id of the floor to show, in a home with several. Empty: the first floor with nodes",
-        rotate: "Degrees clockwise, to match the drawing to your home. Not used on a floor plan",
-        flip: "Mirror left to right. Not used on a floor plan",
+        rotate: "Degrees clockwise, to match the drawing to your home. A floor plan turns in steps of 90°",
+        flip: "Mirror left to right",
         plan_photo: "The floor plan is a photo: dim it in dark mode instead of inverting it",
       })[s.name],
     };
@@ -350,6 +441,8 @@ class WispMapCard extends HTMLElement {
     const sub = this._sub;
     this._sub = null;
     if (sub) sub.then((unsub) => unsub?.()).catch(() => {});
+    clearTimeout(this._fadeTimer);
+    this._trails?.clear(); // a short history: it starts again with the feed
   }
 
   getCardSize() {
@@ -375,7 +468,50 @@ class WispMapCard extends HTMLElement {
     this._map = map;
     this._received = Date.now();
     this._error = null;
+    this._track(map, this._received);
     this._render();
+  }
+
+  /* Per floor, the last fixes of whoever moves: a step too long or a pause too long starts a new
+     trail; a floor nobody moves on any more keeps its trail while it fades. */
+  _track(map, now) {
+    const trails = (this._trails ??= new Map());
+    const seen = new Set();
+    for (const p of map.people ?? []) {
+      if (!Number.isFinite(p.x) || !Number.isFinite(p.y)) continue;
+      const key = p.floor ?? "";
+      seen.add(key);
+      const fix = { x: p.x, y: p.y, t: now, q: clamp(p.quality ?? 0, 0, 1) };
+      let tr = trails.get(key);
+      const last = tr?.fixes[tr.fixes.length - 1];
+      const d = last ? Math.hypot(fix.x - last.x, fix.y - last.y) : 0;
+      if (!last || d > JUMP_M || now - tr.seen > GAP_S * 1000) {
+        tr = { fixes: [fix], walked: 0 };
+        trails.set(key, tr);
+      } else if (d < 0.02) {
+        last.q = fix.q; // standing still
+      } else {
+        tr.fixes.push(fix);
+        tr.walked += d;
+      }
+      Object.assign(tr, { seen: now, gone: null });
+      tr.fixes = tr.fixes.filter((f, i, all) => i === all.length - 1 || now - f.t <= TRAIL_S * 1000).slice(-TRAIL_N);
+    }
+    for (const [key, tr] of trails) if (!seen.has(key) && tr.gone == null) tr.gone = now;
+  }
+
+  /* Trails done fading go; a redraw is due when the next one is done. */
+  _prune(now) {
+    const trails = (this._trails ??= new Map());
+    let due = Infinity;
+    for (const [key, tr] of trails) {
+      if (tr.gone == null) continue;
+      const end = tr.gone + FADE_S * 1000;
+      if (now >= end) trails.delete(key);
+      else due = Math.min(due, end);
+    }
+    clearTimeout(this._fadeTimer);
+    if (due < Infinity) this._fadeTimer = setTimeout(() => this._render(), due - now + 50);
   }
 
   _note() {
@@ -424,12 +560,14 @@ class WispMapCard extends HTMLElement {
       foot.hidden = true;
       return;
     }
-    const { svg, summary, motion, plan } = draw(pick.map, this._config, pick.floor);
+    const now = Date.now();
+    this._prune(now);
+    const { svg, summary, motion, plan } = draw(pick.map, this._config, pick.floor, this._trails, now);
     root.querySelector(".draw").innerHTML = svg;
     if (plan?.url) {  // a plan without an image is a grid, drawn in the svg
       if (img.getAttribute("src") !== plan.url) img.setAttribute("src", plan.url);
       const pct = (v) => `${(100 * v).toFixed(3)}%`;
-      Object.assign(img.style, { left: pct(plan.left), top: pct(plan.top), width: pct(plan.width), height: pct(plan.height) });
+      Object.assign(img.style, { left: pct(plan.left), top: pct(plan.top), width: pct(plan.width), height: pct(plan.height), transform: plan.transform });
       img.hidden = false;
     }
     foot.hidden = false;
@@ -483,13 +621,17 @@ const STYLE = `
   .link { fill: none; stroke-linecap: round; }
   .link.ap { stroke-dasharray: 5 4; }
   .link.unknown { stroke-dasharray: 1 4; }
-  .step { fill: color-mix(in srgb, var(--wisp-hot) 30%, var(--wisp-ink)); opacity: 0; animation: wisp-step linear infinite; }
+  .glow { fill: none; stroke: var(--wisp-hot); stroke-linecap: round; opacity: .1; animation: wisp-glow ${PULSE_S}s ease-in-out infinite; }
+  /* Footprints cut out of the paper, so they read on a lit link */
+  .print, .person path { fill: color-mix(in srgb, var(--wisp-hot) 70%, var(--wisp-ink)); stroke: var(--wisp-paper-1); stroke-width: 3; paint-order: stroke; }
+  .print.new { animation: wisp-in .3s ease-out both; }
+  .trail.gone, .walker.gone { animation: wisp-gone ${FADE_S}s linear forwards; }
   .ring { fill: var(--wisp-mark); stroke: var(--wisp-ink); stroke-width: 2.4; }
   .dot { fill: var(--wisp-ink); }
   .waves { fill: none; stroke: var(--wisp-ink); stroke-width: 1.5; stroke-linecap: round; opacity: .75; }
   .ap .ring { stroke-width: 1.8; }
   .person path { fill: var(--wisp-hot); }
-  .person .halo { fill: var(--wisp-hot); opacity: .12; }
+  .person .halo { fill: var(--wisp-hot); fill-opacity: .12; stroke: var(--wisp-hot); stroke-opacity: .35; stroke-width: 1; stroke-dasharray: 3 3; }
   .node.off { opacity: .5; }
   .node.off .ring, .node.loose .ring { stroke-dasharray: 2.5 2; }
   text { font-family: var(--wisp-serif); fill: var(--wisp-ink); text-anchor: middle;
@@ -504,10 +646,13 @@ const STYLE = `
   .empty .feet { width: 56px; height: 46px; fill: var(--wisp-ink); opacity: .55; margin-bottom: 6px; }
   .empty p { margin: 0; max-width: 34ch; font-size: .875rem; line-height: 1.45; opacity: .8; }
   .empty .lead { font-size: 1.05rem; font-style: italic; opacity: 1; }
-  @keyframes wisp-step { 0% { opacity: 0; } 4% { opacity: .95; } 40% { opacity: .55; } 75%, 100% { opacity: 0; } }
+  @keyframes wisp-glow { 50% { opacity: .3; } }
+  @keyframes wisp-in { from { opacity: 0; } }
+  @keyframes wisp-gone { to { opacity: 0; } }
   @keyframes wisp-blink { 50% { opacity: .25; } }
   @media (prefers-reduced-motion: reduce) {
-    .step { animation: none; opacity: .65; }
+    .glow { animation: none; opacity: .2; }
+    .print.new { animation: none; }
     .note.wait::before { animation: none; }
   }
 `;
@@ -518,7 +663,7 @@ if (!window.customCards.some((c) => c.type === "wisp-map-card")) {
   window.customCards.push({
     type: "wisp-map-card",
     name: "Wisp map",
-    description: "Live map of the Wisp grid: nodes, access points, links and footprints where there is motion.",
+    description: "Live map of the Wisp grid: nodes, access points, links, and footprints where someone moves.",
     preview: true,
     documentationURL: "https://github.com/albert-canfield/wisp",
   });

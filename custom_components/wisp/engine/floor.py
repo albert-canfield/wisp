@@ -9,6 +9,11 @@ one of the links reports motion (the node's detector: its threshold, with hyster
 become disturbances (log of the score, so a quiet link is 0) and the best fit goes through the
 Track. The gate keeps the map in step with the motion sensors: quiet links alone add up to a
 phantom now and then, more often the more links a floor has.
+
+Few links leave the best fit coarse, and WiFi bounces off walls, so links away from someone react
+too. So a fit that explains little of the pattern (min_quality) is dropped, someone appears only
+after fits in min_streak seconds in a row, and with rooms drawn on the plan a fit is kept inside
+the house, and inside the room that room presence is sure of when there is one.
 """
 
 from __future__ import annotations
@@ -23,11 +28,24 @@ from .imaging import Locator
 from .tracking import Track, keep_side, place_access_point
 
 Point = tuple[float, float]
+Rect = tuple[float, float, float, float]  # x, y, width, height
 LinkKey = tuple[str, str]  # (transmitter, receiver)
 
 # The hive's y points up, as the map draws it, and a plan's down: when the placed nodes cannot
 # tell the mirror, the layout keeps the look it had on the map.
 PREFER_MIRROR = True
+
+
+def inside(rects: Collection[Rect], x: float, y: float) -> Point:
+    """The point, or the nearest point inside the rectangles when it is outside all of them."""
+    best: Point | None = None
+    for rx, ry, rw, rh in rects:
+        px, py = min(max(x, rx), rx + rw), min(max(y, ry), ry + rh)
+        if px == x and py == y:
+            return x, y
+        if best is None or math.dist((px, py), (x, y)) < math.dist(best, (x, y)):
+            best = (px, py)
+    return best if best is not None else (x, y)
 
 
 @dataclass(frozen=True, slots=True)
@@ -43,6 +61,10 @@ class FloorFix:
 class FloorModel:
     width: float = 0.4  # metres a person reaches from a link's line, see Locator
     min_disturbance: float = 0.3  # sum of log scores below which nobody is moving
+    min_quality: float = 0.35  # a fit explaining less of the link pattern is too unsure to show
+    min_streak: int = 2  # seconds in a row with a fit before someone appears
+    rooms: dict[str, list[Rect]] = field(default_factory=dict, init=False)  # on a plan, by area
+    streak: int = field(default=0, init=False)
     positions: dict[str, Point] = field(default_factory=dict, init=False)
     fit: Similarity | None = field(default=None, init=False)  # hive layout to plan, on a floor plan
     track: Track = field(default_factory=Track, init=False)
@@ -57,6 +79,7 @@ class FloorModel:
         placed: Mapping[str, Point] | None = None,
         plan: tuple[float, float] | None = None,
         nodes: Collection[str] | None = None,
+        rooms: Mapping[str, list[Rect]] | None = None,
     ) -> None:
         """Node positions from the user (placed) or else the hive; access points from the rows.
         With a plan (width and height in metres), only the floor's nodes count, and the hive's
@@ -70,6 +93,7 @@ class FloorModel:
         else:
             centre = (plan[0] / 2, plan[1] / 2)
             positions, self.fit = anchor_layout(layout, placed or {}, centre, PREFER_MIRROR)
+        self.rooms = dict(rooms or {}) if plan is not None else {}
         if plan != self._plan:  # other coordinates: the track starts over
             self._plan = plan
             self.track = Track()
@@ -88,10 +112,15 @@ class FloorModel:
         self.positions = positions
 
     def update(
-        self, scores: Mapping[LinkKey, float | None], now: float, moving: Collection[LinkKey] | None = None
+        self,
+        scores: Mapping[LinkKey, float | None],
+        now: float,
+        moving: Collection[LinkKey] | None = None,
+        room: str | None = None,
     ) -> FloorFix | None:
         """scores: motion score per link (1 = quiet, None = unknown). moving: the links reporting
-        motion (None: no such gate). Returns the fix, or None when nobody is moving or the layout
+        motion (None: no such gate). room: the area room presence is sure someone moves in.
+        Returns the fix, or None when nobody is moving, the fit is too unsure, or the layout
         cannot place anyone yet."""
         usable = sorted(k for k, s in scores.items() if s is not None and k[0] in self.positions and k[1] in self.positions)
         key = (tuple(usable), tuple(sorted((m, round(p[0], 1), round(p[1], 1)) for m, p in self.positions.items())))
@@ -99,17 +128,28 @@ class FloorModel:
             self._key = key
             self._locator = Locator(self.positions, usable, width=self.width) if len(usable) >= 2 else None
         if self._locator is None:
+            self.streak = 0
             return None
         if moving is not None and not any(k in moving for k in usable):
+            self.streak = 0
             return None
         values = {k: math.log(max(scores[k], 1.0)) for k in usable}
         spot = self._locator.locate(values, self.min_disturbance)
-        if spot is None:
+        if spot is None or spot.contrast < self.min_quality:
+            self.streak = 0
             return None
         sx, sy = spot.x, spot.y
+        house = [r for rects in self.rooms.values() for r in rects]
         if self._plan is not None:  # someone on this floor is inside its plan, not beyond its walls
             sx, sy = min(max(sx, 0.0), self._plan[0]), min(max(sy, 0.0), self._plan[1])
+            if house:  # inside the house, and inside the room room presence is sure of
+                sx, sy = inside(self.rooms.get(room or "") or house, sx, sy)
         x, y = self.track.update(sx, sy, now, spot.contrast)
         if self._plan is not None:
             x, y = min(max(x, 0.0), self._plan[0]), min(max(y, 0.0), self._plan[1])
+            if house:
+                x, y = inside(house, x, y)
+        self.streak += 1
+        if self.streak < self.min_streak:
+            return None
         return FloorFix(x, y, sx, sy, spot.contrast)

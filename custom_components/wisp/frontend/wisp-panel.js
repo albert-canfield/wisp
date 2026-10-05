@@ -796,7 +796,8 @@ class WispPanel extends HTMLElement {
     </div>`;
   }
 
-  /* A button per floor over the map when there are several; turn and mirror only without a plan. */
+  /* A button per floor over the map when there are several; turn and mirror under it, plan and all.
+     Placing nodes hides them: the placer draws the plan as it is, in its own metres. */
   _mapTools(d) {
     const root = this.shadowRoot;
     const shown = this._shownFloor(d);
@@ -810,7 +811,7 @@ class WispPanel extends HTMLElement {
       tabs._html = html;
     }
     root.querySelector(".map").hidden = placing;
-    root.querySelector(".map-tools").hidden = placing || !!shown?.plan;
+    root.querySelector(".map-tools").hidden = placing;
     if (this._card && (shown ? shown.floor ?? shown.name : "") !== this._cardFloor) this._card.setConfig(this._mapConfig());
   }
 

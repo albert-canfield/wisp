@@ -222,7 +222,7 @@ class RoomPresence:
             live[floor] = len(scores)
             ended.append(self.engine.step(floor, self.floor_areas(floor), scores, now, bool(moving)))
             model = self._layout(floor, hive)
-            if (fix := model.update(scores, now, moving)) is not None:
+            if (fix := model.update(scores, now, moving, self.sure_room(floor))) is not None:
                 self.fixes[floor] = fix
             else:
                 self.fixes.pop(floor, None)
@@ -247,7 +247,7 @@ class RoomPresence:
         else:
             nodes = self.floors[floor].nodes
             placed = {mac: p for mac, p in plan.nodes.items() if mac in nodes} | plan.access_points
-            model.set_layout(hive, placed, plan=(plan.width, plan.height), nodes=nodes)
+            model.set_layout(hive, placed, plan=(plan.width, plan.height), nodes=nodes, rooms=plan.rooms)
         return model
 
     @callback
@@ -293,6 +293,23 @@ class RoomPresence:
             "error": round(fit.error, digits),
         }
 
+    def sure_room(self, floor: str) -> str | None:
+        """The area room presence is sure someone moves in on the floor, to keep the map in it."""
+        decision = self.engine.decisions.get(floor)
+        if decision is None or decision.room is None or (decision.confidence or 0) < self.engine.confidence:
+            return None
+        return decision.room
+
+    def rooms_view(self, floor: str) -> list[dict[str, Any]]:
+        """The rooms drawn on the floor's plan, with their area names."""
+        plan = self.plans.floors.get(floor)
+        if plan is None:
+            return []
+        return [
+            {"area": area, "name": self.area_name(area), "rects": [list(r) for r in rects]}
+            for area, rects in sorted(plan.rooms.items(), key=lambda kv: self.area_name(kv[0]).casefold())
+        ]
+
     def plan_view(self, floor: str) -> dict[str, Any]:
         """The floor's plan for the panel: its size, the positions, the access points its nodes hear
         or that were placed, and the fit."""
@@ -302,6 +319,7 @@ class RoomPresence:
         heard = access_points(self.hub.table, self.hub.hive.current(self.hub.clock()), nodes)
         return {
             "plan": plan.summary(),
+            "rooms": self.rooms_view(floor),
             "positions": positions,
             "access_points": sorted(set(heard) | set(plan.access_points) | {k for k in positions if k not in nodes}),
             "fit": self.fit(floor),
@@ -448,6 +466,8 @@ class RoomPresence:
             if (plan := self.plans.floors.get(key)) is not None:
                 entry["plan"] = plan.summary()
                 entry["positions"] = self.positions(key)
+                if plan.rooms:
+                    entry["rooms"] = self.rooms_view(key)
             out.append(entry)
         return out
 

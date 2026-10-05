@@ -39,6 +39,7 @@ def async_register(hass: HomeAssistant) -> None:
     websocket_api.async_register_command(hass, ws_place)
     websocket_api.async_register_command(hass, ws_clear_plan)
     websocket_api.async_register_command(hass, ws_set_node_area)
+    websocket_api.async_register_command(hass, ws_set_rooms)
 
 
 def _hub(hass: HomeAssistant) -> WispHub | None:
@@ -142,6 +143,23 @@ def _point(value: Any) -> tuple[float, float]:
 
 
 FLOOR = vol.Any(None, cv.string)  # a Home Assistant floor id; None or "" for the hub's own floor
+MAX_ROOMS = 64
+MAX_RECTS = 16  # per room: an L-shaped room is two
+
+
+def _rect(value: Any) -> tuple[float, float, float, float]:
+    """[x, y, width, height] in metres, at least 25 cm a side."""
+    if not isinstance(value, (list, tuple)) or len(value) != 4:
+        raise vol.Invalid("expected [x, y, width, height] in metres")
+    x, y, w, h = (vol.Coerce(float)(v) for v in value)
+    if not all(map(math.isfinite, (x, y, w, h))) or w < 0.25 or h < 0.25:
+        raise vol.Invalid("expected [x, y, width, height] in metres, at least 0.25 m a side")
+    return x, y, w, h
+
+
+ROOMS = vol.All(
+    vol.Schema({cv.string: vol.All([_rect], vol.Length(max=MAX_RECTS))}), vol.Length(max=MAX_ROOMS)
+)
 SIZE = vol.All(vol.Coerce(float), vol.Range(min=1, max=500))  # metres
 PLACEMENTS = vol.All(vol.Schema({_mac: vol.Any(None, _point)}), vol.Length(max=MAX_PLACED))
 
@@ -274,3 +292,41 @@ def ws_set_node_area(
         return
     hub.async_set_node_area(msg["mac"], area)
     connection.send_result(msg["id"])
+
+
+@websocket_api.websocket_command({
+    vol.Required("type"): "wisp/floor/set_rooms",
+    vol.Optional("floor"): FLOOR,
+    vol.Required("rooms"): ROOMS,
+})
+@websocket_api.require_admin
+@websocket_api.async_response
+async def ws_set_rooms(
+    hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict[str, Any]
+) -> None:
+    """The rooms drawn on a floor's plan: per Home Assistant area, rectangles in plan metres. They
+    give the house's outline, and someone moving is kept inside it, and inside the room room
+    presence is sure of. Replaces the floor's rooms."""
+    if (presence := _presence(hass, connection, msg)) is None:
+        return
+    floor = msg.get("floor") or NO_FLOOR
+    if (plan := presence.plans.floors.get(floor)) is None:
+        connection.send_error(msg["id"], websocket_api.ERR_NOT_FOUND, "This floor has no plan yet.")
+        return
+    areas = ar.async_get(hass)
+    for area, rects in msg["rooms"].items():
+        if areas.async_get_area(area) is None:
+            connection.send_error(msg["id"], websocket_api.ERR_NOT_FOUND, f"No area {area}.")
+            return
+        for x, y, w, h in rects:
+            if x < -0.01 or y < -0.01 or x + w > plan.width + 0.01 or y + h > plan.height + 0.01:
+                connection.send_error(
+                    msg["id"], websocket_api.ERR_INVALID_FORMAT,
+                    f"A rectangle of {areas.async_get_area(area).name} is off the plan, which is "
+                    f"{plan.width:g} by {plan.height:g} m.",
+                )
+                return
+    presence.plans.set_rooms(floor, msg["rooms"])
+    await presence.plans.async_save()
+    presence.async_plans_changed(floor)
+    connection.send_result(msg["id"], presence.plan_view(floor))

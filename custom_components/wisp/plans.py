@@ -1,6 +1,7 @@
-"""Floor plans: an image per floor, its size in metres, and where the user placed nodes and access
-points on it, in metres from the image's top left corner with y down. Kept in storage per hub.
-The floor key is the Home Assistant floor id, or NO_FLOOR for the hub's own floor."""
+"""Floor plans: an image per floor, its size in metres, where the user placed nodes and access
+points on it, and the rooms drawn on it (rectangles per Home Assistant area), all in metres from
+the image's top left corner with y down. Kept in storage per hub. The floor key is the Home
+Assistant floor id, or NO_FLOOR for the hub's own floor."""
 from __future__ import annotations
 
 from collections.abc import Mapping
@@ -15,6 +16,7 @@ from .const import DOMAIN, PLANS_STORE_VERSION
 
 _LOGGER = logging.getLogger(__name__)
 Point = tuple[float, float]
+Rect = tuple[float, float, float, float]  # x, y, width, height in metres
 
 
 def plans_store_key(entry_id: str) -> str:
@@ -28,6 +30,7 @@ class FloorPlan:
     height: float
     nodes: dict[str, Point] = field(default_factory=dict)  # by MAC
     access_points: dict[str, Point] = field(default_factory=dict)  # by BSSID
+    rooms: dict[str, list[Rect]] = field(default_factory=dict)  # by area id: the house, room by room
 
     def summary(self) -> dict[str, Any]:
         return {"url": self.url, "width": self.width, "height": self.height}
@@ -37,6 +40,7 @@ class FloorPlan:
             **self.summary(),
             "nodes": {mac: list(p) for mac, p in sorted(self.nodes.items())},
             "access_points": {bssid: list(p) for bssid, p in sorted(self.access_points.items())},
+            "rooms": {area: [list(r) for r in rects] for area, rects in sorted(self.rooms.items())},
         }
 
     @classmethod
@@ -44,9 +48,13 @@ class FloorPlan:
         def points(raw: Mapping[str, Any]) -> dict[str, Point]:
             return {str(k): (float(x), float(y)) for k, (x, y) in raw.items()}
 
+        rooms = {
+            str(area): [(float(x), float(y), float(w), float(h)) for x, y, w, h in rects]
+            for area, rects in data.get("rooms", {}).items()
+        }
         return cls(
             str(data["url"]), float(data["width"]), float(data["height"]),
-            points(data.get("nodes", {})), points(data.get("access_points", {})),
+            points(data.get("nodes", {})), points(data.get("access_points", {})), rooms,
         )
 
 
@@ -86,6 +94,12 @@ class FloorPlans:
                     target.pop(key, None)
                 else:
                     target[key] = (round(float(point[0]), 3), round(float(point[1]), 3))
+
+    def set_rooms(self, floor: str, rooms: Mapping[str, list[Rect]]) -> None:
+        """The floor's rooms, all of them: an area with no rectangles is left out."""
+        self.floors[floor].rooms = {
+            area: [tuple(round(float(v), 3) for v in r) for r in rects] for area, rects in rooms.items() if rects
+        }
 
     def remove(self, floor: str) -> bool:
         return self.floors.pop(floor, None) is not None
