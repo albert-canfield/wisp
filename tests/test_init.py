@@ -28,11 +28,11 @@ from custom_components.wisp.diagnostics import async_get_config_entry_diagnostic
 from custom_components.wisp.hub import PER_ENTRY_DEVICES, ProbeError, async_probe, node_devices
 
 from .conftest import AP, IP_A, IP_B, NODE_A, NODE_B, FakeClock, FakeUdp
-from .fake_node import FakeNode, encode_report
+from .fake_node import FakeNode, encode_hive_report, encode_report
 
 pytestmark = pytest.mark.usefixtures("enable_custom_integrations")
 
-SUBSCRIBE = b"WSUB\x01\x02"
+SUBSCRIBE = b"WSUB\x01\x06"  # link and hive reports
 NODE_C = "02:57:49:53:50:03"  # a node Home Assistant does not know
 HALL = (NODE_A, IP_A, "Hall")
 OFFICE = (NODE_B, IP_B, "Office")
@@ -303,7 +303,31 @@ async def test_diagnostics(hass: HomeAssistant, udp: FakeUdp) -> None:
         "transmitter": AP, "kind": 0, "rssi": -55, "score": 1.23, "spread": 2.1, "frames": 20, "flags": 1
     }
     assert len(diag["links"]) == 3 and diag["links"][0]["motion"] is True
+    assert diag["hive"] is None
     json.dumps(diag)
+
+
+async def test_hive_reports(hass: HomeAssistant, udp: FakeUdp) -> None:
+    entry = await setup_hub(hass, HALL, OFFICE)
+    hub = entry.runtime_data
+    layout = [(NODE_A, -100, 0), (NODE_B, 100, 0)]
+    rows = [(NODE_A, 1, [(AP, -50), (NODE_B, -60)]), (NODE_B, 1, [(AP, -55), (NODE_A, -61)])]
+    udp.receive(encode_hive_report(1, NODE_C, 0x1234, layout, rows), "192.168.1.60")
+    udp.receive(encode_hive_report(1, NODE_A, 0x1234, layout, rows))
+    udp.receive(encode_hive_report(1, NODE_A, 0x1234, layout, rows))
+    await hass.async_block_till_done()
+    assert (hub.stats["hive_reports"], hub.stats["duplicates"], hub.stats["unknown_node"]) == (1, 1, 1)
+    assert hass.states.async_entity_ids() == []  # the hive makes no entities
+    diag = await async_get_config_entry_diagnostics(hass, entry)
+    assert (diag["hive"]["reporter"], diag["hive"]["hash"], diag["hive"]["in_sync"]) == (NODE_A, "00001234", True)
+    assert diag["hive"]["layout"] == {NODE_A: [-1.0, 0.0], NODE_B: [1.0, 0.0]}
+    assert diag["hive"]["rows"][0]["entries"][0] == {"neighbour": AP, "rssi": -50}
+    json.dumps(diag)
+    # A removed node's report goes with it
+    sub_a = next(s.subentry_id for s in entry.subentries.values() if s.unique_id == NODE_A)
+    hass.config_entries.async_remove_subentry(entry, sub_a)
+    await hass.async_block_till_done()
+    assert hub.hive.current(hub.clock()) is None
 
 
 async def test_unload_closes_the_socket(hass: HomeAssistant, udp: FakeUdp) -> None:
@@ -330,12 +354,13 @@ async def test_real_udp_with_fake_node(hass: HomeAssistant, socket_enabled: None
             entry = await setup_hub(hass, (NODE_A, "127.0.0.1", "Hall"))
             for _ in range(40):
                 await asyncio.sleep(0.05)
-                if hass.states.get(SCORE):
+                if hass.states.get(SCORE) and entry.runtime_data.stats["hive_reports"]:
                     break
             await hass.async_block_till_done()
             assert float(state(hass, SCORE)) > 0
             assert len(hass.states.async_entity_ids("binary_sensor")) == 3
             assert entry.runtime_data.stats["reports"] > 0
+            assert entry.runtime_data.stats["hive_reports"] == 1  # every 5 s
 
             assert await hass.config_entries.async_unload(entry.entry_id)
 

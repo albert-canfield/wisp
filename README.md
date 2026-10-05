@@ -62,6 +62,19 @@ Tools for looking at the raw signal are in [firmware/tools](firmware/tools): a l
 
 Nodes are flashed from the browser, with nothing to install. Open the Wisp web flasher in Chrome or Edge, plug the board in by USB, click Install and enter your WiFi details. Home Assistant then discovers the node by itself. The flasher goes live with the first firmware release at [albert-canfield.github.io/wisp](https://albert-canfield.github.io/wisp).
 
+## Map card
+
+The integration brings its own dashboard card and loads it by itself. Add it from the card picker ("Wisp map") or in YAML:
+
+```yaml
+type: custom:wisp-map-card
+title: Wisp     # optional
+rotate: 0       # optional, degrees clockwise
+flip: false     # optional, mirror left to right
+```
+
+Nodes sit where the grid's own layout puts them, access points beside the nodes that hear them best, and footprints walk along a link while it sees motion. The layout is relative, so turn and mirror it to match your home until floor plans arrive.
+
 ## Roadmap
 
 1. **Prove the signal (working).** Node firmware with the self-forming grid, the hive and per-link motion, the integration with link sensors, CI and the release pipeline.

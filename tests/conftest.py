@@ -13,6 +13,21 @@ AP = "a8:29:48:db:b6:70"
 IP_A = "192.168.1.50"
 IP_B = "192.168.1.51"
 
+# Captured from two real nodes 40 cm apart beside an access point (wisp-8d5858 and wisp-a8c77c)
+REAL_NODE_1 = "44:1b:f6:8d:58:58"
+REAL_NODE_2 = "ac:27:6e:a8:c7:7c"
+REAL_AP = "58:04:4f:1d:12:f9"
+REAL_HIVE = bytes.fromhex(  # from node 1, in sync: both nodes on the layout, both rows
+    "5749535001031a0004000000441bf68d5858ba88cd0b01020200441bf68d5858ecff0000ac276ea8c77c14000000"
+    "441bf68d585802000258044f1d12f9c2ac276ea8c77ce5ac276ea8c77c02000258044f1d12f9cf441bf68d5858e3"
+)
+REAL_LINKS_1 = bytes.fromhex(  # node 1 hears node 2
+    "574953500102180057000000441bf68d5858010011000000ac276ea8c77c01e5620004010400"
+)
+REAL_LINKS_2 = bytes.fromhex(  # node 2 hears the access point and node 1
+    "57495350010218009f070000ac276ea8c77c02008a01000058044f1d12f900cf6700d9010500441bf68d585801e46e0019010400"
+)
+
 
 class FakeTransport(asyncio.DatagramTransport):
     def __init__(self) -> None:

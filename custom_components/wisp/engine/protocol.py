@@ -10,10 +10,12 @@ SUBSCRIBE_MAGIC = b"WSUB"
 
 PACKET_RAW_CSI = 1
 PACKET_LINK_REPORT = 2
+PACKET_HIVE_REPORT = 3
 
 # Subscribe stream mask
 STREAM_RAW_CSI = 0x01
 STREAM_LINK_REPORTS = 0x02
+STREAM_HIVE_REPORTS = 0x04
 
 # Link kind: who transmitted
 KIND_AP = 0
@@ -22,13 +24,20 @@ KIND_NODE = 1
 SCORE_UNKNOWN = 0xFFFF
 RSSI_NO_FRAMES = -128
 LINK_FLAG_MOTION = 0x01
+HIVE_FLAG_IN_SYNC = 0x01
+HIVE_FLAG_ROWS_TRUNCATED = 0x02
 
 _HEADER = struct.Struct("<4sBBH")  # magic, version, packet type, header length
 _RAW = struct.Struct("<I6s6sIbbBBBBBBH")  # raw CSI fields at offset 8
 _REPORT = struct.Struct("<I6sBBI")  # link report fields at offset 8
 _LINK = struct.Struct("<6sBbHHBB")  # one link, 14 bytes
+_HIVE = struct.Struct("<I6sIBBBB")  # hive report fields at offset 8
+_POINT = struct.Struct("<6shh")  # layout point: node, x and y in cm, 10 bytes
+_ROW = struct.Struct("<6sHB")  # row head: origin, version, entries, 9 bytes
+_ENTRY = struct.Struct("<6sb")  # row entry: neighbour, RSSI, 7 bytes
 RAW_HEADER_LEN = 8 + _RAW.size  # 38
 REPORT_HEADER_LEN = 8 + _REPORT.size  # 24
+HIVE_HEADER_LEN = 8 + _HIVE.size  # 26
 LINK_LEN = _LINK.size
 
 
@@ -72,6 +81,44 @@ class LinkReport:
 
 
 @dataclass(frozen=True, slots=True)
+class LayoutPoint:
+    node: str
+    x: float  # metres, relative: rotation, mirror and scale come from anchors
+    y: float
+
+
+@dataclass(frozen=True, slots=True)
+class HiveEntry:
+    neighbour: str  # a node or an access point
+    rssi: int  # slow median, dBm
+
+
+@dataclass(frozen=True, slots=True)
+class HiveRow:
+    origin: str  # the node that measured these
+    version: int
+    entries: tuple[HiveEntry, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class HiveReport:
+    seq: int
+    node: str  # sender
+    hash: int  # equal on every node that holds the same rows
+    flags: int
+    layout: tuple[LayoutPoint, ...]
+    rows: tuple[HiveRow, ...]
+
+    @property
+    def in_sync(self) -> bool:
+        return bool(self.flags & HIVE_FLAG_IN_SYNC)
+
+    @property
+    def truncated(self) -> bool:
+        return bool(self.flags & HIVE_FLAG_ROWS_TRUNCATED)
+
+
+@dataclass(frozen=True, slots=True)
 class RawCsi:
     seq: int
     node: str  # receiver
@@ -104,13 +151,15 @@ def parse_header(data: bytes) -> Header:
     return Header(version, packet_type, header_len)
 
 
-def parse_packet(data: bytes) -> LinkReport | RawCsi | None:
+def parse_packet(data: bytes) -> LinkReport | HiveReport | RawCsi | None:
     """Any packet a node sends. None for a version or type this reader does not know."""
     header = parse_header(data)
     if header.version != PROTOCOL_VERSION:
         return None
     if header.packet_type == PACKET_LINK_REPORT:
         return parse_link_report(data, header)
+    if header.packet_type == PACKET_HIVE_REPORT:
+        return parse_hive_report(data, header)
     if header.packet_type == PACKET_RAW_CSI:
         return parse_raw_csi(data, header)
     return None
@@ -127,6 +176,34 @@ def parse_link_report(data: bytes, header: Header | None = None) -> LinkReport:
         _link(*_LINK.unpack_from(data, offset)) for offset in range(header.header_len, end, LINK_LEN)
     )
     return LinkReport(seq, format_mac(node), flags, uptime, links)
+
+
+def parse_hive_report(data: bytes, header: Header | None = None) -> HiveReport:
+    header = header or parse_header(data)
+    _check(header, PACKET_HIVE_REPORT, HIVE_HEADER_LEN, len(data))
+    seq, node, hive_hash, flags, n_points, n_rows, _reserved = _HIVE.unpack_from(data, 8)
+    pos = header.header_len
+    end = pos + n_points * _POINT.size
+    if len(data) < end:
+        raise ProtocolError(f"{n_points} layout points need {end} bytes, got {len(data)}")
+    layout = tuple(
+        LayoutPoint(format_mac(mac), x / 100, y / 100)
+        for mac, x, y in (_POINT.unpack_from(data, offset) for offset in range(pos, end, _POINT.size))
+    )
+    rows = []
+    for _ in range(n_rows):
+        if len(data) < end + _ROW.size:
+            raise ProtocolError(f"row {len(rows) + 1} of {n_rows} cut short at byte {end}")
+        origin, version, count = _ROW.unpack_from(data, end)
+        pos, end = end + _ROW.size, end + _ROW.size + count * _ENTRY.size
+        if len(data) < end:
+            raise ProtocolError(f"row {len(rows) + 1} of {n_rows}: {count} entries need {end} bytes, got {len(data)}")
+        entries = tuple(
+            HiveEntry(format_mac(mac), rssi)
+            for mac, rssi in (_ENTRY.unpack_from(data, offset) for offset in range(pos, end, _ENTRY.size))
+        )
+        rows.append(HiveRow(format_mac(origin), version, entries))
+    return HiveReport(seq, format_mac(node), hive_hash, flags, layout, tuple(rows))
 
 
 def parse_raw_csi(data: bytes, header: Header | None = None) -> RawCsi:

@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
-"""A fake Wisp node: answers subscriptions with link reports, no hardware needed.
+"""A fake Wisp node: answers subscriptions with link and hive reports, no hardware needed.
 
 Listens on UDP 47010 and sends every subscriber (lease 10 s, up to 4) a link report 5 times a
 second, for 3 links: the access point and two other nodes, with scores that drift and burst.
+Subscribers that want the hive get a hive report every 5 s: the three nodes in a triangle.
 Packet format: docs/PROTOCOL.md. Self-contained on purpose, so it also checks the engine's parser.
 
     python tests/fake_node.py
@@ -23,12 +24,18 @@ PORT = 47010
 LEASE = 10.0
 MAX_SUBSCRIBERS = 4
 INTERVAL = 0.2
+HIVE_INTERVAL = 5.0
 DEFAULT_MAC = "02:57:49:53:50:01"
 # (transmitter, kind): the access point, then two nodes
 DEFAULT_LINKS = [("a8:29:48:db:b6:70", 0), ("02:57:49:53:50:02", 1), ("02:57:49:53:50:03", 1)]
+HIVE_IN_SYNC = 0x01
 
 _REPORT_HEAD = struct.Struct("<4sBBHI6sBBI")  # common header + link report fields, 24 bytes
 _LINK = struct.Struct("<6sBbHHBB")  # 14 bytes
+_HIVE_HEAD = struct.Struct("<4sBBHI6sIBBBB")  # common header + hive report fields, 26 bytes
+_POINT = struct.Struct("<6shh")  # 10 bytes
+_ROW = struct.Struct("<6sHB")  # 9 bytes
+_ENTRY = struct.Struct("<6sb")  # 7 bytes
 
 
 def mac_bytes(mac: str) -> bytes:
@@ -44,6 +51,18 @@ def encode_report(seq: int, node: str, links: list[tuple], uptime: int = 0, flag
     """links: (transmitter, kind, rssi, score x100, spread x100, frames, flags) each."""
     head = _REPORT_HEAD.pack(b"WISP", 1, 2, _REPORT_HEAD.size, seq, mac_bytes(node), len(links), flags, uptime)
     return head + b"".join(encode_link(*link) for link in links)
+
+
+def encode_hive_report(seq: int, node: str, hive_hash: int, layout: list[tuple], rows: list[tuple],
+                       flags: int = HIVE_IN_SYNC) -> bytes:
+    """layout: (node, x cm, y cm) each; rows: (origin, version, [(neighbour, rssi), ...]) each."""
+    head = _HIVE_HEAD.pack(b"WISP", 1, 3, _HIVE_HEAD.size, seq, mac_bytes(node), hive_hash, flags,
+                           len(layout), len(rows), 0)
+    body = b"".join(_POINT.pack(mac_bytes(mac), x, y) for mac, x, y in layout)
+    for origin, version, entries in rows:
+        body += _ROW.pack(mac_bytes(origin), version, len(entries))
+        body += b"".join(_ENTRY.pack(mac_bytes(mac), rssi) for mac, rssi in entries)
+    return head + body
 
 
 def parse_subscribe(data: bytes) -> int | None:
@@ -62,9 +81,11 @@ class FakeNode(asyncio.DatagramProtocol):
         self.verbose = verbose
         self.subscribers: dict[tuple[str, int], tuple[float, int]] = {}  # addr: (lease end, mask)
         self.seq = 0
+        self.hive_seq = 0
         self.started = time.monotonic()
         self.transport: asyncio.DatagramTransport | None = None
         self._task: asyncio.Task | None = None
+        self._hive_due = 0.0
 
     def connection_made(self, transport: asyncio.BaseTransport) -> None:
         self.transport = transport  # type: ignore[assignment]
@@ -93,6 +114,19 @@ class FakeNode(asyncio.DatagramProtocol):
         self.seq += 1
         return encode_report(self.seq, self.mac, links, uptime=int(t))
 
+    def hive_report(self) -> bytes:
+        """The grid as this node sees it: the nodes on a circle (cm), each hearing the AP and the others."""
+        aps = [tx for tx, kind in self.links if kind == 0]
+        nodes = [self.mac] + [tx for tx, kind in self.links if kind == 1]
+        angles = [math.pi * (1.25 - 2 * i / len(nodes)) for i in range(len(nodes))]
+        layout = [(mac, round(180 * math.cos(a)), round(180 * math.sin(a))) for mac, a in zip(nodes, angles)]
+        rows = [
+            (origin, 1, [(mac, -48 - 6 * i) for i, mac in enumerate(aps + [n for n in nodes if n != origin])])
+            for origin in nodes
+        ]
+        self.hive_seq += 1
+        return encode_hive_report(self.hive_seq, self.mac, 0x57495350, layout, rows)
+
     def send_reports(self) -> int:
         now = time.monotonic()
         self.subscribers = {a: s for a, s in self.subscribers.items() if s[0] > now}
@@ -100,6 +134,12 @@ class FakeNode(asyncio.DatagramProtocol):
         if wanted and self.transport:
             packet = self.report(now)
             for addr in wanted:
+                self.transport.sendto(packet, addr)
+        hive = [a for a, (_, mask) in self.subscribers.items() if mask & 0x04]
+        if hive and self.transport and now >= self._hive_due:
+            self._hive_due = now + HIVE_INTERVAL
+            packet = self.hive_report()
+            for addr in hive:
                 self.transport.sendto(packet, addr)
         return len(wanted)
 

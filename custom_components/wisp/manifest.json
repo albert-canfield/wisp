@@ -2,7 +2,9 @@
   "domain": "wisp",
   "name": "Wisp",
   "after_dependencies": [
-    "esphome"
+    "esphome",
+    "frontend",
+    "http"
   ],
   "codeowners": [
     "@albert-canfield"

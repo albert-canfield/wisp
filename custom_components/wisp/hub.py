@@ -1,4 +1,4 @@
-"""Hub: one UDP socket that subscribes to every node and keeps the latest link state."""
+"""Hub: one UDP socket that subscribes to every node and keeps the latest link and hive state."""
 from __future__ import annotations
 
 import asyncio
@@ -19,6 +19,7 @@ from homeassistant.helpers.device_registry import CONNECTION_NETWORK_MAC, Device
 from homeassistant.helpers.event import async_track_time_interval
 
 from .const import (
+    HIVE_TIMEOUT,
     LINK_TIMEOUT,
     MANUFACTURER,
     MODEL,
@@ -30,18 +31,23 @@ from .const import (
 )
 from .engine import (
     KIND_AP,
+    STREAM_HIVE_REPORTS,
     STREAM_LINK_REPORTS,
+    HiveReport,
+    HiveTracker,
     LinkKey,
     LinkReport,
     LinkState,
     LinkTable,
     ProtocolError,
+    access_points,
     build_subscribe,
     parse_packet,
 )
 
 _LOGGER = logging.getLogger(__name__)
 LISTEN = ("0.0.0.0", 0)  # any interface, ephemeral port
+STREAMS = STREAM_LINK_REPORTS | STREAM_HIVE_REPORTS
 
 # Home Assistant 2026.9 gives each config entry its own devices. A node then has a Wisp device
 # linked to its ESPHome device by the shared MAC; before, both integrations shared one device.
@@ -81,11 +87,12 @@ class WispHub:
         self.entry = entry
         self.clock: Callable[[], float] = time.monotonic
         self.table = LinkTable(LINK_TIMEOUT)
+        self.hive = HiveTracker(HIVE_TIMEOUT)
         self.nodes: dict[str, Node] = {}
         self.transport: asyncio.DatagramTransport | None = None
         self.port: int | None = None
         self.stats = dict.fromkeys(
-            ("packets", "reports", "duplicates", "unknown_node", "ignored", "invalid", "subscribes"), 0
+            ("packets", "reports", "hive_reports", "duplicates", "unknown_node", "ignored", "invalid", "subscribes"), 0
         )
         self._new_link_listeners: list[Callable[[LinkKey], None]] = []
         self._link_listeners: dict[LinkKey, list[Callable[[], None]]] = {}
@@ -130,6 +137,7 @@ class WispHub:
         }
         for mac in set(self.nodes) - set(wanted):
             del self.nodes[mac]
+            self.hive.forget(mac)
             # Home Assistant removes the subentry's entities and device link itself
             for key in self.table.forget(mac):
                 self._link_listeners.pop(key, None)
@@ -168,7 +176,7 @@ class WispHub:
 
     async def async_subscribe(self) -> None:
         """Renew every node's lease, from the hub's socket so the reports come back to it."""
-        packet = build_subscribe(STREAM_LINK_REPORTS)
+        packet = build_subscribe(STREAMS)
         for node in list(self.nodes.values()):
             address = await self._async_address(node)
             if address is None or self.transport is None:
@@ -211,11 +219,14 @@ class WispHub:
             self.stats["invalid"] += 1
             _LOGGER.debug("Bad packet from %s: %s", addr[0], err)
             return
-        if not isinstance(packet, LinkReport):  # raw CSI, or a version or type we do not know
+        if not isinstance(packet, (LinkReport, HiveReport)):  # raw CSI, or a version or type we do not know
             self.stats["ignored"] += 1
             return
         if packet.node not in self.nodes:
             self.stats["unknown_node"] += 1
+            return
+        if isinstance(packet, HiveReport):
+            self.stats["hive_reports" if self.hive.apply(packet, self.clock()) else "duplicates"] += 1
             return
         applied = self.table.apply(packet, self.clock(), addr[0])
         if applied is None:
@@ -282,6 +293,62 @@ class WispHub:
         node = self.nodes.get(mac)
         return node.subentry_id if node else None
 
+    # Map
+
+    def online(self, mac: str, now: float) -> bool:
+        """The node reported within the timeout: links or hive."""
+        seen = self.table.nodes.get(mac)
+        fresh = seen is not None and now - seen.updated <= LINK_TIMEOUT
+        return self.transport is not None and (fresh or self.hive.fresh(mac, now))
+
+    def map_snapshot(self) -> dict[str, Any]:
+        """The live map: nodes at their layout positions, access points, fresh links and the hive."""
+        now = self.clock()
+        hive = self.hive.current(now)
+        layout = hive.layout if hive else {}
+        nodes = []
+        for mac in sorted(set(self.nodes) | set(layout)):  # the layout may hold nodes not added yet
+            node = self.nodes.get(mac)
+            x, y = layout.get(mac, (None, None))
+            nodes.append({
+                "mac": mac,
+                "name": node.name if node else default_node_name(mac),
+                "online": node is not None and self.online(mac, now),
+                "x": x,
+                "y": y,
+            })
+        aps = access_points(self.table, hive, set(self.nodes))
+        on_map = {n["mac"] for n in nodes} | set(aps)
+        links = [
+            {
+                "transmitter": link.transmitter,
+                "receiver": link.receiver,
+                "kind": "ap" if link.kind == KIND_AP else "node",
+                "score": None if link.score is None else round(link.score, 1),
+                "motion": link.motion,
+            }
+            for _, link in sorted(self.table.links.items())
+            if now - link.updated <= LINK_TIMEOUT and link.receiver in self.nodes and link.transmitter in on_map
+        ]
+        return {
+            "nodes": nodes,
+            "access_points": [
+                {
+                    "bssid": bssid,
+                    "label": ap_label(bssid),
+                    "heard_by": [{"node": mac, "rssi": rssi} for mac, rssi in heard],
+                }
+                for bssid, heard in aps.items()
+            ],
+            "links": links,
+            "hive": {
+                "hash": f"{hive.hash:08x}",
+                "in_sync": hive.in_sync,
+                "nodes": len(hive.nodes),
+                "age": round(now - hive.updated),
+            } if hive else None,
+        }
+
     # Diagnostics
 
     def diagnostics(self) -> dict[str, Any]:
@@ -312,6 +379,7 @@ class WispHub:
             {**{k: v for k, v in asdict(link).items() if k != "updated"}, "seconds_ago": age(link.updated)}
             for link in self.table.links.values()
         ]
+        hive = self.hive.current(now)
         return {
             "hub": {
                 "running": self.transport is not None,
@@ -322,7 +390,22 @@ class WispHub:
             },
             "nodes": nodes,
             "links": links,
+            "hive": {
+                "reporter": hive.reporter,
+                "seq": hive.seq,
+                "hash": f"{hive.hash:08x}",
+                "in_sync": hive.in_sync,
+                "truncated": hive.truncated,
+                "seconds_ago": age(hive.updated),
+                "layout": {mac: list(xy) for mac, xy in hive.layout.items()},
+                "rows": [asdict(row) for row in hive.rows.values()],
+            } if hive else None,
         }
+
+
+def ap_label(bssid: str) -> str:
+    """Short map label: the last two bytes, the full BSSID is long on a phone."""
+    return f"AP {bssid[-5:]}"
 
 
 def default_node_name(mac: str) -> str:
