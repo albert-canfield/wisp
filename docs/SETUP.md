@@ -26,7 +26,8 @@ python3.13 -m venv .venv && .venv/bin/pip install esphome
 1. A new node opens a hotspot named `wisp-xxxxxx` (the last six digits of its MAC). Join it from a phone, pick your network and enter its password.
 2. Home Assistant discovers the node under ESPHome. Add it: restart, updates, settings and health appear there.
 3. Install the Wisp integration: copy `custom_components/wisp` to Home Assistant's `config/custom_components` (or add this repository to HACS as a custom integration repository) and restart Home Assistant. Wisp discovers the nodes by itself; confirm the first one, the others are added automatically.
-4. Add the map: a dashboard card of type `custom:wisp-map-card`.
+4. Open the **Wisp** panel: in the sidebar, or with Open on the Wisp hub device (Settings > Devices & services > Wisp). Floor plans, node placement and room calibration are all there. The hub device also has Nodes online and Hive in sync, to see at a glance (or automate on) whether every node reports.
+5. Add the map to a dashboard if you like: a card of type `custom:wisp-map-card`.
 
 ## 4. Where to put the nodes
 

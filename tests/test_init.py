@@ -40,6 +40,14 @@ SCORE = "sensor.hall_ap_a8_29_48_db_b6_70_motion_score"
 SIGNAL = "sensor.hall_ap_a8_29_48_db_b6_70_signal"
 SPREAD = "sensor.hall_ap_a8_29_48_db_b6_70_spread"
 MOTION = "binary_sensor.hall_ap_a8_29_48_db_b6_70_motion"
+NODES_ONLINE = "sensor.wisp_nodes_online"
+HIVE_IN_SYNC = "binary_sensor.wisp_hive_in_sync"
+
+
+def link_ids(hass: HomeAssistant, domain: str | None = None) -> list[str]:
+    """Entity ids without the hub's own two, which are always there."""
+    ids = hass.states.async_entity_ids(domain) if domain else hass.states.async_entity_ids()
+    return [e for e in ids if e not in (NODES_ONLINE, HIVE_IN_SYNC)]
 
 
 def node_subentry(mac: str, host: str, name: str) -> ConfigSubentryData:
@@ -114,11 +122,11 @@ async def test_subscribes_to_every_node_every_3_seconds(hass: HomeAssistant, udp
 
 
 async def test_link_entities_appear_on_first_report(hass: HomeAssistant, feed: Feed) -> None:
-    assert hass.states.async_entity_ids("sensor") == []
+    assert link_ids(hass, "sensor") == []
     await feed()
     # Motion score per link; Signal and Spread exist but start disabled (recorder load)
-    assert len(hass.states.async_entity_ids("sensor")) == 3
-    assert len(hass.states.async_entity_ids("binary_sensor")) == 3
+    assert len(link_ids(hass, "sensor")) == 3
+    assert len(link_ids(hass, "binary_sensor")) == 3
     registry = er.async_get(hass)
     for entity_id in (SIGNAL, SPREAD):
         entry = registry.async_get(entity_id)
@@ -210,7 +218,8 @@ async def test_device_matches_the_esphome_device(hass: HomeAssistant, udp: FakeU
     if PER_ENTRY_DEVICES:
         # Home Assistant 2026.9+: Wisp's own device, linked to ESPHome's by the MAC
         assert len(devices) == 2
-        (ours,) = dr.async_entries_for_config_entry(dev_reg, entry.entry_id)
+        (ours,) = [d for d in dr.async_entries_for_config_entry(dev_reg, entry.entry_id)
+                   if (DOMAIN, entry.entry_id) not in d.identifiers]  # the hub has its own device
         assert ours.id in devices and ours.name == "Hall"
         reg = er.async_get(hass).async_get("sensor.hall_ap_a8_29_48_db_b6_70_motion_score")
         assert reg.device_id == ours.id
@@ -230,7 +239,7 @@ async def test_ignores_unknown_nodes_and_bad_packets(hass: HomeAssistant, udp: F
     udp.receive(b"WISP\x01\x01\x26\x00" + bytes(30))  # raw CSI, no CSI bytes
     udp.receive(b"WISP\x02\x02\x18\x00" + bytes(16))  # newer protocol version
     await hass.async_block_till_done()
-    assert hass.states.async_entity_ids() == []
+    assert link_ids(hass) == []
     stats = entry.runtime_data.stats
     assert (stats["unknown_node"], stats["invalid"], stats["ignored"], stats["reports"]) == (1, 2, 2, 0)
 
@@ -307,6 +316,40 @@ async def test_diagnostics(hass: HomeAssistant, udp: FakeUdp) -> None:
     json.dumps(diag)
 
 
+async def test_hub_device_and_health(hass: HomeAssistant, udp: FakeUdp) -> None:
+    """The hub has its own device from the start: Open leads to the Wisp panel, and two sensors
+    tell how the grid is doing."""
+    entry = await setup_hub(hass, HALL, OFFICE)
+    hub = entry.runtime_data
+    hub.clock = FakeClock()
+    (device,) = [d for d in dr.async_entries_for_config_entry(dr.async_get(hass), entry.entry_id)
+                 if (DOMAIN, entry.entry_id) in d.identifiers]
+    assert device is not None and device.name == "Wisp" and device.configuration_url == "homeassistant://wisp"
+    registry = er.async_get(hass)
+    assert {registry.async_get(e).device_id for e in (NODES_ONLINE, HIVE_IN_SYNC)} == {device.id}
+    assert registry.async_get(HIVE_IN_SYNC).entity_category == "diagnostic"
+    online = hass.states.get(NODES_ONLINE)
+    assert online.state == "0" and online.attributes["nodes"] == 2 and online.attributes["offline"] == ["Hall", "Office"]
+    assert state(hass, HIVE_IN_SYNC) == STATE_UNKNOWN
+
+    layout = [(NODE_A, -100, 0), (NODE_B, 100, 0)]
+    rows = [(NODE_A, 1, [(AP, -50), (NODE_B, -60)]), (NODE_B, 1, [(AP, -55), (NODE_A, -61)])]
+    udp.receive(encode_report(1, NODE_A, links(), uptime=60))
+    udp.receive(encode_hive_report(1, NODE_A, 0x1234, layout, rows))
+    await fire(hass, 1)
+    online = hass.states.get(NODES_ONLINE)
+    assert online.state == "1" and online.attributes["offline"] == ["Office"]
+    hive = hass.states.get(HIVE_IN_SYNC)
+    assert hive.state == "on" and hive.attributes["nodes"] == 2
+
+    udp.receive(encode_hive_report(2, NODE_A, 0x1234, layout, rows, flags=0))  # still syncing
+    await fire(hass, 1)
+    assert state(hass, HIVE_IN_SYNC) == "off"
+    hub.clock.now += 60  # nothing heard for a minute
+    await fire(hass, 2)
+    assert state(hass, NODES_ONLINE) == "0" and state(hass, HIVE_IN_SYNC) == STATE_UNKNOWN
+
+
 async def test_hive_reports(hass: HomeAssistant, udp: FakeUdp) -> None:
     entry = await setup_hub(hass, HALL, OFFICE)
     hub = entry.runtime_data
@@ -317,7 +360,7 @@ async def test_hive_reports(hass: HomeAssistant, udp: FakeUdp) -> None:
     udp.receive(encode_hive_report(1, NODE_A, 0x1234, layout, rows))
     await hass.async_block_till_done()
     assert (hub.stats["hive_reports"], hub.stats["duplicates"], hub.stats["unknown_node"]) == (1, 1, 1)
-    assert hass.states.async_entity_ids() == []  # the hive makes no entities
+    assert link_ids(hass) == []  # the hive makes no entities of its own
     diag = await async_get_config_entry_diagnostics(hass, entry)
     assert (diag["hive"]["reporter"], diag["hive"]["hash"], diag["hive"]["in_sync"]) == (NODE_A, "00001234", True)
     assert diag["hive"]["layout"] == {NODE_A: [-1.0, 0.0], NODE_B: [1.0, 0.0]}
@@ -358,7 +401,7 @@ async def test_real_udp_with_fake_node(hass: HomeAssistant, socket_enabled: None
                     break
             await hass.async_block_till_done()
             assert float(state(hass, SCORE)) > 0
-            assert len(hass.states.async_entity_ids("binary_sensor")) == 3
+            assert len(link_ids(hass, "binary_sensor")) == 3
             assert entry.runtime_data.stats["reports"] > 0
             assert entry.runtime_data.stats["hive_reports"] == 1  # every 5 s
 

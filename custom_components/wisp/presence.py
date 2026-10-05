@@ -352,6 +352,7 @@ class RoomPresence:
             manufacturer=MANUFACTURER,
             model="Hub",
             entry_type=DeviceEntryType.SERVICE,
+            configuration_url=f"homeassistant://{DOMAIN}",  # Open: the Wisp panel
         )
 
     @callback

@@ -1,4 +1,5 @@
-"""Sensors per link: motion score, and signal and spread for diagnostics. Per floor: room and calibration."""
+"""Sensors per link: motion score, and signal and spread for diagnostics. Per floor: room and calibration.
+On the hub: nodes online."""
 from __future__ import annotations
 
 from functools import partial
@@ -30,7 +31,7 @@ async def async_setup_entry(
     entry.async_on_unload(hub.async_listen_new_links(add_link))
 
     def wanted() -> dict[str, Any]:
-        out = {}
+        out: dict[str, Any] = {room_unique_id(hub, "hub", NodesOnline.key): partial(NodesOnline, hub)}
         for floor in hub.presence.floors_in_use():
             for cls in (Room, Calibration):
                 out[room_unique_id(hub, floor_scope(floor), cls.key)] = partial(cls, hub, floor)
@@ -196,3 +197,31 @@ class PositionY(Position):
     key = "y"
     axis = 1
     _attr_icon = "mdi:axis-y-arrow"
+
+
+class NodesOnline(WispRoomEntity, SensorEntity):
+    """How many of the hub's nodes report; the ones that do not, by name."""
+
+    key = "nodes_online"
+    _attr_translation_key = "nodes_online"
+    _attr_icon = "mdi:access-point-network"
+    _attr_state_class = SensorStateClass.MEASUREMENT
+
+    def __init__(self, hub: WispHub) -> None:
+        super().__init__(hub, "hub")
+
+    @property
+    def native_value(self) -> int:
+        return self.value()[0]
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        return self.value()[1]
+
+    def value(self) -> tuple[int, dict[str, Any]]:
+        now = self.hub.clock()
+        offline = sorted(node.name for mac, node in self.hub.nodes.items() if not self.hub.online(mac, now))
+        return len(self.hub.nodes) - len(offline), {"nodes": len(self.hub.nodes), "offline": offline}
+
+    def _urgent(self, value: tuple[int, dict[str, Any]]) -> bool:
+        return value[0] != self._written[1][0]

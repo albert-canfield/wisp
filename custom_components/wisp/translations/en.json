@@ -12,10 +12,13 @@
       }
     },
     "abort": {
-      "already_configured": "Already set up.",
+      "already_configured": "Wisp is already set up: one hub serves every node. Use Add node for a board it did not find. Floor plans, node placement and room calibration are in the **Wisp** panel in the sidebar (or Open on the Wisp hub device).",
       "already_in_progress": "Setup is already in progress.",
       "node_added": "The node was added to Wisp.",
       "not_wisp_node": "This device does not run the Wisp node firmware."
+    },
+    "create_entry": {
+      "default": "Wisp is ready, and nodes on your network join on their own. Next: open **Wisp** in the sidebar to add a floor plan, place your nodes and calibrate rooms."
     }
   },
   "config_subentries": {
@@ -73,6 +76,9 @@
       },
       "presence": {
         "name": "{area} presence"
+      },
+      "hive_in_sync": {
+        "name": "Hive in sync"
       }
     },
     "sensor": {
@@ -116,6 +122,9 @@
       },
       "floor_y": {
         "name": "{floor} position y"
+      },
+      "nodes_online": {
+        "name": "Nodes online"
       }
     }
   },
@@ -128,7 +137,8 @@
         },
         "data_description": {
           "presence_hold": "Seconds a room stays occupied after Wisp last saw someone move in it. Someone sitting still makes little signal."
-        }
+        },
+        "description": "Floor plans, node placement and room calibration are in the **Wisp** panel in the sidebar (or Open on the Wisp hub device). Each node's motion threshold is a setting on its ESPHome device."
       }
     }
   },

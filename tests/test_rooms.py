@@ -20,7 +20,7 @@ from custom_components.wisp.diagnostics import async_get_config_entry_diagnostic
 
 from .conftest import AP, IP_A, IP_B, NODE_A, NODE_B, FakeClock, FakeUdp
 from .fake_node import encode_report
-from .test_init import HALL, OFFICE, fire, setup_hub, state
+from .test_init import HALL, OFFICE, fire, link_ids, setup_hub, state
 
 pytestmark = pytest.mark.usefixtures("enable_custom_integrations")
 
@@ -269,7 +269,7 @@ async def test_unreadable_storage_starts_clean(
         await hass.async_block_till_done()
     assert "Discarding the stored room calibration" in caplog.text
     assert entry.runtime_data.presence.engine.areas == {}
-    assert hass.states.async_entity_ids() == []
+    assert link_ids(hass) == []
 
 
 async def test_clear_calibration(hass: HomeAssistant, house: House, hass_storage: dict) -> None:
