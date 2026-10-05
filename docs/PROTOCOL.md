@@ -105,5 +105,5 @@ Rows include access points as neighbours; layout points are nodes only.
 
 ## ESP-NOW frames between nodes
 
-Not for computers, listed for completeness. Defined in `core_grid.h` (beacon, type 1) and `core_hive.h` (hive row, type 2), magic `WG`, grid protocol version 2. Every node broadcasts one beacon per 100 ms round in its slot, carrying its own hive row, then one relayed row from another node.
+Not for computers, listed for completeness. Defined in `core_grid.h` (beacon, type 1) and `core_hive.h` (hive row, type 2), magic `WG`, grid protocol version 3. Every node broadcasts one beacon per 100 ms round in its slot, carrying its own hive row, then one relayed row from another node, with how long ago that row's origin was last heard directly.
 

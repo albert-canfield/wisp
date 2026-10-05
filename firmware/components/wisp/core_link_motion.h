@@ -122,6 +122,7 @@ class MotionDetector {
  public:
   explicit MotionDetector(float threshold = 2.0f) : threshold_(threshold) {}
   void set_threshold(float t) { this->threshold_ = t; }
+  void reset() { this->active_ = false; }
   bool update(float score) {
     if (std::isnan(score))
       return this->active_;

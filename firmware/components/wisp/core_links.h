@@ -68,7 +68,12 @@ class LinkTable {
         continue;
       }
       l.score = l.motion.tick();
-      l.active = l.detector.update(l.score);
+      if (std::isnan(l.score)) {
+        l.detector.reset();  // a silent link reports no motion, it does not keep the last state
+        l.active = false;
+      } else {
+        l.active = l.detector.update(l.score);
+      }
       i++;
     }
   }

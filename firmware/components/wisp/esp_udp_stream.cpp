@@ -26,6 +26,10 @@ bool UdpStream::open(uint16_t port) {
 uint8_t UdpStream::poll(uint32_t now_ms) {
   if (this->sock_ < 0)
     return 0;
+  for (auto &s : this->subs_) {
+    if (s.used && !live_(s, now_ms))
+      s.used = false;  // expired: never let a stale address come back when the clock wraps
+  }
   uint8_t buf[16];
   sockaddr_in from = {};
   socklen_t from_len = sizeof(from);

@@ -191,7 +191,7 @@ class Grid {
   uint32_t version_{0};
 };
 
-// ---- ESP-NOW beacon, protocol version 2 -------------------------------------------------
+// ---- ESP-NOW beacon, protocol version 3 -------------------------------------------------
 //
 //  0  2  magic "WG"            12  1  chip (see CHIP_*)
 //  2  1  protocol version      13  1  active nodes the sender sees (itself included)
@@ -205,7 +205,7 @@ class Grid {
 // The row is what the sender hears from each neighbour (nodes and access points): the
 // sender's line of the shared matrix that every node keeps (the hive).
 
-constexpr uint8_t GRID_PROTOCOL_VERSION = 2;
+constexpr uint8_t GRID_PROTOCOL_VERSION = 3;
 constexpr uint8_t BEACON_TYPE = 1;
 constexpr int MAX_ROW = 24;
 constexpr size_t BEACON_HEADER_BYTES = 27;

@@ -70,15 +70,18 @@ static void test_row_frame() {
   row.entries[0] = HiveEntry{mac_n(8), -44};
   row.entries[1] = HiveEntry{mac_n(9), -81};
   uint8_t buf[ROW_FRAME_MAX_BYTES];
-  const size_t n = encode_row_frame(row, 12, buf, sizeof(buf));
+  row.heard_ms = 1000;
+  const size_t n = encode_row_frame(row, 12, 61000, buf, sizeof(buf));
   CHECK(n == ROW_FRAME_HEADER_BYTES + 14);
   Mac origin;
   uint16_t version;
+  uint32_t age_ms;
   HiveEntry e[MAX_ROW];
   int count;
-  CHECK(decode_row_frame(buf, n, origin, version, e, count));
+  CHECK(decode_row_frame(buf, n, origin, version, age_ms, e, count));
   CHECK(origin == mac_n(7) && version == 300 && count == 2 && e[1].mac == mac_n(9) && e[1].rssi == -81);
-  CHECK(!decode_row_frame(buf, n - 1, origin, version, e, count));
+  CHECK(age_ms == 60000);  // last heard directly 60 s before it was sent
+  CHECK(!decode_row_frame(buf, n - 1, origin, version, age_ms, e, count));
 }
 
 // A chain of nodes that only hear their neighbours: relays must carry every row to every node.
@@ -121,6 +124,66 @@ static void test_gossip_over_a_chain() {
   }
   std::printf("  chain of %d: every hive agrees after %d rounds (%.1f s)\n", n, rounds + 1, (rounds + 1) / 10.0);
   CHECK(rounds < 50);
+}
+
+// After a reboot a node's row counter restarts; the others hold its old, higher version and would
+// ignore the new rows. Hearing its own old row relayed back makes it jump past it.
+static void test_rebooted_node_gets_back_in_sync() {
+  Hive a(mac_n(1)), b(mac_n(2));
+  HiveEntry ea[1] = {{mac_n(2), -50}}, eb[1] = {{mac_n(1), -52}};
+  a.set_own(ea, 1, 0);
+  for (int i = 0; i < 300; i++) {  // B's row has moved on a lot
+    eb[0].rssi = static_cast<int8_t>(i % 2 ? -52 : -60);
+    b.set_own(eb, 1, 0);
+  }
+  a.on_row(mac_n(2), b.own()->version, b.own()->entries, 1, 0);
+  b.on_row(mac_n(1), a.own()->version, a.own()->entries, 1, 0);
+  CHECK(a.hash() == b.hash());
+  Hive b2(mac_n(2));  // B reboots
+  b2.set_own(eb, 1, 1000);
+  CHECK(!a.on_row(mac_n(2), b2.own()->version, b2.own()->entries, 1, 1000));  // looks old to A
+  const HiveRow *old = a.find(mac_n(2));
+  CHECK(b2.on_row(mac_n(2), old->version, old->entries, old->len, 1100, 0));  // A relays B's old row
+  CHECK(b2.own()->version == static_cast<uint16_t>(old->version + 1));
+  CHECK(a.on_row(mac_n(2), b2.own()->version, b2.own()->entries, 1, 1200));  // now accepted
+  b2.on_row(mac_n(1), a.own()->version, a.own()->entries, 1, 1200);
+  CHECK(a.hash() == b2.hash());
+}
+
+// A node that left: the two that remain keep relaying its row to each other, but the age they
+// pass along keeps growing, so the row still expires after a day. A node that is alive but only
+// heard through a relay stays.
+static void test_departed_rows_expire_despite_relays() {
+  Hive a(mac_n(1)), b(mac_n(2));
+  HiveEntry ec[1] = {{mac_n(1), -60}};
+  a.on_row(mac_n(3), 7, ec, 1, 0);  // C heard directly at t = 0, then gone
+  b.on_row(mac_n(3), 7, ec, 1, 0);
+  HiveEntry ed[1] = {{mac_n(2), -60}};
+  uint32_t now = 0;
+  for (int minute = 1; minute <= 25 * 60; minute++) {
+    now = minute * 60000u;
+    b.on_row(mac_n(4), 9, ed, 1, now);  // D is alive, heard directly by B only
+    // Each relays the rows it holds to the other, with their ages.
+    for (Hive *from : {&a, &b}) {
+      Hive *to = from == &a ? &b : &a;
+      for (int i = 0; i < from->count(); i++) {
+        const HiveRow &r = from->row(i);
+        uint8_t buf[ROW_FRAME_MAX_BYTES];
+        const size_t n = encode_row_frame(r, 0, now, buf, sizeof(buf));
+        Mac o;
+        uint16_t v;
+        uint32_t age;
+        HiveEntry e[MAX_ROW];
+        int k;
+        if (decode_row_frame(buf, n, o, v, age, e, k))
+          to->on_row(o, v, e, k, now, age);
+      }
+    }
+    a.expire(now);
+    b.expire(now);
+  }
+  CHECK(a.find(mac_n(3)) == nullptr && b.find(mac_n(3)) == nullptr);  // C expired everywhere
+  CHECK(a.find(mac_n(4)) != nullptr);  // D, alive, stays at A through B's relays
 }
 
 // Nodes at known positions; RSSI from the path-loss model plus noise; the layout should give
@@ -189,6 +252,8 @@ int main() {
   test_rows_and_hash();
   test_row_frame();
   test_gossip_over_a_chain();
+  test_rebooted_node_gets_back_in_sync();
+  test_departed_rows_expire_despite_relays();
   test_layout();
   if (failures) {
     std::printf("%d hive check(s) failed\n", failures);

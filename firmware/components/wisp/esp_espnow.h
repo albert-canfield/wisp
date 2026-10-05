@@ -28,6 +28,8 @@ class EspNowRadio {
  public:
   // Starts ESP-NOW with a broadcast peer at a fixed 802.11n rate. False while WiFi is not up.
   bool start(QueueHandle_t rx_queue);
+  // Tears ESP-NOW down and starts it again, for example after a Wi-Fi restart.
+  bool restart();
   bool send_broadcast(const uint8_t *data, size_t len);
 
  protected:
@@ -42,6 +44,7 @@ class SlotScheduler {
  public:
   bool start(EspNowRadio *radio);
   void set_slot(int slot) { this->slot_.store(slot); }
+  int slot() const { return this->slot_.load(); }
   void set_beacon(const uint8_t *data, size_t len);
   void set_relay(const uint8_t *data, size_t len);
   bool synced() const { return this->synced_.load(); }

@@ -107,8 +107,19 @@ CONFIG_SCHEMA = cv.Schema(
 ).extend(cv.COMPONENT_SCHEMA)
 
 
+def _validate(config):
+    if CONF_AP_DISTANCE in config and not config[CONF_FTM_PROBE]:
+        raise cv.Invalid(f"{CONF_AP_DISTANCE} needs {CONF_FTM_PROBE}: true")
+    return config
+
+
+FINAL_VALIDATE_SCHEMA = _validate
+
+
 async def to_code(config):
     add_idf_sdkconfig_option("CONFIG_ESP_WIFI_CSI_ENABLED", True)
+    # No fused multiply-add: S3 and C3 nodes must compute the same layout from the same hive.
+    cg.add_build_flag("-ffp-contract=off")
 
     var = cg.new_Pvariable(config[CONF_ID])
     await cg.register_component(var, config)

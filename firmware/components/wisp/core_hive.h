@@ -6,6 +6,12 @@
 // A row is one node's view: the RSSI it receives from each neighbour (nodes and access points).
 // Its version only moves when the view changes enough to matter (a neighbour comes or goes, or a
 // reading moves by ROW_CHANGE_DB), so the hash stays still in a calm house.
+//
+// Each row also knows when its origin was last heard directly. Relays carry that as an age, so a
+// departed node's row grows old everywhere and expires after a day, even though the remaining
+// nodes keep relaying it to each other. A node that hears its own row relayed back at a version
+// it has not reached (it rebooted and its counter restarted) jumps past it, or the others would
+// keep ignoring its new rows as old.
 
 #include <cmath>
 #include <cstddef>
@@ -19,6 +25,8 @@ namespace wisp_core {
 constexpr int MAX_ROWS = MAX_MEMBERS + 1;  // every member plus this node
 constexpr int8_t ROW_CHANGE_DB = 3;
 constexpr uint32_t ROW_EXPIRE_MS = 24 * 3600 * 1000;  // same as forgetting a node
+constexpr uint32_t ROW_AGE_UNIT_MS = 4000;  // relayed ages: 16 bits of 4 s, up to 72 h, beyond the expiry
+constexpr uint32_t ROW_AGE_MAX_MS = 65535u * ROW_AGE_UNIT_MS;
 
 struct HiveEntry {
   Mac mac;
@@ -30,7 +38,7 @@ struct HiveRow {
   uint16_t version;
   uint8_t len;
   HiveEntry entries[MAX_ROW];
-  uint32_t received_ms;
+  uint32_t heard_ms;  // when its origin was last heard directly, by this node or by a relayer
 };
 
 // True if version a is newer than b, with wraparound.
@@ -58,7 +66,7 @@ class Hive {
       const HiveEntry *old = find_entry_(*own, entries[i].mac);
       changed = old == nullptr || std::abs(old->rssi - entries[i].rssi) >= ROW_CHANGE_DB;
     }
-    own->received_ms = now_ms;
+    own->heard_ms = now_ms;
     if (!changed)
       return false;
     own->len = static_cast<uint8_t>(n);
@@ -68,14 +76,27 @@ class Hive {
     return true;
   }
 
-  // A row heard from its origin or relayed by another node. Returns true if it was news.
-  bool on_row(const Mac &origin, uint16_t version, const HiveEntry *entries, int n, uint32_t now_ms) {
-    if (origin == this->self_ || n > MAX_ROW)
+  // A row heard from its origin (age 0) or relayed by another node, which says how long ago the
+  // origin was last heard directly. Returns true if it was news.
+  bool on_row(const Mac &origin, uint16_t version, const HiveEntry *entries, int n, uint32_t now_ms,
+              uint32_t age_ms = 0) {
+    if (n > MAX_ROW)
       return false;
+    if (origin == this->self_) {
+      HiveRow *own = this->find_(this->self_);
+      if (own != nullptr && row_newer(version, own->version)) {
+        own->version = static_cast<uint16_t>(version + 1);  // rebooted: move past the old count
+        this->hash_dirty_ = true;
+        return true;
+      }
+      return false;
+    }
+    const uint32_t heard = now_ms - age_ms;
     HiveRow *row = this->find_(origin);
     if (row != nullptr && !row_newer(version, row->version)) {
-      if (version == row->version)
-        row->received_ms = now_ms;
+      // A saturated age says only "very old": it must not refresh anything.
+      if (version == row->version && age_ms < ROW_AGE_MAX_MS && static_cast<int32_t>(heard - row->heard_ms) > 0)
+        row->heard_ms = heard;
       return false;
     }
     if (row == nullptr && (row = this->find_or_add_(origin)) == nullptr)
@@ -83,15 +104,15 @@ class Hive {
     row->version = version;
     row->len = static_cast<uint8_t>(n);
     memcpy(row->entries, entries, sizeof(HiveEntry) * n);
-    row->received_ms = now_ms;
+    row->heard_ms = heard;
     this->hash_dirty_ = true;
     return true;
   }
 
-  // Drops rows nobody has refreshed for a day (their origin was forgotten).
+  // Drops rows whose origin nobody has heard directly for a day (it was forgotten).
   void expire(uint32_t now_ms) {
     for (int i = 0; i < this->count_;) {
-      if (this->rows_[i].origin != this->self_ && now_ms - this->rows_[i].received_ms > ROW_EXPIRE_MS) {
+      if (this->rows_[i].origin != this->self_ && now_ms - this->rows_[i].heard_ms > ROW_EXPIRE_MS) {
         this->rows_[i] = this->rows_[--this->count_];
         this->hash_dirty_ = true;
         continue;
@@ -173,14 +194,14 @@ class Hive {
 //
 //  0  2  magic "WG"        6  6  origin MAC
 //  2  1  protocol version  12 2  row version
-//  3  1  type (2)          14 1  entries n, then 7n: neighbour MAC (6), RSSI (int8)
-//  4  2  sequence number
+//  3  1  type (2)          14 2  age: time since the origin was last heard directly, 4 s units
+//  4  2  sequence number   16 1  entries n, then 7n: neighbour MAC (6), RSSI (int8)
 
 constexpr uint8_t ROW_FRAME_TYPE = 2;
-constexpr size_t ROW_FRAME_HEADER_BYTES = 15;
+constexpr size_t ROW_FRAME_HEADER_BYTES = 17;
 constexpr size_t ROW_FRAME_MAX_BYTES = ROW_FRAME_HEADER_BYTES + 7 * MAX_ROW;
 
-inline size_t encode_row_frame(const HiveRow &row, uint16_t seq, uint8_t *out, size_t cap) {
+inline size_t encode_row_frame(const HiveRow &row, uint16_t seq, uint32_t now_ms, uint8_t *out, size_t cap) {
   const size_t len = ROW_FRAME_HEADER_BYTES + 7 * static_cast<size_t>(row.len);
   if (len > cap)
     return 0;
@@ -193,7 +214,11 @@ inline size_t encode_row_frame(const HiveRow &row, uint16_t seq, uint8_t *out, s
   memcpy(out + 6, row.origin.b, 6);
   out[12] = static_cast<uint8_t>(row.version);
   out[13] = static_cast<uint8_t>(row.version >> 8);
-  out[14] = row.len;
+  const uint32_t units = (now_ms - row.heard_ms) / ROW_AGE_UNIT_MS;
+  const uint16_t age = static_cast<uint16_t>(units > 65535 ? 65535 : units);
+  out[14] = static_cast<uint8_t>(age);
+  out[15] = static_cast<uint8_t>(age >> 8);
+  out[16] = row.len;
   for (int i = 0; i < row.len; i++) {
     memcpy(out + ROW_FRAME_HEADER_BYTES + 7 * i, row.entries[i].mac.b, 6);
     out[ROW_FRAME_HEADER_BYTES + 7 * i + 6] = static_cast<uint8_t>(row.entries[i].rssi);
@@ -201,16 +226,17 @@ inline size_t encode_row_frame(const HiveRow &row, uint16_t seq, uint8_t *out, s
   return len;
 }
 
-inline bool decode_row_frame(const uint8_t *p, size_t len, Mac &origin, uint16_t &version, HiveEntry *entries,
-                             int &n) {
+inline bool decode_row_frame(const uint8_t *p, size_t len, Mac &origin, uint16_t &version, uint32_t &age_ms,
+                             HiveEntry *entries, int &n) {
   if (len < ROW_FRAME_HEADER_BYTES || p[0] != 'W' || p[1] != 'G' || p[2] != GRID_PROTOCOL_VERSION ||
       p[3] != ROW_FRAME_TYPE)
     return false;
-  n = p[14];
+  n = p[16];
   if (n > MAX_ROW || len < ROW_FRAME_HEADER_BYTES + 7 * static_cast<size_t>(n))
     return false;
   memcpy(origin.b, p + 6, 6);
   version = static_cast<uint16_t>(p[12] | (p[13] << 8));
+  age_ms = static_cast<uint32_t>(p[14] | (p[15] << 8)) * ROW_AGE_UNIT_MS;
   for (int i = 0; i < n; i++) {
     memcpy(entries[i].mac.b, p + ROW_FRAME_HEADER_BYTES + 7 * i, 6);
     entries[i].rssi = static_cast<int8_t>(p[ROW_FRAME_HEADER_BYTES + 7 * i + 6]);

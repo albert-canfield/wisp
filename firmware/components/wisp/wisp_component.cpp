@@ -76,8 +76,13 @@ void WispComponent::setup() {
   }
   this->stream_open_ = this->stream_.open(this->raw_stream_port_);
   if (!this->stream_open_)
-    ESP_LOGW(TAG, "Cannot open UDP port %u", this->raw_stream_port_);
-  xTaskCreate(&WispComponent::core_task_, "wisp_core", CORE_TASK_STACK, this, CORE_TASK_PRIORITY, &this->task_);
+    ESP_LOGW(TAG, "Cannot open UDP port %u yet, retrying", this->raw_stream_port_);
+  if (xTaskCreate(&WispComponent::core_task_, "wisp_core", CORE_TASK_STACK, this, CORE_TASK_PRIORITY, &this->task_) !=
+      pdPASS) {
+    ESP_LOGE(TAG, "No memory for the core task");
+    this->mark_failed();
+    return;
+  }
   this->last_stats_ms_ = millis();
 }
 
@@ -96,13 +101,30 @@ void WispComponent::loop() {
     this->espnow_started_.store(true);
     ESP_LOGI(TAG, "ESP-NOW grid started");
   }
+  if (!this->stream_open_ && (this->stream_open_ = this->stream_.open(this->raw_stream_port_)))
+    ESP_LOGI(TAG, "UDP port %u open", this->raw_stream_port_);
   const bool connected = wifi::global_wifi_component->is_connected();
   if (connected && !this->was_connected_ && this->csi_started_.load()) {
-    // A (re)connection can reset the radio's CSI settings: arm them again.
+    // A (re)connection can follow a Wi-Fi restart, which resets CSI and ESP-NOW: arm both again.
     if (this->capture_.start(this->csi_queue_))
       ESP_LOGD(TAG, "CSI capture re-armed after connecting");
+    if (this->espnow_started_.load() && !this->radio_.restart())
+      ESP_LOGW(TAG, "ESP-NOW could not be restarted");
   }
   this->was_connected_ = connected;
+  // Beacon watchdog: a node that has a slot must be sending. If nothing went out for 10 s,
+  // restart ESP-NOW (a Wi-Fi restart can leave it dead without telling anyone).
+  if (this->espnow_started_.load()) {
+    const uint32_t sent = this->scheduler_.sent();
+    if (this->scheduler_.slot() < 0 || sent != this->beacons_seen_) {
+      this->beacons_seen_ = sent;
+      this->beacons_stalled_s_ = 0;
+    } else if (++this->beacons_stalled_s_ >= 10) {
+      this->beacons_stalled_s_ = 0;
+      ESP_LOGW(TAG, "No beacon sent for 10 s, restarting ESP-NOW");
+      this->radio_.restart();
+    }
+  }
   if (connected && !this->steered_)
     this->steer_wifi_();
   this->update_ap_();
@@ -152,26 +174,34 @@ void WispComponent::loop() {
 #endif
 }
 
-// While ESPHome is (re)connecting: remember the home network's APs from its scan results (it
-// frees them once connected) and keep the grid AP slightly preferred, so ESPHome joins it
-// first. Only by one step: a single failed attempt puts it level with the others again, so a
-// dead access point never strands the node.
+// While ESPHome is (re)connecting: rebuild the list of the home network's APs from its newest
+// scan (it frees the results once connected), and prefer the grid AP slightly, once per
+// disconnection. ESPHome clears preferences after each connection and lowers an AP that keeps
+// failing, so a refusing or dead access point never strands the node.
 void WispComponent::watch_wifi_(uint32_t now) {
   auto *wifi = wifi::global_wifi_component;
-  if (wifi->is_connected())
+  if (wifi->is_connected()) {
+    this->wifi_up_ = true;
     return;
+  }
+  if (this->wifi_up_) {  // just disconnected
+    this->wifi_up_ = false;
+    this->fresh_scan_ = true;
+    this->boost_grid_ap_();
+    portENTER_CRITICAL(&this->ap_lock_);
+    this->has_bssid_ = false;  // no home AP until connected again
+    portEXIT_CRITICAL(&this->ap_lock_);
+  }
   this->steered_ = false;
   const auto &results = wifi->get_scan_result();
-  if (!results.empty()) {
+  if (!results.empty() && this->fresh_scan_) {
+    this->fresh_scan_ = false;
+    this->aps_seen_.clear();
     const auto sta = wifi->get_sta();
     for (const auto &r : results) {
       if (r.get_ssid() == sta.get_ssid())
         this->aps_seen_.add(wisp_core::Mac::from(r.get_bssid().data()), r.get_channel(), r.get_rssi());
     }
-  }
-  if (now - this->last_boost_ms_ >= 2000) {
-    this->last_boost_ms_ = now;
-    this->boost_grid_ap_();
   }
 }
 
@@ -205,8 +235,19 @@ void WispComponent::steer_wifi_() {
     return;
   const wisp_core::Mac current = wisp_core::Mac::from(cur.bssid);
   this->aps_seen_.add(current, cur.primary, cur.rssi);
-  const uint8_t channel = wisp_core::choose_grid_channel(this->aps_seen_.data(), this->aps_seen_.count(),
-                                                         this->ap_min_rssi_, this->grid_channel_cfg_);
+  // Keep the remembered grid channel while its AP is still heard reasonably (6 dB of hysteresis
+  // below the usual minimum), so a borderline AP does not make nodes flip between channels.
+  uint8_t channel = 0;
+  if (this->grid_channel_cfg_ == 0 && this->has_grid_ap_) {
+    for (int i = 0; i < this->aps_seen_.count(); i++) {
+      const wisp_core::ApSeen &ap = this->aps_seen_.data()[i];
+      if (ap.bssid == this->grid_ap_ && ap.rssi >= this->ap_min_rssi_ - 6)
+        channel = this->grid_ap_channel_;
+    }
+  }
+  if (channel == 0)
+    channel = wisp_core::choose_grid_channel(this->aps_seen_.data(), this->aps_seen_.count(), this->ap_min_rssi_,
+                                             this->grid_channel_cfg_);
   if (channel == 0 || channel == cur.primary) {
     this->grid_channel_.store(cur.primary);
     this->remember_grid_ap_(current, cur.primary);
@@ -350,8 +391,10 @@ void WispComponent::handle_espnow_(const wisp_platform::EspNowFrame &f, uint32_t
     uint16_t version;
     int n;
     // Only from members: a stranger's relays wait until its beacon makes it one.
-    if (this->grid_.is_member(from) && wisp_core::decode_row_frame(f.data, f.len, origin, version, entries, n))
-      this->hive_.on_row(origin, version, entries, n, now);
+    uint32_t age_ms;
+    if (this->grid_.is_member(from) &&
+        wisp_core::decode_row_frame(f.data, f.len, origin, version, age_ms, entries, n))
+      this->hive_.on_row(origin, version, entries, n, now, age_ms);
     return;
   }
   wisp_core::Beacon b;
@@ -419,7 +462,7 @@ void WispComponent::core_round_(uint32_t now) {
     this->scheduler_.set_beacon(buf, n);
   if (const wisp_core::HiveRow *relay = this->hive_.next_relay()) {
     uint8_t rbuf[wisp_core::ROW_FRAME_MAX_BYTES];
-    const size_t rn = wisp_core::encode_row_frame(*relay, this->relay_seq_++, rbuf, sizeof(rbuf));
+    const size_t rn = wisp_core::encode_row_frame(*relay, this->relay_seq_++, now, rbuf, sizeof(rbuf));
     if (rn > 0)
       this->scheduler_.set_relay(rbuf, rn);
   }

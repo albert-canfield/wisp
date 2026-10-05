@@ -27,8 +27,13 @@ bool EspNowRadio::start(QueueHandle_t rx_queue) {
   esp_now_rate_config_t rate = {};
   rate.phymode = WIFI_PHY_MODE_HT20;
   rate.rate = WIFI_PHY_RATE_MCS0_LGI;
-  esp_now_set_peer_rate_config(BROADCAST, &rate);
-  return true;
+  // Without it beacons go out at 1 Mbps, which carries no OFDM CSI: treat it as a failure.
+  return esp_now_set_peer_rate_config(BROADCAST, &rate) == ESP_OK;
+}
+
+bool EspNowRadio::restart() {
+  esp_now_deinit();
+  return this->start(rx_queue_);
 }
 
 bool EspNowRadio::send_broadcast(const uint8_t *data, size_t len) {

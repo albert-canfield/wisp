@@ -258,6 +258,29 @@ static void test_link_report() {
   // The next interval starts empty.
   links.encode_report(mac_n(1), 43, 3600, out, sizeof(out));
   CHECK(out[LINK_REPORT_HEADER_BYTES + 12] == 0 && static_cast<int8_t>(out[LINK_REPORT_HEADER_BYTES + 7]) == -128);
+  // A link that goes silent while it shows motion drops the motion flag at once.
+  {
+    LinkTable t;
+    std::normal_distribution<float> wild(0.0f, 1.0f);
+    CsiRecord m{};
+    m.len = 128;
+    memcpy(m.source, ap.b, 6);
+    uint32_t tm = 0;
+    for (int s = 0; s < 60; s++) {
+      for (int f = 0; f < 20; f++) {
+        const float spread = s < 40 ? 1.0f : 12.0f;  // calm, then someone moving
+        for (int i = 0; i < 128; i++)
+          m.data[i] = static_cast<int8_t>(std::fmax(-127.0f, std::fmin(127.0f, 30 + spread * wild(rng))));
+        t.add_frame(m, LinkKind::ACCESS_POINT, tm);
+        tm += 50;
+      }
+      t.tick_second(tm);
+    }
+    CHECK(t.find(ap)->active);
+    tm += 1000;
+    t.tick_second(tm);  // no frames this second
+    CHECK(!t.find(ap)->active);
+  }
   // Silent for over 10 minutes: the entry is freed.
   links.tick_second(now + LINK_EXPIRE_MS + 1);
   CHECK(links.count() == 0);

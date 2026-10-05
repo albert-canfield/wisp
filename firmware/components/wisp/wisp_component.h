@@ -137,8 +137,11 @@ class WispComponent : public Component {
   wisp_core::Mac grid_ap_{};
   uint8_t grid_ap_channel_{0};
   bool has_grid_ap_{false};
-  uint32_t last_boost_ms_{0};
   bool was_connected_{false};
+  bool wifi_up_{false};
+  bool fresh_scan_{true};
+  uint32_t beacons_seen_{0};
+  uint8_t beacons_stalled_s_{0};
   std::atomic<uint8_t> grid_channel_{0};
 
   uint32_t dropped_total_{0};
