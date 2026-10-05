@@ -32,7 +32,13 @@ SCORES = {
     "kitchen": ((320, 230), (105, 110)),
     "office": ((105, 120), (310, 260)),
     None: ((104, 102), (103, 106)),
+    "restless": ((192, 185), (104, 102)),  # the Kitchen's links busy, all under the motion threshold
 }
+
+
+def moving(score: int) -> int:
+    """The motion flag a node sets on a link at its default threshold (score x100)."""
+    return int(score >= 200)
 
 
 class House:
@@ -52,11 +58,12 @@ class House:
             self.seq += 1
             jitter = (self.seq * 7) % 11 - 5
             (a_ap, a_b), (b_ap, b_a) = SCORES[room]
+            a_ap, a_b, b_ap, b_a = a_ap + jitter, a_b - jitter, b_ap - jitter, b_a + jitter
             self.udp.receive(encode_report(self.seq, NODE_A, [
-                (AP, 0, -50, a_ap + jitter, 200, 20, 0), (NODE_B, 1, -60, a_b - jitter, 150, 10, 0),
+                (AP, 0, -50, a_ap, 200, 20, moving(a_ap)), (NODE_B, 1, -60, a_b, 150, 10, moving(a_b)),
             ], uptime=60), IP_A)
             self.udp.receive(encode_report(self.seq, NODE_B, [
-                (AP, 0, -52, b_ap - jitter, 200, 20, 0), (NODE_A, 1, -61, b_a + jitter, 150, 10, 0),
+                (AP, 0, -52, b_ap, 200, 20, moving(b_ap)), (NODE_A, 1, -61, b_a, 150, 10, moving(b_a)),
             ], uptime=60), IP_B)
             self.clock.now += step
             await fire(self.hass, 1)
@@ -157,6 +164,18 @@ async def test_calibrate_rooms_then_presence(hass: HomeAssistant, house: House, 
     assert {registry.async_get(e).device_id for e in (ROOM, CALIBRATION, KITCHEN, OFFICE_PRESENCE)} == {device.id}
     assert registry.async_get(ROOM).config_subentry_id is None
     assert registry.async_get(CALIBRATION).entity_category == "diagnostic"
+
+
+async def test_restless_links_make_no_presence(hass: HomeAssistant, house: House) -> None:
+    """Links below the nodes' motion threshold (no motion flag) are nobody, however they look."""
+    await house.calibrate("kitchen")
+    await house.calibrate(None)
+    await house.seconds(61, None)
+    assert state(hass, KITCHEN) == "off"
+    await house.seconds(5, "restless")
+    assert (state(hass, ROOM), state(hass, KITCHEN)) == ("none", "off")
+    await house.seconds(1, "kitchen")
+    assert (state(hass, ROOM), state(hass, KITCHEN)) == ("Kitchen", "on")
 
 
 async def test_room_writes(hass: HomeAssistant, house: House) -> None:

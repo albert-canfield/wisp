@@ -195,11 +195,11 @@ class RoomPresence:
         live = {}
         hive = self.hub.hive.current(now)
         for floor in self.floors:
-            scores = self.scores(floor, now)
+            scores, moving = self.scores(floor, now), self.moving(floor, now)
             live[floor] = len(scores)
-            ended.append(self.engine.step(floor, self.floor_areas(floor), scores, now))
+            ended.append(self.engine.step(floor, self.floor_areas(floor), scores, now, bool(moving)))
             model = self._layout(floor, hive)
-            if (fix := model.update(scores, now, self.moving(floor, now))) is not None:
+            if (fix := model.update(scores, now, moving)) is not None:
                 self.fixes[floor] = fix
             else:
                 self.fixes.pop(floor, None)

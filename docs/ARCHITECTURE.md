@@ -316,7 +316,7 @@ Pure Python, unit tested, no HA dependency.
 - `tracking.py`: access points placed from how strongly the nodes hear them (kept within twice their distance from the node hearing them best, since readings the geometry cannot meet would push the fit away without end), and a Kalman track with a gate against wild fixes.
 - `floor.py`: one floor from hive layout and link scores to a smoothed position with a quality; on a floor plan, in the plan's metres. Someone is placed only while at least one of the floor's links reports motion (the node's detector, so its Motion threshold and hysteresis): replaying a quiet night, the sum of quiet links alone put a phantom on the map in 2.7% of seconds, the motion gate in under 0.1%.
 - `anchor.py`: the similarity (rotation, mirror, scale, shift) that fits the hive's layout onto the nodes placed on a floor plan, see Node placement.
-- `rooms.py`: room presence from calibrated motion fingerprints, see below.
+- `rooms.py`: room presence from calibrated motion fingerprints, see below. A floor is classified only while one of its links reports motion, as in `floor.py`.
 
 ### Room presence (built, v1: motion fingerprints)
 

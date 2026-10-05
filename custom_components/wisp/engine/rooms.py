@@ -3,7 +3,10 @@
 Once a second a floor gives a feature vector: the log motion score of every live link on it, so
 1.0 (as quiet as usual) is 0. Missing links are left out, never taken as 0. Each room learns from
 vectors recorded while someone moves in it; each floor learns an empty class while nobody moves
-on it. The caller owns the clock (seconds) and says which floor each area is on.
+on it. A floor is classified only while one of its links reports motion (the node's detector, so
+its Motion threshold, with hysteresis); without those flags, while a link scores QUIET or more.
+Replaying a quiet night, a link touched QUIET about every 5 minutes, the motion flags far less.
+The caller owns the clock (seconds) and says which floor each area is on.
 """
 from __future__ import annotations
 
@@ -76,14 +79,18 @@ class Decision:
 
 
 def decide(
-    scores: Mapping[LinkKey, float | None], models: Mapping[ClassId, ClassModel], quiet: float = QUIET
+    scores: Mapping[LinkKey, float | None],
+    models: Mapping[ClassId, ClassModel],
+    quiet: float = QUIET,
+    moving: bool | None = None,
 ) -> Decision | None:
-    """One floor, one second. None without live links, or with motion and no room to tell."""
+    """One floor, one second. moving: whether a link reports motion (None: judge by quiet). None
+    without live links, or with motion and no room to tell."""
     vector = features(scores)
     if not vector:
         return None
     motion = max(score for score in scores.values() if score is not None)
-    if motion < quiet:
+    if motion < quiet if moving is None else not moving:
         return Decision(None, None, {}, motion, len(vector))
     scored = {cls: model.score(vector) for cls, model in models.items()}
     scored = {cls: s for cls, s in scored.items() if s[1]}
@@ -210,8 +217,16 @@ class Rooms:
             model = self._models[(empty, key)] = ClassModel(samples, self.min_samples)
         return model
 
-    def step(self, floor: str, areas: Iterable[str], scores: Mapping[LinkKey, float | None], now: float) -> Run | None:
-        """One second of one floor: record for its run, then decide. Returns its run if it just ended."""
+    def step(
+        self,
+        floor: str,
+        areas: Iterable[str],
+        scores: Mapping[LinkKey, float | None],
+        now: float,
+        moving: bool | None = None,
+    ) -> Run | None:
+        """One second of one floor: record for its run, then decide (moving: see decide). Returns
+        its run if it just ended."""
         ended = None
         run = self.runs.get(floor)
         if run is not None:
@@ -220,7 +235,7 @@ class Rooms:
                 self._record(run, vector, max((s for s in scores.values() if s is not None), default=0.0))
             if now >= run.ends:
                 ended = self.runs.pop(floor)
-        decision = decide(scores, self.models(floor, areas), self.quiet)
+        decision = decide(scores, self.models(floor, areas), self.quiet, moving)
         self.decisions[floor] = decision
         if decision and decision.room is not None and decision.confidence >= self.confidence:
             self.wins[decision.room] = (now, decision.confidence)

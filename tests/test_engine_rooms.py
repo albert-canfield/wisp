@@ -96,6 +96,10 @@ def test_quiet_floor_is_empty_without_calibration():
     d = decide({("a", "x"): 1.2, ("b", "x"): QUIET - 0.01}, {})
     assert (d.room, d.confidence, d.probabilities, d.links) == (None, None, {}, 2)
     assert decide({("a", "x"): 1.2, ("b", "x"): QUIET}, {}) is None  # moving, nothing calibrated
+    # With the nodes' motion flags, they decide: a restless link alone is nobody
+    d = decide({("a", "x"): 1.2, ("b", "x"): QUIET + 0.3}, {}, moving=False)
+    assert (d.room, d.confidence, d.links) == (None, None, 2)
+    assert decide({("a", "x"): 1.2, ("b", "x"): QUIET - 0.1}, {}, moving=True) is None  # moving, nothing calibrated
 
 
 def test_each_room_wins_where_it_disturbs_its_links(engine: Rooms):
