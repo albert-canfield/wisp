@@ -45,7 +45,15 @@ class WispComponent : public Component {
   void set_hive_sync_binary_sensor(binary_sensor::BinarySensor *s) { this->hive_sync_binary_sensor_ = s; }
   void set_core_stack_sensor(sensor::Sensor *s) { this->core_stack_sensor_ = s; }
   void set_raw_stream_enabled(bool enabled) { this->raw_stream_enabled_.store(enabled); }
-  void set_grid_channel(uint8_t channel) { this->grid_channel_cfg_ = channel; }
+  // 0: automatic (see core_wifi_plan.h), else a fixed channel. Changed while running (from Home
+  // Assistant), the node checks its channel again at once and moves if it has to.
+  void set_grid_channel(uint8_t channel) {
+    if (channel == this->grid_channel_cfg_)
+      return;
+    this->grid_channel_cfg_ = channel;
+    this->steered_ = false;
+    this->steer_attempts_ = 0;
+  }
   void set_ap_min_rssi(int8_t rssi) { this->ap_min_rssi_ = rssi; }
 
  protected:

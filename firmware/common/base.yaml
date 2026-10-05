@@ -3,7 +3,7 @@
 substitutions:
   name: wisp
   friendly_name: Wisp
-  project_version: "0.1.0"
+  project_version: "0.1.1"
   motion_threshold: "2.0" # default; then the Motion threshold entity, kept across reboots
 
 esphome:
@@ -82,6 +82,19 @@ debug:
   update_interval: 60s
 
 number:
+  - platform: template
+    name: Fixed grid channel # 0 = automatic: the channel of the lowest BSSID of this network
+    icon: mdi:wifi-cog
+    entity_category: config
+    min_value: 0
+    max_value: 13
+    step: 1
+    mode: box
+    optimistic: true
+    restore_value: true
+    initial_value: 0
+    on_value:
+      - lambda: id(wisp_node).set_grid_channel(static_cast<uint8_t>(x));
   - platform: template
     name: Motion threshold
     icon: mdi:tune-vertical
