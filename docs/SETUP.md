@@ -91,3 +91,17 @@ It asks you to stand still, walk across links and leave the room, and prints for
 | Motion with nobody around | Pets, fans, curtains in a draft, or a washing machine on the line; or raise the node's Motion threshold (a setting on its device page) |
 | A node is "unavailable" in Home Assistant | It is offline or rebooting; the grid keeps working without it |
 | "Few Wisp nodes on ..." in Settings > Repairs | That floor has fewer than 3 nodes: motion per link works, rooms and positions need 3 or more. It goes once the floor has them (a node's floor is the floor of its area) |
+
+## 8. Privacy and your network
+
+Everything stays in your home network: nodes talk to Home Assistant directly, with no cloud. Still, motion data says when and where someone moves at home, so it is worth knowing who on the network can read it:
+
+| What | Who can read it | To limit it |
+|---|---|---|
+| ESPHome API (Home Assistant) | Whoever has the node's API key | Keep the encryption key ESPHome sets up when adopting a node |
+| The node's web page | Anyone on the network | `web_server: auth: {username: ..., password: ...}` in the node's YAML |
+| Wisp's link reports (UDP port 47010) | Any device on the network that asks: motion score and flag per link, 5 times a second | A network only trusted devices use, for example a VLAN for Home Assistant and its devices |
+| Raw CSI stream | The same, while its switch is on (off by default) | Leave it off unless you record data |
+| Fallback hotspot | Anyone nearby, while the node has no WiFi | `wifi: ap: {password: ...}` in the node's YAML |
+
+The link reports carry no key yet: adding one is on the list for a later version.

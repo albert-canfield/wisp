@@ -430,3 +430,4 @@ wisp/
 - ESP-NOW relay for nodes without WiFi: worth it in phase 1 or later.
 - Calibration walk flow in detail.
 - Multiple people on one floor.
+- A key for the UDP streams: today any device on the network can subscribe and read motion per link. A key shared between the integration and each node (set up when the node is added) would sign subscriptions and reports.
