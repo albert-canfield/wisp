@@ -117,19 +117,21 @@ Without a floor plan the layout is relative, so turn and mirror it to match your
 Rooms are your Home Assistant areas and floors are your Home Assistant floors. Give each node the area it stands in (Wisp, the node, Change node): its floor is the node's floor, and nodes without one share a floor named after the hub. Then teach Wisp your rooms, one at a time, with the actions under Developer tools:
 
 1. `wisp.calibrate_room` with the area, standing in that room: walk around in it until the floor's calibration sensor is idle again (60 seconds by default). A room needs 20 seconds of movement before it counts.
-2. `wisp.calibrate_empty` with nobody moving on the floor (optional, it helps against a fan or an access point that changes power).
-3. `wisp.clear_calibration` forgets a room, or everything.
+2. `wisp.calibrate_room` with `mode: still`: sit still where you usually are in that room (desk, sofa). Moments with motion are left out.
+3. `wisp.calibrate_empty` with nobody on the floor: needed for still presence, the reference a still person is told apart from.
+4. `wisp.clear_calibration` forgets a room, or everything.
 
-Each floor then gets a room sensor (the room someone moves in, `none` while nobody moves, with a confidence) and each calibrated room an occupancy sensor that stays on for 60 seconds after its last movement, since someone sitting still makes little signal. The hold time is in the Wisp options. Calibrate again after adding nodes: new links only count once the rooms have samples of them.
+Each floor then gets a room sensor (the room someone moves in, `none` while nobody moves, with a confidence) and each calibrated room an occupancy sensor. It stays on for 60 seconds after its last movement, and while nobody moves, a room whose still calibration matches the signal for 10 seconds keeps it on (attribute `still`). The hold time is in the Wisp options. Calibrate again after adding nodes: new links only count once the rooms have samples of them.
 
 ## Wisp panel
 
 The integration adds a Wisp page to the sidebar for administrators, so calibration needs no Developer tools. It shows, live:
 
 - **The map**, the same as the card, a button per floor when there are several, and buttons to turn and mirror it (remembered per browser).
-- **Rooms per floor:** every area with a node or a calibration, its samples and whether it is occupied, and the room someone moves in now. Calibrate starts `wisp.calibrate_room` (60 seconds by default) and counts down with what to do; Calibrate empty floor gives 30 seconds to leave the floor before it records (`wisp.calibrate_empty` with `delay`); Clear asks first. Areas on a floor without a node can be picked and calibrated too.
+- **Rooms per floor:** every area with a node or a calibration, its samples and whether it is occupied, and the room someone moves in now. Calibrate starts `wisp.calibrate_room` (60 seconds by default), walking around or sitting still, and counts down with what to do; Calibrate empty floor gives 30 seconds to leave the floor before it records (`wisp.calibrate_empty` with `delay`); Clear asks first. Areas on a floor without a node can be picked and calibrated too.
 - **A floor plan per floor:** Add floor plan takes an image address and the floor's width in metres (the height follows the image's proportions, or give it). Place nodes then shows the plan: drag each node, and the access points you know, to where it stands (by touch too, or with the arrow keys), then Save. Nodes you leave are fitted to the placed ones: from two placed nodes Wisp turns, scales and if needed mirrors its own layout to match, and a third one away from the line between the first two settles the mirror. Change sets another image or size and keeps the positions; Remove asks first.
-- **Nodes:** name, area, floor, online, whether the hive has placed it, whether it is placed on its floor's plan, and a link to its ESPHome device.
+- **Nodes:** name, area, floor, online, its access point, channel and signal, whether the hive has placed it, whether it is placed on its floor's plan, and a link to its ESPHome device.
+- **WiFi channel per floor:** Automatic, or the channel of the floor's access point, set on every node of the floor at once (see [one channel per floor](docs/SETUP.md#one-channel-per-floor)).
 - **The hive:** hash, in sync, nodes and when it was last heard.
 
 It works on a phone: take it along on the calibration walk, the screen stays on while a recording counts down. Nodes without a floor share one named after the hub, and `wisp.calibrate_empty` takes that name as its floor.

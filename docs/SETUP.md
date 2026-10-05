@@ -66,6 +66,10 @@ OFDMA, band steering and the wireless mode do not matter for the nodes, as long 
 
 The trade-off: access points sharing one 2.4 GHz channel share its airtime. Most phones and laptops use 5 or 6 GHz anyway, so the cost is usually small.
 
+### One channel per floor
+
+A node senses through the access point it joins, so a node that joins the access point of another floor senses across floors. With an access point on each floor, give each its own 2.4 GHz channel (for example 1 downstairs, 11 upstairs) and set each floor's **WiFi channel** in the Wisp panel to the channel of its access point. Every node of the floor moves to that channel and joins the access point on it within seconds, no new firmware needed. Each node's line in the panel shows its access point, channel and signal, to check it. Automatic, the default, lets the nodes agree on one channel by the rule above.
+
 ### TP-Link Omada
 
 - **Channel, width and power:** Devices > the access point > Config > Radios (Wireless on some versions): 2.4 GHz channel, Channel Width 20 MHz, Tx Power Custom. Repeat on every access point.

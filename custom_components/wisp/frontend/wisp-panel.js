@@ -100,6 +100,7 @@ class WispPanel extends HTMLElement {
     this._prefs = loadPrefs();
     this._duration = DURATIONS.includes(this._prefs.duration) ? this._prefs.duration : DURATION;
     this._open = null; // the question open under a row: {kind, floor, area}
+    this._mode = "moving"; // how the room question records: someone "moving" or "still"
     this._busy = null; // the question whose action runs
     this._failure = null; // {open, message}
     this._planForm = null; // the floor plan form's values while it is open
@@ -273,16 +274,23 @@ class WispPanel extends HTMLElement {
       if (!run || run.seconds_left > 2 || now?.run) continue;
       let message;
       if (run.area) {
-        const n = now?.areas.find((a) => a.area === run.area)?.samples ?? run.recorded;
+        const still = run.mode === "still", area = now?.areas.find((a) => a.area === run.area);
+        const n = (still ? area?.still_samples : area?.samples) ?? run.recorded;
+        const has = still ? plural(n, "still sample", "still samples") : plural(n, "sample", "samples");
         message = n >= data.min_samples
-          ? `Done: the ${run.name} has ${plural(n, "sample", "samples")}.`
-          : `The ${run.name} has ${plural(n, "sample", "samples")} and needs ${data.min_samples}: calibrate it again and keep moving.`;
+          ? `Done: the ${run.name} has ${has}.`
+          : `The ${run.name} has ${has} and needs ${data.min_samples}: calibrate it again and keep ${still ? "still" : "moving"}.`;
       } else {
         message = `Done: the empty floor has ${plural(now?.empty_samples ?? run.recorded, "sample", "samples")}.`;
       }
-      this.dispatchEvent(new CustomEvent("hass-notification", { detail: { message }, bubbles: true, composed: true }));
+      this._notify(message);
       navigator.vibrate?.(200);
     }
+  }
+
+  /* A short note at the bottom of Home Assistant's screen. */
+  _notify(message) {
+    this.dispatchEvent(new CustomEvent("hass-notification", { detail: { message }, bubbles: true, composed: true }));
   }
 
   /* Keep a phone's screen on while a run counts down. The browser drops the lock when the page hides. */
@@ -321,7 +329,7 @@ class WispPanel extends HTMLElement {
     else if (act === "ask-empty") this._ask("empty", floor);
     else if (act === "ask-clear-all") this._ask("clear-all");
     else if (act === "close") this._close();
-    else if (act === "start-room") this._call("calibrate_room", { area, duration: this._duration });
+    else if (act === "start-room") this._call("calibrate_room", { area, duration: this._duration, mode: this._mode });
     else if (act === "start-empty") this._call("calibrate_empty", { floor: target, duration: this._duration, delay: LEAVE_S });
     else if (act === "clear") this._call("clear_calibration", area ? { area } : {});
     else if (act === "stop") this._call("stop_calibration", { floor: target });
@@ -369,9 +377,16 @@ class WispPanel extends HTMLElement {
       this._duration = Number(el.value) || DURATION;
       this._prefs.duration = this._duration;
       savePrefs(this._prefs);
+    } else if (el.dataset.act === "mode") {
+      // Redrawn now, not by the next update, and the choice keeps its focus
+      this._mode = el.value;
+      this._render();
+      this.shadowRoot.querySelector(`.ask [data-act=mode][value="${CSS.escape(el.value)}"]`)?.focus();
     } else if (el.dataset.act === "pick") {
       if (el.value) this._ask("room", el.dataset.floor, el.value);
       else this._close();
+    } else if (el.dataset.act === "channel") {
+      this._setChannel(el.dataset.floor ?? "", Number(el.value));
     } else if (el.dataset.act === "rect-area") {
       this._rectArea(el.value);
     } else if (el.dataset.act === "node-area") {
@@ -399,7 +414,34 @@ class WispPanel extends HTMLElement {
     if (refocus && !this.shadowRoot.activeElement) this.shadowRoot.querySelector(`select[data-act=node-area][data-mac="${CSS.escape(mac)}"]`)?.focus();
   }
 
+  /* The floor's WiFi channel (0: automatic), set on each of its nodes. The choice shows until the
+     update brings it, for a while at most; the nodes that did not take it say why under it. */
+  async _setChannel(key, channel) {
+    const refocus = this.shadowRoot.activeElement?.dataset.act === "channel";
+    this._channelChoice = { floor: key, channel, busy: true };
+    this._channelFailure = null;
+    this._render();
+    try {
+      const { set = [], failed = [] } = await this._hass.callWS({ type: "wisp/floor/set_channel", floor: key || null, channel });
+      if (failed.length) {
+        this._channelChoice = null; // each node's own setting shows
+        this._channelFailure = { floor: key, set: set.length, failed };
+      } else {
+        if (this._channelChoice?.floor === key) Object.assign(this._channelChoice, { busy: false, until: Date.now() + 30000 });
+        const f = this._data?.floors.find((x) => (x.floor ?? "") === key);
+        const where = f ? floorPhrase(f) : "the floor";
+        this._notify(channel ? `The nodes of ${where} move to channel ${channel}.` : `The nodes of ${where} follow the strongest access point.`);
+      }
+    } catch (err) {
+      this._channelChoice = null;
+      this._channelFailure = { floor: key, message: err?.message || "Wisp could not set the channel." };
+    }
+    this._render();
+    if (refocus && !this.shadowRoot.activeElement) this.shadowRoot.querySelector(`select[data-act=channel][data-floor="${CSS.escape(key)}"]`)?.focus();
+  }
+
   _ask(kind, floor, area) {
+    if (kind === "room") this._mode = "moving"; // each room starts from walking around, its main calibration
     this._open = { kind, floor, area };
     this._failure = null;
     this._planForm = null;
@@ -1002,7 +1044,13 @@ class WispPanel extends HTMLElement {
     this._fillPlanForm();
     const added = d.nodes.filter((n) => n.added);
     root.querySelector(".nodes-note").textContent = `${added.filter((n) => n.online).length} of ${added.length} online`;
-    patch(root.querySelector(".nodes"), d.nodes.map((n) => [n.mac, this._node(n, d)]));
+    const rows = patch(root.querySelector(".nodes"), d.nodes.map((n) => [n.mac, this._node(n, d)]));
+    // The signal changes every second: its line changes alone, so the row's area list stays open
+    for (const n of d.nodes) {
+      const el = rows.get(n.mac).querySelector(".wifi"), text = this._wifi(n);
+      if (el.textContent !== text) el.textContent = text;
+      el.hidden = !text;
+    }
     const note = root.querySelector(".hive-note");
     note.textContent = d.hive ? (d.hive.in_sync ? "in sync" : "syncing") : "";
     note.className = `note hive-note ${d.hive?.in_sync ? "sync" : "wait"}`;
@@ -1029,13 +1077,15 @@ class WispPanel extends HTMLElement {
     const pct = total ? Math.round((100 * done) / total) : 100;
     let title, text;
     if (r.area) {
-      title = `Walk around the ${r.name}, keep moving`;
-      text = `${plural(r.recorded, "sample", "samples")} so far${r.skipped ? `, ${r.skipped} s too still to count` : ""}.`;
+      const still = r.mode === "still";
+      title = still ? `Sit still in the ${r.name}` : `Walk around the ${r.name}, keep moving`;
+      const skipped = r.skipped ? `, ${r.skipped} s ${still ? "of motion left out" : "too still to count"}` : "";
+      text = `${plural(r.recorded, "sample", "samples")} so far${skipped}.`;
     } else if (waiting) {
       title = `Leave ${floorPhrase(f)} now`;
-      text = `Or keep everyone still. Recording starts in ${r.starts_in} s and lasts ${secs(r.seconds_left - r.starts_in)}.`;
+      text = `Everyone must be off the floor until it ends. Recording starts in ${r.starts_in} s and lasts ${secs(r.seconds_left - r.starts_in)}.`;
     } else {
-      title = `Keep ${floorPhrase(f)} empty and still`;
+      title = `Keep ${floorPhrase(f)} empty`;
       text = `${plural(r.recorded, "sample", "samples")} so far.`;
     }
     const left = waiting ? r.starts_in : r.seconds_left;
@@ -1290,7 +1340,7 @@ class WispPanel extends HTMLElement {
     const col = this.shadowRoot.querySelector(".rooms-col");
     const items = d.floors.map((f) => [`floor:${f.floor ?? ""}`, `<section class="sheet floor" aria-label="${esc(floorLabel(f, d.floors))}"><div class="rows"></div></section>`]);
     if (d.elsewhere.length) items.push(["elsewhere", this._elsewhere(d)]);
-    const calibrated = d.elsewhere.length || d.floors.some((f) => f.empty_samples || f.areas.some((a) => a.samples));
+    const calibrated = d.elsewhere.length || d.floors.some((f) => f.empty_samples || f.areas.some((a) => a.samples || a.still_samples));
     if (calibrated) items.push(["clear-all", this._clearAll()]);
     const sheets = patch(col, items);
     for (const f of d.floors) patch(sheets.get(`floor:${f.floor ?? ""}`).querySelector(".rows"), this._floorRows(f, d));
@@ -1298,10 +1348,11 @@ class WispPanel extends HTMLElement {
 
   _floorRows(f, d) {
     const key = f.floor ?? "";
+    const still = f.areas.find((a) => a.presence && a.still);
     let now;
     if (!f.nodes.length) now = "no nodes yet";
     else if (!f.live_links) now = "no live links";
-    else if (f.room === "none") now = "nobody moving";
+    else if (f.room === "none") now = still ? `${still.name}, someone keeping still` : "nobody moving";
     else if (f.room == null) now = f.areas.some((a) => a.samples >= d.min_samples) ? "cannot tell" : "not calibrated yet";
     else now = `${f.room}, ${Math.round((f.confidence ?? 0) * 100)}% sure`;
     const rows = [["head", `<div class="head"><h2>${esc(floorLabel(f, d.floors))}</h2><span class="note">${esc(now)}</span></div>`]];
@@ -1310,13 +1361,42 @@ class WispPanel extends HTMLElement {
     } else if (!f.areas.length && !f.other_areas.length) {
       rows.push(["hint", `<p class="hint">No rooms on this floor yet. Give each node the area it stands in, under Nodes.</p>`]);
     } else if (!f.areas.some((a) => a.samples >= d.min_samples)) {
-      rows.push(["hint", `<p class="hint">Teach Wisp each room: stand in it, tap Calibrate and walk around until the countdown ends. A room counts from ${d.min_samples} samples.</p>`]);
+      rows.push(["hint", `<p class="hint">Teach Wisp each room: stand in it, tap Calibrate, and walk around (or sit still) until the countdown ends. A room counts from ${d.min_samples} samples.</p>`]);
     }
     for (const a of f.areas) rows.push([`area:${a.area}`, this._area(f, a, d)]);
     if (f.other_areas.length && f.nodes.length) rows.push(["other", this._other(f, d)]);
     if (f.nodes.length) rows.push(["empty", this._empty(f)]);
     rows.push(["plan", this._planRow(f)]);
+    if (f.nodes.length) rows.push(["channel", this._channelRow(f, d)]);
     return rows.map(([k, html]) => [`${key}:${k}`, html]);
+  }
+
+  /* The WiFi channel the floor's nodes form their grid on, one setting for all of them, and the
+     channels they are on now. */
+  _channelRow(f, d) {
+    const key = f.floor ?? "";
+    let choice = this._channelChoice?.floor === key ? this._channelChoice : null;
+    if (choice && !choice.busy && (f.channel === choice.channel || Date.now() > choice.until)) choice = this._channelChoice = null; // arrived, or never will
+    const wifi = d.nodes.filter((n) => f.nodes.includes(n.mac) && n.wifi).map((n) => n.wifi);
+    const current = choice ? choice.channel : f.channel;
+    const settings = new Set(wifi.map((w) => w.fixed).filter((v) => v != null));
+    const placeholder = current == null ? `<option value="" disabled selected>${settings.size > 1 ? "Mixed" : "Unknown"}</option>` : "";
+    const options = Array.from({ length: 14 }, (_, c) => `<option value="${c}"${c === current ? " selected" : ""}>${c ? `Channel ${c}` : "Automatic"}</option>`).join("");
+    const on = [...new Set(wifi.map((w) => w.channel).filter((v) => v != null))].sort((a, b) => a - b);
+    const meta = on.length ? `nodes on channel${on.length > 1 ? "s" : ""} ${on.length > 1 ? `${on.slice(0, -1).join(", ")} and ${on.at(-1)}` : on[0]} now` : "";
+    const fail = this._channelFailure?.floor === key ? this._channelFailure : null;
+    const failures = !fail ? ""
+      : fail.message ? `<p class="fail" role="alert">${esc(fail.message)}</p>`
+        : `<div role="alert">${fail.set ? `<p class="fail">Set on ${fail.set} of ${plural(fail.set + fail.failed.length, "node", "nodes")}.</p>` : ""}${fail.failed.map((x) => `<p class="fail">${esc(`${x.name && !String(x.error).includes(x.name) ? `${x.name}: ` : ""}${x.error}`)}</p>`).join("")}</div>`;
+    const id = `wisp-channel-${esc(key)}`;
+    return `<div class="row channel">
+      <div class="line">
+        <label class="what" for="${id}"><b>WiFi channel</b>${meta ? `<small>${esc(meta)}</small>` : ""}</label>
+        <select id="${id}" data-act="channel"${attr("floor", key)}${choice?.busy ? " disabled" : ""}>${placeholder}${options}</select>
+      </div>
+      <p class="about">The nodes form their grid on this channel. Automatic follows the strongest access point; when nodes pick up another floor's access point, choose the channel of this floor's.</p>
+      ${failures}
+    </div>`;
   }
 
   _area(f, a, d) {
@@ -1324,8 +1404,13 @@ class WispPanel extends HTMLElement {
     const recording = f.run?.area === a.area;
     const meta = [];
     if (a.nodes) meta.push(plural(a.nodes, "node", "nodes"));
-    meta.push(!a.samples ? "not calibrated" : a.samples < d.min_samples ? `${a.samples} of ${d.min_samples} samples` : plural(a.samples, "sample", "samples"));
-    const chip = recording ? `<span class="chip rec">recording</span>` : a.presence ? `<span class="chip on">occupied</span>` : "";
+    // Walking samples, then still ones: "40 walking, 12 of 20 still samples", or one kind alone
+    const min = d.min_samples, still = a.still_samples || 0;
+    const count = (n) => (n < min ? `${n} of ${min}` : `${n}`);
+    const kinds = [a.samples ? `${count(a.samples)} walking` : "", still ? `${count(still)} still` : ""].filter(Boolean);
+    const one = kinds.length === 1 && (a.samples || still) === 1 && min <= 1 ? "sample" : "samples";
+    meta.push(kinds.length ? `${kinds.join(", ")} ${one}` : "not calibrated");
+    const chip = recording ? `<span class="chip rec">recording</span>` : a.presence ? `<span class="chip on">${a.still ? "someone keeping still" : "occupied"}</span>` : "";
     const asking = this._isOpen("room", key, a.area) ? this._askRoom(f, a.area, a.name) : this._isOpen("clear", key, a.area) ? this._askClear(key, a) : "";
     return `<div class="row">
       <div class="line">
@@ -1333,7 +1418,7 @@ class WispPanel extends HTMLElement {
         ${chip}
         <div class="acts">
           <button data-act="ask-room"${attr("floor", key)}${attr("area", a.area)}${asking || recording || !f.nodes.length ? " disabled" : ""}>Calibrate</button>
-          ${a.samples ? `<button class="quiet" data-act="ask-clear"${attr("floor", key)}${attr("area", a.area)}${asking ? " disabled" : ""}>Clear</button>` : ""}
+          ${a.samples || still ? `<button class="quiet" data-act="ask-clear"${attr("floor", key)}${attr("area", a.area)}${asking ? " disabled" : ""}>Clear</button>` : ""}
         </div>
       </div>
       ${asking}
@@ -1358,7 +1443,7 @@ class WispPanel extends HTMLElement {
     const key = f.floor ?? "";
     const asking = this._isOpen("empty", key);
     const run = f.run && !f.run.area ? f.run : null;
-    const meta = f.empty_samples ? plural(f.empty_samples, "sample", "samples") : "optional, against fans and access points that change power";
+    const meta = f.empty_samples ? plural(f.empty_samples, "sample", "samples") : "needed to find someone keeping still; also helps against fans and access points that change power";
     return `<div class="row">
       <div class="line">
         <div class="what"><b>Empty floor</b><small>${esc(meta)}</small></div>
@@ -1389,9 +1474,15 @@ class WispPanel extends HTMLElement {
       <button class="${cls}" data-act="${act}"${data}${busy ? " disabled" : ""}>${busy ? working : label}</button></span></div>`;
   }
 
+  /* Walking around or sitting still: each is a class of its own, recorded apart. */
   _askRoom(f, area, name) {
+    const mode = (value, title, text) => `<label class="mode"><input type="radio" name="wisp-mode" value="${value}" data-act="mode"${this._mode === value ? " checked" : ""}><span><b>${title}</b><small>${text}</small></span></label>`;
     return `<div class="ask" role="group" aria-label="Calibrate the ${esc(name)}">
-      <p>Stand in the ${esc(name)}. After Start, walk around all of it and keep moving until the countdown ends. Still moments are left out.</p>
+      <p>Stand in the ${esc(name)}, pick one, and after Start keep at it until the countdown ends.</p>
+      <div class="modes" role="radiogroup" aria-label="How to calibrate">
+        ${mode("moving", "Walking around", "Walk around the whole room and keep moving.")}
+        ${mode("still", "Sitting still", "Sit or stand still where you usually are in it, like the desk or the sofa.")}
+      </div>
       ${this._replaces(f, area)}
       ${this._buttons("start-room", "Start", "primary", attr("area", area))}
     </div>`;
@@ -1400,7 +1491,7 @@ class WispPanel extends HTMLElement {
   _askEmpty(f) {
     const where = floorPhrase(f);
     return `<div class="ask" role="group" aria-label="Calibrate the empty floor">
-      <p>Everyone leaves ${esc(where)}, or keeps still. Recording starts ${LEAVE_S} s after Start, so there is time to go, and nobody should move on ${esc(where)} until it ends.</p>
+      <p>Everyone leaves ${esc(where)} until it ends: keeping still is not enough, since Wisp finds someone still too. Recording starts ${LEAVE_S}&nbsp;s after Start, so there is time to go.</p>
       ${this._replaces(f, null)}
       ${this._buttons("start-empty", "Start", "primary", attr("target", f.floor ?? f.name))}
     </div>`;
@@ -1408,7 +1499,7 @@ class WispPanel extends HTMLElement {
 
   _askClear(key, a) {
     return `<div class="ask danger" role="alertdialog" aria-label="Clear the ${esc(a.name)}">
-      <p>Forget the ${plural(a.samples, "sample", "samples")} of the ${esc(a.name)}? Its presence sensor goes with them. It can be calibrated again any time.</p>
+      <p>Forget the ${plural(a.samples + (a.still_samples || 0), "sample", "samples")} of the ${esc(a.name)}? Its presence sensor goes with them. It can be calibrated again any time.</p>
       ${this._buttons("clear", "Clear", "danger", attr("area", a.area))}
     </div>`;
   }
@@ -1452,11 +1543,17 @@ class WispPanel extends HTMLElement {
     return `<div class="row">
       <div class="line">
         <span class="dot${n.online ? " up" : ""}" aria-hidden="true"></span>
-        <div class="what"><b>${esc(n.name)}</b>${where ? `<small>${esc(where)}</small>` : ""}<span class="chips">${chips}</span></div>
+        <div class="what"><b>${esc(n.name)}</b>${where ? `<small>${esc(where)}</small>` : ""}<small class="wifi" hidden></small><span class="chips">${chips}</span></div>
         ${n.device_id ? `<div class="acts"><button data-act="device"${attr("device", n.device_id)} aria-label="Open the ESPHome device of ${esc(n.name)}">ESPHome</button></div>` : ""}
       </div>
       ${n.added ? this._nodeArea(n, d) : ""}
     </div>`;
+  }
+
+  /* The node's grid channel, the access point it hears and how strongly: "Channel 11 · AP 6d:70 · -52 dBm". */
+  _wifi(n) {
+    const w = n.wifi ?? {};
+    return [w.channel != null ? `Channel ${w.channel}` : "", w.ap ? apLabel(w.ap) : "", w.rssi != null ? `${w.rssi} dBm` : ""].filter(Boolean).join(" · ");
   }
 
   /* The area the node stands in: Home Assistant's areas by floor. Setting it moves the node to
@@ -1551,6 +1648,8 @@ const STYLE = `
   .node-area label { font-size: .85em; opacity: .8; }
   .node-area select { flex: 1; min-width: 0; max-width: 280px; }
   .node-area + .fail { margin: 6px 0 0 25px; font-size: .9rem; font-style: italic; line-height: 1.45; color: var(--wisp-hot); }
+  .channel .about { margin: 6px 0 0; font-size: .85rem; font-style: italic; line-height: 1.45; opacity: .8; }
+  .channel .fail { margin: 6px 0 0; font-size: .9rem; font-style: italic; line-height: 1.45; color: var(--wisp-hot); }
   .plan-draw text { font-family: var(--wisp-serif); fill: var(--wisp-ink); text-anchor: middle;
                     paint-order: stroke; stroke: var(--wisp-paper-1); stroke-width: 3.5px; stroke-linejoin: round; }
   .plan-draw .tray { font-size: 11px; font-style: italic; opacity: .8; }
@@ -1678,6 +1777,15 @@ const STYLE = `
   .ask .warn, .ask .fail { font-style: italic; }
   .ask .fail { color: var(--wisp-hot); }
   .ask label { display: inline-flex; align-items: center; gap: 8px; }
+  /* A room's two ways to calibrate, side by side where they fit */
+  .modes { display: flex; flex-wrap: wrap; gap: 8px; }
+  .ask .mode { flex: 1 1 13rem; display: grid; grid-template-columns: auto minmax(0, 1fr); align-items: start; gap: 10px;
+               padding: 8px 12px; border-radius: 8px; cursor: pointer; border: 1.5px solid color-mix(in srgb, var(--wisp-ink) 25%, transparent); }
+  .ask .mode:has(:checked) { border-color: var(--wisp-ink); background: color-mix(in srgb, var(--wisp-paper-1) 70%, transparent); }
+  .mode input { width: 18px; height: 18px; margin: 2px 0 0; accent-color: var(--wisp-ink); }
+  .mode input:focus-visible { outline: 2px solid var(--wisp-hot); outline-offset: 2px; }
+  .mode span { display: grid; gap: 2px; }
+  .mode small { font-size: .85rem; font-style: italic; line-height: 1.4; opacity: .85; }
   .ask-line { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }
   .ask-buttons { display: flex; gap: 8px; margin-left: auto; }
   .clear-all { display: grid; justify-items: end; color: var(--wisp-ink); font-family: var(--wisp-serif); }
