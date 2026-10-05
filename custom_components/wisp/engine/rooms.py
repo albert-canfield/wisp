@@ -11,9 +11,11 @@ so its Motion threshold, with hysteresis); without those flags, while a link sco
 Replaying 1.5 quiet hours, a link touched QUIET 16 times, the motion flags came on once. That
 classification uses the log scores, among the rooms' moving classes and the empty class.
 
-While nobody moves, a still classification uses the log scores and the signal: the empty class,
-the reference, against each room's still class (or, before a room has one, its moving class's
-signal). A room winning it STILL_SECONDS in a row holds presence as a moving win does.
+Nobody changes room without walking: a walk names the room, and someone sitting there keeps its
+presence while the floor shows activity (a link moving both ways, the node at each end agreeing).
+The still classification (log scores and signal, the empty class against each room's still
+class) no longer names rooms: signal strength drifts more with nobody there than a seated person
+changes it. It stays for the separation check and diagnostics.
 The caller owns the clock (seconds) and says which floor each area is on.
 """
 from __future__ import annotations
@@ -44,7 +46,6 @@ SIGNAL_WINDOW = 5  # s: a link's signal is its mean RSSI over the latest reading
 SIGNAL_VAR_FLOOR = 1.0  # dB squared, per link: one link's noise does not dominate
 SIGNAL_LINKS = 4  # links a still body weakens, about: the signal's mean log-likelihood per link
 # counts once per this many live links, so a few weakened links are not diluted on a large floor
-STILL_SECONDS = 10  # s in a row a room must win the still classification before it holds presence
 MOVE_SECONDS = 2  # s of walking (gaps up to WALK_GAP) before its seconds count: one stray second lit a room for HOLD
 WALK_GAP = 2.0  # s without a walking second that still continue a walk
 ACTIVE_HOLD = 180.0  # s: someone sitting keeps a room's presence while the floor shows activity this often
@@ -297,7 +298,6 @@ class Rooms:
         confidence: float = CONFIDENCE,
         min_samples: int = MIN_SAMPLES,
         cap: int = SAMPLE_CAP,
-        still_seconds: int = STILL_SECONDS,
         move_seconds: int = MOVE_SECONDS,
         active_hold: float = ACTIVE_HOLD,
     ) -> None:
@@ -306,7 +306,6 @@ class Rooms:
         self.confidence = confidence
         self.min_samples = min_samples
         self.cap = cap
-        self.still_seconds = still_seconds
         self.move_seconds = move_seconds
         self.active_hold = active_hold
         self.active_at: dict[str, float] = {}  # by floor: when two links last moved together
@@ -318,7 +317,6 @@ class Rooms:
         self.runs: dict[str, Run] = {}  # by floor, one at a time
         self.decisions: dict[str, Decision | None] = {}  # the latest moving decision, by floor
         self.still_decisions: dict[str, Decision | None] = {}  # the latest still one, by floor
-        self.streaks: dict[str, tuple[str, int]] = {}  # by floor: the room winning still, seconds in a row
         self.wins: dict[str, tuple[float, float, bool]] = {}  # area: time, confidence, still of its latest win
         self._models: dict[tuple[str, str], ClassModel] = {}  # (kind, area or floor)
         self._signal: dict[str, dict[LinkKey, deque[float]]] = {}  # latest readings per link, by floor
@@ -346,7 +344,6 @@ class Rooms:
             self.empty.clear()
             self.runs.clear()
             self.wins.clear()
-            self.streaks.clear()
             self.moves.clear()
             self.walked.clear()
             self.active_at.clear()
@@ -372,7 +369,6 @@ class Rooms:
         """A floor no longer stepped (no node on it now): its decisions, streak and signal readings go."""
         self.decisions.pop(floor, None)
         self.still_decisions.pop(floor, None)
-        self.streaks.pop(floor, None)
         self.moves.pop(floor, None)
         self.walked.pop(floor, None)
         self.active_at.pop(floor, None)
@@ -490,11 +486,11 @@ class Rooms:
             if count >= self.move_seconds:
                 self.wins[decision.room] = (now, decision.confidence, False)
                 self.walked[floor] = decision.room
+                self.active_at[floor] = now  # walking in is activity: sitting down starts from it
         if not live:
             self.still_decisions[floor] = None
-            self.streaks.pop(floor, None)
         elif walks:
-            self.still_decisions[floor] = None  # not asked: a streak waits through walking
+            self.still_decisions[floor] = None  # not asked while someone walks
         else:
             # Nobody moving, or motion no room's walking explains (the empty floor wins, or no room
             # clearly): someone sitting and working, shifting in a chair, is asked for still
@@ -505,7 +501,6 @@ class Rooms:
         """While a recording runs, its instructions say where everyone is: moving or still in its
         room, or off the floor for the empty floor. Presence and the map follow that instead of
         classifying with the classes being recorded, which lit up other rooms meanwhile."""
-        self.streaks.pop(floor, None)
         self.moves.pop(floor, None)
         if run.area is None:  # the empty floor: nobody, and the map places nobody walking
             self.walked.pop(floor, None)
@@ -521,39 +516,28 @@ class Rooms:
             self.wins[run.area] = (now, 1.0, False)
         if run.area is not None:
             self.walked[floor] = run.area
+            self.active_at[floor] = now
 
     def _still_step(self, floor: str, areas: list[str], vector: Vector, motion: float, now: float) -> None:
         """Nobody walks on the floor. Someone who walked into a room people sit in (one with a still
-        calibration) keeps its presence while the floor shows activity (two links moving together)
-        at least every active_hold seconds: nobody changes room without walking, and someone sitting
-        and working moves a little. Signal strength alone keeps no one: on the owner's floor it
-        drifted more with nobody there than a seated person changes it, and the still
-        classification found someone on the empty floor every second. A room nobody sits in (a
-        hallway) keeps no one once the walk's own hold ends: walked through, and upstairs. Without
-        a known walk (after a restart), the still classification names the room, STILL_SECONDS in a
-        row, and only with activity. With no activity for active_hold, the walk is forgotten."""
-        decision = decide_still(vector, self.still_models(floor, areas), motion)
-        self.still_decisions[floor] = decision
+        calibration) keeps its presence while the floor shows activity, a link moving both ways
+        (the nodes at both ends agree), at least every active_hold seconds: nobody changes room
+        without walking, and someone sitting and working moves a little. Signal strength keeps no
+        one: on the owner's floor it drifted more with nobody there than a seated person changes
+        it, and the still classification found someone on the empty floor every second. A room
+        nobody sits in (a hallway) keeps no one once the walk's own hold ends, and without a walk
+        (after a restart) nobody is held: the still classification lit empty rooms. With no
+        activity for active_hold, the walk is forgotten and a sitting presence ends."""
+        self.still_decisions[floor] = decide_still(vector, self.still_models(floor, areas), motion)
         last = self.active_at.get(floor)
         if last is None or now - last > self.active_hold:
-            self.walked.pop(floor, None)
-            self.streaks.pop(floor, None)
+            walked = self.walked.pop(floor, None)
+            if walked is not None and (win := self.wins.get(walked)) is not None and win[2]:
+                del self.wins[walked]  # no sign of anyone sitting for active_hold: gone, not one more HOLD
             return
-        someone = None if decision is None or decision.room is None else 1.0 - decision.probabilities.get(None, 0.0)
         walked = self.walked.get(floor)
-        if walked is not None:
-            self.streaks.pop(floor, None)
-            if walked in areas and self._model(STILL, walked) is not None:
-                self.wins[walked] = (now, max(self.confidence, someone or 0.0), True)
-            return
-        if someone is None or someone < self.confidence:
-            self.streaks.pop(floor, None)
-            return
-        held, count = self.streaks.get(floor, (decision.room, 0))
-        count = count + 1 if held == decision.room else 1
-        self.streaks[floor] = (decision.room, count)
-        if count >= self.still_seconds:
-            self.wins[decision.room] = (now, someone, True)
+        if walked in areas and self._model(STILL, walked) is not None:
+            self.wins[walked] = (now, self.confidence, True)
 
     def presence(self, area: str, now: float) -> float | None:
         """Confidence of the area's latest win while its presence holds, else None."""

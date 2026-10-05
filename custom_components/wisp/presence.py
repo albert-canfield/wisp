@@ -45,7 +45,7 @@ _LOGGER = logging.getLogger(__name__)
 NONE = "none"  # the room while nobody moves, and the empty class among the probabilities
 EMPTY = "empty"  # the empty class in calibration
 STILL = "still"  # a room's still class in calibration, after its name
-ACTIVE_WITHIN = 2.0  # s: two links moving within this are activity (someone working, shifting in a chair)
+ACTIVE_WITHIN = 2.0  # s: a link moving both ways within this is activity (someone working, shifting in a chair)
 
 
 def store_key(entry_id: str) -> str:
@@ -326,14 +326,16 @@ class RoomPresence:
         }
 
     def _active(self, floor: str, moving: set[LinkKey], now: float) -> bool:
-        """Activity this second: a link's motion backed by another link within ACTIVE_WITHIN s
-        (someone working, shifting in a chair); one link alone is often noise."""
+        """Activity this second: a link moving in both directions within ACTIVE_WITHIN s (someone
+        working, shifting in a chair). A body changes a link both ways; a node's own noise shows
+        on what it sends or receives. On the owner's empty floor any two links together came 10
+        to 17 times in 3 minutes, a link and its reverse never, against 3 or more at a quiet desk."""
         seen = self._flags.setdefault(floor, deque())
         seen.append((now, frozenset(moving)))
         while seen and now - seen[0][0] > ACTIVE_WITHIN:
             seen.popleft()
         links = set().union(*(m for _, m in seen))
-        return any(links - {key} for key in moving)
+        return any((key[1], key[0]) in links for key in moving)
 
     def presence_room(self, floor: str, now: float) -> str | None:
         """The floor's room whose presence won last, while it holds: where someone is when room
@@ -734,7 +736,8 @@ class RoomPresence:
                 } if run else None,
                 "decision": decision(engine.decisions.get(key)),
                 "still": decision(engine.still_decisions.get(key)),
-                "still_streak": engine.streaks.get(key, (None, 0))[1],
+                "walked": engine.walked.get(key),
+                "active_s_ago": None if (at := engine.active_at.get(key)) is None else round(now - at),
                 "separation": self.separation_view(key),
             })
         positions = {
@@ -757,7 +760,7 @@ class RoomPresence:
                 "min_samples": engine.min_samples,
                 "sample_cap": engine.cap,
                 "link_age_s": ROOM_LINK_AGE,
-                "still_s": engine.still_seconds,
+                "active_hold_s": engine.active_hold,
                 "still_fit": STILL_FIT,
                 "signal_window_s": SIGNAL_WINDOW,
                 "signal_var_floor": SIGNAL_VAR_FLOOR,
