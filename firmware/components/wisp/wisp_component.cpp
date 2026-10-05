@@ -574,13 +574,29 @@ void WispComponent::core_round_(uint32_t now) {
     if (m.state != wisp_core::MemberState::MISSING)
       add_row(m.mac, m.rssi);
   }
-  // This node's hive row is the same view, without the scores.
-  wisp_core::HiveEntry own[wisp_core::MAX_ROW];
-  for (int i = 0; i < b.row_len; i++)
-    own[i] = wisp_core::HiveEntry{b.row[i].mac, b.row[i].rssi};
-  this->hive_.set_own(own, b.row_len, now);
+  // The live view feeds this node's hive row (averaged, versioned); the beacon then carries the
+  // published row with that version, never the live readings, so every node that stores a
+  // version stores the same readings. The scores stay live.
+  wisp_core::HiveEntry live[wisp_core::MAX_ROW];
+  uint8_t score[wisp_core::MAX_ROW];
+  const int live_n = b.row_len;
+  for (int i = 0; i < live_n; i++) {
+    live[i] = wisp_core::HiveEntry{b.row[i].mac, b.row[i].rssi};
+    score[i] = b.row[i].score10;
+  }
+  this->hive_.set_own(live, live_n, now);
+  const wisp_core::HiveRow *own = this->hive_.own();
+  b.row_len = 0;
+  for (int i = 0; i < own->len; i++) {
+    uint8_t s10 = wisp_core::SCORE_UNKNOWN;
+    for (int k = 0; k < live_n; k++) {
+      if (live[k].mac == own->entries[i].mac)
+        s10 = score[k];
+    }
+    b.row[b.row_len++] = wisp_core::RowEntry{own->entries[i].mac, own->entries[i].rssi, s10};
+  }
   b.hive_hash = this->hive_.hash();
-  b.row_version = this->hive_.own() != nullptr ? this->hive_.own()->version : 0;
+  b.row_version = own->version;
 
   uint8_t buf[wisp_core::BEACON_MAX_BYTES];
   const size_t n = wisp_core::encode_beacon(b, buf, sizeof(buf));

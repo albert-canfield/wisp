@@ -3,9 +3,12 @@
 // relayed, so all of them hold the same matrix and can solve the same layout. A short hash over
 // (origin, row version) pairs tells nodes whether they know the same things.
 //
-// A row is one node's view: the RSSI it receives from each neighbour (nodes and access points).
-// Its version only moves when the view changes enough to matter (a neighbour comes or goes, or a
-// reading moves by ROW_CHANGE_DB), so the hash stays still in a calm house.
+// A row is one node's view: the RSSI it receives from each neighbour (nodes and access points),
+// averaged over about 20 s, since a person in the way or a fading second moves single readings
+// by several dB. Its version moves at once when a neighbour comes or goes, and when an average
+// moved by ROW_CHANGE_DB at most once a minute: nodes stand still, so the hash, the rows and the
+// layout stay still too, busy house or not. A version always means the same readings: the beacon
+// carries the published row, never the live one.
 //
 // Each row also knows when its origin was last heard directly. Relays carry that as an age, so a
 // departed node's row grows old everywhere and expires after a day, even though the remaining
@@ -28,6 +31,8 @@ namespace wisp_core {
 
 constexpr int MAX_ROWS = MAX_MEMBERS + 1;  // every member plus this node
 constexpr int8_t ROW_CHANGE_DB = 3;
+constexpr float ROW_SMOOTHING = 0.005f;            // per set_own (every 100 ms round): about 20 s
+constexpr uint32_t ROW_MIN_CHANGE_MS = 60 * 1000;  // readings alone move the row at most this often
 constexpr uint32_t ROW_EXPIRE_MS = 24 * 3600 * 1000;  // same as forgetting a node
 constexpr uint32_t ROW_AGE_UNIT_MS = 4000;  // relayed ages: 16 bits of 4 s, up to 72 h, beyond the expiry
 constexpr uint32_t ROW_AGE_MAX_MS = 65535u * ROW_AGE_UNIT_MS;
@@ -72,24 +77,53 @@ class Hive {
     this->hash_dirty_ = true;
     this->last_self_jump_ms_ = 0;
     this->self_jumps_ = 0;
+    this->live_n_ = 0;
+    this->own_bumps_ = 0;
   }
 
-  // This node's own view. Bumps its version when it changed enough. Returns true if it did.
+  // This node's live view, every round. Publishes a new version of its row when a neighbour came
+  // or went, or (at most every ROW_MIN_CHANGE_MS) when an averaged reading moved ROW_CHANGE_DB
+  // from the published one. Returns true if it did.
   bool set_own(const HiveEntry *entries, int n, uint32_t now_ms) {
     if (n > MAX_ROW)
       n = MAX_ROW;
-    HiveRow *own = this->find_(this->self_);
-    bool changed = own->len != n;
-    for (int i = 0; i < n && !changed; i++) {
-      const HiveEntry *old = find_entry_(*own, entries[i].mac);
-      changed = old == nullptr || std::abs(old->rssi - entries[i].rssi) >= ROW_CHANGE_DB;
+    float avg[MAX_ROW];
+    for (int i = 0; i < n; i++) {
+      avg[i] = entries[i].rssi;
+      for (int k = 0; k < this->live_n_; k++) {
+        if (this->live_[k].mac == entries[i].mac) {
+          avg[i] = this->live_avg_[k] + ROW_SMOOTHING * (static_cast<float>(entries[i].rssi) - this->live_avg_[k]);
+          break;
+        }
+      }
     }
+    for (int i = 0; i < n; i++) {
+      this->live_[i].mac = entries[i].mac;
+      this->live_avg_[i] = avg[i];
+    }
+    this->live_n_ = n;
+    HiveRow *own = this->find_(this->self_);
     own->heard_ms = now_ms;
-    if (!changed)
+    bool came_or_went = own->len != n;
+    bool moved = false;
+    for (int i = 0; i < n && !came_or_went; i++) {
+      const HiveEntry *old = find_entry_(*own, entries[i].mac);
+      if (old == nullptr)
+        came_or_went = true;
+      else if (std::fabs(static_cast<float>(old->rssi) - avg[i]) >= ROW_CHANGE_DB)
+        moved = true;
+    }
+    const bool due = this->own_bumps_ == 0 || now_ms - this->last_own_bump_ms_ >= ROW_MIN_CHANGE_MS;
+    if (!came_or_went && !(moved && due))
       return false;
     own->len = static_cast<uint8_t>(n);
-    memcpy(own->entries, entries, sizeof(HiveEntry) * n);
+    for (int i = 0; i < n; i++) {
+      const float r = std::fmax(-127.0f, std::fmin(127.0f, std::round(avg[i])));
+      own->entries[i] = HiveEntry{entries[i].mac, static_cast<int8_t>(r)};
+    }
     own->version++;
+    this->last_own_bump_ms_ = now_ms;
+    this->own_bumps_++;
     this->hash_dirty_ = true;
     return true;
   }
@@ -241,6 +275,12 @@ class Hive {
   bool hash_dirty_{true};
   uint32_t last_self_jump_ms_{0};
   uint32_t self_jumps_{0};
+  // The live view behind the own row: neighbour and its averaged RSSI.
+  HiveEntry live_[MAX_ROW]{};
+  float live_avg_[MAX_ROW]{};
+  int live_n_{0};
+  uint32_t last_own_bump_ms_{0};
+  uint32_t own_bumps_{0};
 };
 
 // ---- ESP-NOW hive row frame (type 2), sent right after the beacon to relay one row ----------

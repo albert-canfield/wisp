@@ -25,15 +25,29 @@ static Mac mac_n(int n) { return Mac{{0x44, 0x1b, 0xf6, 0x00, static_cast<uint8_
 static void test_row_versions() {
   Hive h(mac_n(1));
   HiveEntry e[2] = {{mac_n(2), -50}, {mac_n(3), -70}};
-  CHECK(h.set_own(e, 2, 0));
+  CHECK(h.set_own(e, 2, 0));  // the first view is published at once
   const uint16_t v1 = h.own()->version;
-  e[0].rssi = -52;  // small wobble: same row
-  CHECK(!h.set_own(e, 2, 100));
+  // Someone walking through the link: readings swing by 15 dB for 5 s. The averaged row
+  // barely moves: no new version.
+  uint32_t t = 0;
+  for (int i = 0; i < 50; i++) {
+    e[0].rssi = static_cast<int8_t>(i % 2 ? -60 : -45);
+    CHECK(!h.set_own(e, 2, t += 100));
+  }
   CHECK(h.own()->version == v1);
-  e[0].rssi = -54;  // 4 dB away from the published -50: new version
-  CHECK(h.set_own(e, 2, 200));
-  CHECK(h.own()->version == v1 + 1);
-  CHECK(h.set_own(e, 1, 300));  // a neighbour left
+  // A lasting change of 6 dB: once the average has moved 3 dB, a new version, but not within a
+  // minute of the last one.
+  e[0].rssi = -56;
+  uint32_t when = 0;
+  for (int i = 0; i < 1200 && when == 0; i++) {
+    t += 100;
+    if (h.set_own(e, 2, t))
+      when = t;
+  }
+  CHECK(when >= ROW_MIN_CHANGE_MS && h.own()->version == v1 + 1);
+  CHECK(h.own()->entries[0].rssi <= -53 && h.own()->entries[1].rssi == -70);
+  CHECK(h.set_own(e, 1, t + 100));  // a neighbour left: at once
+  CHECK(h.own()->version == v1 + 2);
   CHECK(row_newer(1, 65535) && !row_newer(65535, 1));  // wraparound
 }
 
