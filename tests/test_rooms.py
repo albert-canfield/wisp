@@ -3,16 +3,17 @@ from __future__ import annotations
 
 import json
 import logging
+from types import MappingProxyType
 
 import pytest
 from pytest_homeassistant_custom_component.common import MockConfigEntry, async_capture_events
 
-from homeassistant.config_entries import ConfigSubentryData
+from homeassistant.config_entries import ConfigSubentry, ConfigSubentryData
 from homeassistant.const import EVENT_STATE_CHANGED, STATE_UNAVAILABLE
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import ServiceValidationError
 from homeassistant.helpers import area_registry as ar, device_registry as dr, entity_registry as er
-from homeassistant.helpers import floor_registry as fr
+from homeassistant.helpers import floor_registry as fr, issue_registry as ir
 
 from custom_components.wisp.const import DOMAIN
 from custom_components.wisp.diagnostics import async_get_config_entry_diagnostics
@@ -353,6 +354,42 @@ async def test_floors_follow_node_areas(hass: HomeAssistant, udp: FakeUdp, hass_
     (floor,) = rooms["floors"]
     assert (floor["floor"], floor["nodes"], floor["areas"]) == ("upstairs", [NODE_A, NODE_B], ["kitchen"])
     json.dumps(diag)
+
+
+async def test_floors_with_few_nodes_raise_an_issue(hass: HomeAssistant, udp: FakeUdp) -> None:
+    def issues() -> dict[str, tuple]:
+        return {
+            issue.translation_key: (issue.translation_placeholders["floor"], issue.translation_placeholders["count"])
+            for (domain, _), issue in ir.async_get(hass).issues.items() if domain == DOMAIN
+        }
+
+    floors, areas = fr.async_get(hass), ar.async_get(hass)
+    ground, upstairs = floors.async_create("Ground floor", level=0), floors.async_create("Upstairs", level=1)
+    areas.async_create("Kitchen", floor_id=ground.floor_id)
+    areas.async_create("Bedroom", floor_id=upstairs.floor_id)
+    entry = await setup_with_areas(hass, (*HALL, "kitchen"), (*OFFICE, None))
+    assert issues() == {"few_nodes": ("Ground floor", "1"), "few_nodes_home": ("Wisp", "1")}
+    assert all(i.severity == ir.IssueSeverity.WARNING and not i.is_fixable for i in ir.async_get(hass).issues.values())
+
+    # Office joins the ground floor: one floor, still short of three
+    sub_b = next(s for s in entry.subentries.values() if s.unique_id == NODE_B)
+    hass.config_entries.async_update_subentry(entry, sub_b, data={**sub_b.data, "area": "kitchen"})
+    await hass.async_block_till_done()
+    assert issues() == {"few_nodes": ("Ground floor", "2")}
+
+    # A third node on the floor settles it
+    den = {"mac": "02:57:49:53:50:03", "host": "192.0.2.13", "name": "Den", "area": "kitchen"}
+    sub = ConfigSubentry(data=MappingProxyType(den), subentry_type="node", title="Den", unique_id=den["mac"])
+    hass.config_entries.async_add_subentry(entry, sub)
+    await hass.async_block_till_done()
+    assert issues() == {}
+
+    sub_b = next(s for s in entry.subentries.values() if s.unique_id == NODE_B)
+    hass.config_entries.async_update_subentry(entry, sub_b, data={**sub_b.data, "area": "bedroom"})
+    await hass.async_block_till_done()
+    assert issues() == {"few_nodes": ("Upstairs", "1")}
+    assert await hass.config_entries.async_unload(entry.entry_id)
+    assert issues() == {}
 
 
 async def test_service_errors(hass: HomeAssistant, udp: FakeUdp) -> None:

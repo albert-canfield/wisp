@@ -90,3 +90,4 @@ It asks you to stand still, walk across links and leave the room, and prints for
 | AP CSI rate 0 | The node is not connected, or the gateway does not answer pings |
 | Motion with nobody around | Pets, fans, curtains in a draft, or a washing machine on the line; or raise the node's Motion threshold (a setting on its device page) |
 | A node is "unavailable" in Home Assistant | It is offline or rebooting; the grid keeps working without it |
+| "Few Wisp nodes on ..." in Settings > Repairs | That floor has fewer than 3 nodes: motion per link works, rooms and positions need 3 or more. It goes once the floor has them (a node's floor is the floor of its area) |

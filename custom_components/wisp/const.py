@@ -30,6 +30,7 @@ MAP_INTERVAL = timedelta(seconds=1)  # at most one map update a second per card
 ROOMS_INTERVAL = timedelta(seconds=1)  # one feature vector and decision per floor a second
 ROOM_LINK_AGE = 3.0  # s: older scores are left out of a floor's features
 NO_FLOOR = ""  # nodes and areas without a Home Assistant floor share one, named after the hub
+MIN_FLOOR_NODES = 3  # fewer on a floor: a repair issue, since rooms and positions need them
 CALIBRATION_SECONDS = 60
 STORE_VERSION = 1  # calibration samples in .storage
 PLANS_STORE_VERSION = 1  # floor plans and placements in .storage

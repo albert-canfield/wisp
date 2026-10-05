@@ -15,7 +15,7 @@ import math
 from typing import TYPE_CHECKING, Any
 
 from homeassistant.core import CALLBACK_TYPE, Event, callback
-from homeassistant.helpers import area_registry as ar, floor_registry as fr
+from homeassistant.helpers import area_registry as ar, floor_registry as fr, issue_registry as ir
 from homeassistant.helpers.device_registry import DeviceEntryType, DeviceInfo
 from homeassistant.helpers.event import async_track_time_interval
 from homeassistant.helpers.storage import Store
@@ -24,6 +24,7 @@ from .const import (
     CONF_PRESENCE_HOLD,
     DOMAIN,
     MANUFACTURER,
+    MIN_FLOOR_NODES,
     NO_FLOOR,
     ROOM_LINK_AGE,
     ROOMS_INTERVAL,
@@ -74,6 +75,7 @@ class RoomPresence:
         self._listeners: list[Callable[[], None]] = []
         self._entity_listeners: list[Callable[[], None]] = []
         self._unsubs: list[CALLBACK_TYPE] = []
+        self._issues: set[str] = set()  # repair issues raised, by id
 
     async def async_start(self) -> None:
         if data := await self.store.async_load():
@@ -95,6 +97,7 @@ class RoomPresence:
         for unsub in self._unsubs:
             unsub()
         self._unsubs = []
+        self._async_raise_issues({})
         if self.engine.runs:  # keep what the unfinished runs recorded
             recorded = any(run.recorded for run in self.engine.runs.values())
             self.engine.runs.clear()
@@ -149,8 +152,28 @@ class RoomPresence:
         self.floors = {f.key: f for f in ordered}
         for key in [key for key in self.engine.decisions if key not in self.floors]:
             del self.engine.decisions[key]
+        self._async_raise_issues({key: f for key, f in self.floors.items() if len(f.nodes) < MIN_FLOOR_NODES})
         if changed or entities:
             self._async_entities_changed()
+
+    @callback
+    def _async_raise_issues(self, few: dict[str, Floor]) -> None:
+        """A repair issue per floor with too few nodes for rooms and positions; gone once it has them."""
+        wanted = {f"{self.entry.entry_id}_few_nodes_{floor_scope(key)}": floor for key, floor in few.items()}
+        for issue_id in self._issues - set(wanted):
+            ir.async_delete_issue(self.hass, DOMAIN, issue_id)
+        for issue_id, floor in wanted.items():
+            ir.async_create_issue(
+                self.hass,
+                DOMAIN,
+                issue_id,
+                is_fixable=False,
+                severity=ir.IssueSeverity.WARNING,
+                translation_key="few_nodes" if floor.key else "few_nodes_home",
+                translation_placeholders={"floor": floor.name, "count": str(len(floor.nodes)), "needed": str(MIN_FLOOR_NODES)},
+                learn_more_url="https://github.com/albert-canfield/wisp/blob/main/docs/SETUP.md#1-boards",
+            )
+        self._issues = set(wanted)
 
     @callback
     def _async_area_updated(self, event: Event[ar.EventAreaRegistryUpdatedData]) -> None:

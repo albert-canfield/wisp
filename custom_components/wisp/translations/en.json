@@ -208,5 +208,15 @@
         }
       }
     }
+  },
+  "issues": {
+    "few_nodes": {
+      "title": "Few Wisp nodes on {floor}",
+      "description": "Wisp nodes on {floor}: {count} of at least {needed}. Motion per link works already; room presence and positions need at least {needed} nodes on a floor, and 4 to 6 give clearly better results. Add nodes of the same model, spread around the floor, and set their area to one on {floor}."
+    },
+    "few_nodes_home": {
+      "title": "Few Wisp nodes",
+      "description": "Wisp nodes without a floor: {count} of at least {needed}. Motion per link works already; room presence and positions need at least {needed} nodes on a floor, and 4 to 6 give clearly better results. Add nodes of the same model, spread around the floor."
+    }
   }
 }
