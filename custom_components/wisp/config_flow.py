@@ -1,4 +1,5 @@
-"""Config flow: one Wisp hub, nodes as subentries (found by zeroconf or added by address)."""
+"""Config flow: one Wisp hub, nodes as subentries (found by zeroconf or added by address), and the
+room presence options."""
 from __future__ import annotations
 
 from string import hexdigits
@@ -15,17 +16,31 @@ from homeassistant.config_entries import (
     ConfigSubentry,
     ConfigSubentryData,
     ConfigSubentryFlow,
+    OptionsFlow,
     SubentryFlowResult,
 )
 from homeassistant.const import CONF_HOST, CONF_MAC, CONF_NAME
 from homeassistant.core import HomeAssistant, callback
+from homeassistant.helpers import selector
 from homeassistant.helpers.device_registry import format_mac
 from homeassistant.helpers.service_info.zeroconf import ZeroconfServiceInfo
 
-from .const import DOMAIN, PROJECT_NAME, SUBENTRY_NODE, TITLE
+from .const import CONF_AREA, CONF_PRESENCE_HOLD, DOMAIN, PROJECT_NAME, SUBENTRY_NODE, TITLE
+from .engine.rooms import HOLD
 from .hub import ProbeError, async_probe, default_node_name, node_devices
 
-NODE_SCHEMA = vol.Schema({vol.Required(CONF_HOST): str, vol.Optional(CONF_NAME): str})
+NODE_SCHEMA = vol.Schema({
+    vol.Required(CONF_HOST): str,
+    vol.Optional(CONF_NAME): str,
+    vol.Optional(CONF_AREA): selector.AreaSelector(),
+})
+OPTIONS_SCHEMA = vol.Schema({
+    vol.Required(CONF_PRESENCE_HOLD, default=HOLD): selector.NumberSelector(
+        selector.NumberSelectorConfig(
+            min=0, max=3600, step=1, unit_of_measurement="s", mode=selector.NumberSelectorMode.BOX
+        )
+    ),
+})
 
 
 def hub_entry(hass: HomeAssistant) -> ConfigEntry | None:
@@ -33,8 +48,9 @@ def hub_entry(hass: HomeAssistant) -> ConfigEntry | None:
     return entry if entry and entry.source != SOURCE_IGNORE else None
 
 
-def _node_data(mac: str, host: str, name: str) -> dict[str, str]:
-    return {CONF_MAC: mac, CONF_HOST: host, CONF_NAME: name}
+def _node_data(mac: str, host: str, name: str, area: str | None = None) -> dict[str, str]:
+    """The area only when set: the room the node stands in, which gives its floor."""
+    return {CONF_MAC: mac, CONF_HOST: host, CONF_NAME: name} | ({CONF_AREA: area} if area else {})
 
 
 def _node_subentry(mac: str, host: str, name: str) -> ConfigSubentryData:
@@ -83,6 +99,11 @@ class WispConfigFlow(ConfigFlow, domain=DOMAIN):
     @callback
     def async_get_supported_subentry_types(cls, config_entry: ConfigEntry) -> dict[str, type[ConfigSubentryFlow]]:
         return {SUBENTRY_NODE: NodeSubentryFlow}
+
+    @staticmethod
+    @callback
+    def async_get_options_flow(config_entry: ConfigEntry) -> WispOptionsFlow:
+        return WispOptionsFlow()
 
     async def async_step_user(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
         await self.async_set_unique_id(DOMAIN)
@@ -145,7 +166,8 @@ class NodeSubentryFlow(ConfigSubentryFlow):
                 if any(sub.unique_id == mac for sub in self._get_entry().subentries.values()):
                     return self.async_abort(reason="already_configured")
                 name = (user_input.get(CONF_NAME) or "").strip() or _node_name(self.hass, mac)
-                return self.async_create_entry(title=name, data=_node_data(mac, host, name), unique_id=mac)
+                data = _node_data(mac, host, name, user_input.get(CONF_AREA))
+                return self.async_create_entry(title=name, data=data, unique_id=mac)
         return self.async_show_form(
             step_id="user", data_schema=self.add_suggested_values_to_schema(NODE_SCHEMA, user_input), errors=errors
         )
@@ -161,14 +183,29 @@ class NodeSubentryFlow(ConfigSubentryFlow):
                     errors = {"base": "different_node"}
             if not errors:
                 name = (user_input.get(CONF_NAME) or "").strip() or sub.title
-                return self.async_update_and_abort(
-                    self._get_entry(), sub, title=name, data={**sub.data, CONF_HOST: host, CONF_NAME: name}
-                )
+                kept = {k: v for k, v in sub.data.items() if k != CONF_AREA}  # a cleared area goes
+                data = kept | _node_data(sub.data[CONF_MAC], host, name, user_input.get(CONF_AREA))
+                return self.async_update_and_abort(self._get_entry(), sub, title=name, data=data)
+        # The ESPHome device's area is a good first guess for the room the node stands in
+        area = sub.data.get(CONF_AREA) or next(
+            (d.area_id for d in node_devices(self.hass, sub.data[CONF_MAC]) if d.area_id), None
+        )
         return self.async_show_form(
             step_id="reconfigure",
             data_schema=self.add_suggested_values_to_schema(
-                NODE_SCHEMA, user_input or {CONF_HOST: sub.data[CONF_HOST], CONF_NAME: sub.title}
+                NODE_SCHEMA, user_input or {CONF_HOST: sub.data[CONF_HOST], CONF_NAME: sub.title, CONF_AREA: area}
             ),
             description_placeholders={"mac": sub.data[CONF_MAC]},
             errors=errors,
+        )
+
+
+class WispOptionsFlow(OptionsFlow):
+    """Room presence: how long a room stays occupied after it last won."""
+
+    async def async_step_init(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
+        if user_input is not None:
+            return self.async_create_entry(data=user_input)
+        return self.async_show_form(
+            step_id="init", data_schema=self.add_suggested_values_to_schema(OPTIONS_SCHEMA, self.config_entry.options)
         )

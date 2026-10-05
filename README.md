@@ -35,7 +35,8 @@ Everything stays on your local network.
 |---|---|---|
 | Each node (ESPHome) | Motion on the link to its access point, grid size, hive in sync, AP CSI rate, restart, safe mode, identify, firmware update | `binary_sensor.wisp_a8c77c_ap_motion` |
 | Wisp integration | Motion score and motion per link, signal and spread (disabled by default) | `sensor.hall_ap_58_04_4f_1d_12_f9_motion_score` |
-| Planned | Room per floor, presence per room, position per floor | `sensor.wisp_floor_2_room` |
+| Wisp integration, once calibrated | Room per floor, presence per room, calibration progress per floor | `sensor.wisp_floor_2_room`, `binary_sensor.wisp_office_presence` |
+| Planned | Position per floor | `sensor.wisp_floor_2_x` |
 
 ## Try it
 
@@ -74,6 +75,16 @@ flip: false     # optional, mirror left to right
 ```
 
 Nodes sit where the grid's own layout puts them, access points beside the nodes that hear them best, and footprints walk along a link while it sees motion. The layout is relative, so turn and mirror it to match your home until floor plans arrive.
+
+## Room presence (first version)
+
+Rooms are your Home Assistant areas and floors are your Home Assistant floors. Give each node the area it stands in (Wisp, the node, Change node): its floor is the node's floor, and nodes without one share a floor named after the hub. Then teach Wisp your rooms, one at a time, with the actions under Developer tools:
+
+1. `wisp.calibrate_room` with the area, standing in that room: walk around in it until the floor's calibration sensor is idle again (60 seconds by default). A room needs 20 seconds of movement before it counts.
+2. `wisp.calibrate_empty` with nobody moving on the floor (optional, it helps against a fan or an access point that changes power).
+3. `wisp.clear_calibration` forgets a room, or everything.
+
+Each floor then gets a room sensor (the room someone moves in, `none` while nobody moves, with a confidence) and each calibrated room an occupancy sensor that stays on for 60 seconds after its last movement, since someone sitting still makes little signal. The hold time is in the Wisp options. Calibrate again after adding nodes: new links only count once the rooms have samples of them.
 
 ## Roadmap
 

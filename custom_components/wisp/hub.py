@@ -19,6 +19,7 @@ from homeassistant.helpers.device_registry import CONNECTION_NETWORK_MAC, Device
 from homeassistant.helpers.event import async_track_time_interval
 
 from .const import (
+    CONF_AREA,
     HIVE_TIMEOUT,
     LINK_TIMEOUT,
     MANUFACTURER,
@@ -44,6 +45,7 @@ from .engine import (
     build_subscribe,
     parse_packet,
 )
+from .presence import RoomPresence
 
 _LOGGER = logging.getLogger(__name__)
 LISTEN = ("0.0.0.0", 0)  # any interface, ephemeral port
@@ -62,6 +64,7 @@ class Node:
     host: str  # IP address or host name
     name: str
     subentry_id: str
+    area: str | None = None  # the room it stands in, which gives its floor
     address: str | None = None  # host resolved to IPv4
     resolved_at: float = 0.0
 
@@ -98,9 +101,11 @@ class WispHub:
         self._link_listeners: dict[LinkKey, list[Callable[[], None]]] = {}
         self._unsubs: list[CALLBACK_TYPE] = []
         self._subscribing = False
+        self.presence = RoomPresence(self)
 
     async def async_start(self) -> None:
         self.async_sync_nodes()
+        await self.presence.async_start()
         transport, _ = await self.hass.loop.create_datagram_endpoint(
             lambda: _Protocol(self), local_addr=LISTEN, family=socket.AF_INET
         )
@@ -123,6 +128,7 @@ class WispHub:
         for unsub in self._unsubs:
             unsub()
         self._unsubs = []
+        self.presence.async_stop()
         if self.transport:
             self.transport.close()
             self.transport = None
@@ -147,16 +153,18 @@ class WispHub:
             host, name = sub.data[CONF_HOST], sub.data.get(CONF_NAME) or sub.title
             node = self.nodes.get(mac)
             if node is None:
-                self.nodes[mac] = Node(mac, host, name, sub.subentry_id)
+                self.nodes[mac] = node = Node(mac, host, name, sub.subentry_id)
                 changed = True
             else:
                 if node.host != host:
                     node.host, node.address, node.resolved_at = host, None, 0.0
                     changed = True
                 node.name, node.subentry_id = name, sub.subentry_id
+            node.area = sub.data.get(CONF_AREA)
             dev_reg.async_get_or_create(
                 config_entry_id=self.entry.entry_id, config_subentry_id=sub.subentry_id, **self.device_info(mac)
             )
+        self.presence.async_sync_floors()
         if changed and self.transport:
             self.entry.async_create_task(self.hass, self.async_subscribe(), "wisp subscribe")
 
@@ -302,7 +310,8 @@ class WispHub:
         return self.transport is not None and (fresh or self.hive.fresh(mac, now))
 
     def map_snapshot(self) -> dict[str, Any]:
-        """The live map: nodes at their layout positions, access points, fresh links and the hive."""
+        """The live map: nodes at their layout positions, access points, fresh links and the hive,
+        and once a room or floor is calibrated, the room per floor."""
         now = self.clock()
         hive = self.hive.current(now)
         layout = hive.layout if hive else {}
@@ -330,7 +339,7 @@ class WispHub:
             for _, link in sorted(self.table.links.items())
             if now - link.updated <= LINK_TIMEOUT and link.receiver in self.nodes and link.transmitter in on_map
         ]
-        return {
+        snapshot = {
             "nodes": nodes,
             "access_points": [
                 {
@@ -348,6 +357,9 @@ class WispHub:
                 "age": round(now - hive.updated),
             } if hive else None,
         }
+        if (rooms := self.presence.snapshot()) is not None:
+            snapshot["rooms"] = rooms
+        return snapshot
 
     # Diagnostics
 
@@ -364,6 +376,7 @@ class WispHub:
                 "mac": node.mac,
                 "host": node.host,
                 "name": node.name,
+                "area": node.area,
                 "address": node.address,
                 "seen": {
                     "address": seen.address,
@@ -400,6 +413,7 @@ class WispHub:
                 "layout": {mac: list(xy) for mac, xy in hive.layout.items()},
                 "rows": [asdict(row) for row in hive.rows.values()],
             } if hive else None,
+            "rooms": self.presence.diagnostics(),
         }
 
 

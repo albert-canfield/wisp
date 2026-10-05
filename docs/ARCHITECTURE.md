@@ -314,7 +314,17 @@ Pure Python, unit tested, no HA dependency.
 - `imaging.py`: where on a floor. `Locator` finds one moving person by best fit: for every 25 cm pixel it predicts how much each link would be disturbed by someone there (falling off with the distance to the link's line) and keeps the pixel that fits the observed links best, quiet links included. On synthetic floors it reaches a median error of about 0.3 m, against 1.2 m for classic radio tomographic imaging (`Imager`, kept for heat maps; both run in plain Python by solving only links-by-links systems).
 - `tracking.py`: access points placed from how strongly the nodes hear them, and a Kalman track with a gate against wild fixes.
 - `floor.py`: one floor from hive layout and link scores to a smoothed position with a quality.
-- Rooms (calibration and room classification) follow in phase 2.
+- `rooms.py`: room presence from calibrated motion fingerprints, see below.
+
+### Room presence (built, v1: motion fingerprints)
+
+`engine/rooms.py`. Rooms are Home Assistant areas, floors are Home Assistant floors. A node's floor is the floor of its area (set per node); nodes and areas without a floor share one floor named after the hub. A link belongs to the floor of the node that receives it.
+
+- **Features.** Once a second per floor: the log motion score of every live link on it (reported in the last 3 s), so 1.0, as quiet as usual, is 0. Missing links are left out, never taken as 0.
+- **Calibration.** Per room, vectors recorded while someone moves in it (still moments are skipped); per floor, an empty class recorded while nobody moves on it. The latest 600 per class are kept in `.storage`.
+- **Classifier.** Per class and link a mean and a variance (diagonal Gaussian, variance at least 0.01, about 10 %), from links seen in at least 20 samples; a class needs 20 samples. Each class is scored by its mean log-likelihood per shared link, because the links of a floor see the same person and are not independent; a softmax turns the scores into probabilities. A class sharing under half the links of the best covered class (calibrated before a node joined, or for an area now on another floor) sits out. New links count once the rooms are calibrated again.
+- **Decision.** If every live score is below 1.5 (where a node's motion flag turns off), nobody moves on the floor. Otherwise the most probable class wins; the empty class winning also means nobody.
+- **Presence.** A room is occupied while it won with a probability of 0.6 or more within the hold time (60 s by default), since a still person makes little signal. Another room winning does not end it: two people can be in two rooms.
 
 ## Home Assistant integration (`custom_components/wisp/`)
 

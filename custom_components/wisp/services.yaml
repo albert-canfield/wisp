@@ -1,0 +1,30 @@
+calibrate_room:
+  fields:
+    area:
+      required: true
+      selector:
+        area:
+    duration:
+      default: 60
+      selector:
+        number:
+          min: 10
+          max: 600
+          unit_of_measurement: s
+calibrate_empty:
+  fields:
+    floor:
+      selector:
+        floor:
+    duration:
+      default: 60
+      selector:
+        number:
+          min: 10
+          max: 600
+          unit_of_measurement: s
+clear_calibration:
+  fields:
+    area:
+      selector:
+        area:

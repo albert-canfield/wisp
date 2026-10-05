@@ -1,13 +1,16 @@
-"""Binary sensor per link: motion detected by the node on that link."""
+"""Binary sensors: motion per link, detected by the node on that link; presence per calibrated room."""
 from __future__ import annotations
+
+from functools import partial
+from typing import Any
 
 from homeassistant.components.binary_sensor import BinarySensorDeviceClass, BinarySensorEntity
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 
 from .engine import LinkKey
-from .entity import WispLinkEntity
-from .hub import WispConfigEntry
+from .entity import WispLinkEntity, WispRoomEntity, async_follow_rooms, room_unique_id
+from .hub import WispConfigEntry, WispHub
 
 
 async def async_setup_entry(
@@ -20,6 +23,14 @@ async def async_setup_entry(
         async_add_entities([Motion(hub, link)], config_subentry_id=hub.subentry_id(link[1]))
 
     entry.async_on_unload(hub.async_listen_new_links(add_link))
+
+    def wanted() -> dict[str, Any]:
+        return {
+            room_unique_id(hub, f"area_{area}", Presence.key): partial(Presence, hub, area)
+            for area in hub.presence.calibrated_areas()
+        }
+
+    entry.async_on_unload(async_follow_rooms(hub, "binary_sensor", wanted, async_add_entities))
 
 
 class Motion(WispLinkEntity, BinarySensorEntity):
@@ -36,3 +47,35 @@ class Motion(WispLinkEntity, BinarySensorEntity):
 
     def _urgent(self, value: bool | None) -> bool:
         return True  # motion on or off is written at once
+
+
+class Presence(WispRoomEntity, BinarySensorEntity):
+    """On while the room won within the hold time; confidence of its latest win."""
+
+    key = "presence"
+    _attr_device_class = BinarySensorDeviceClass.OCCUPANCY
+
+    def __init__(self, hub: WispHub, area: str) -> None:
+        super().__init__(hub, f"area_{area}")
+        self.area = area
+        self._attr_translation_key = self.key
+        self._attr_translation_placeholders = {"area": hub.presence.area_name(area)}
+
+    @property
+    def available(self) -> bool:
+        return self.presence.available(self.presence.area_floor(self.area))
+
+    @property
+    def is_on(self) -> bool:
+        return self.value()[0]
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        return {"confidence": self.value()[1]}
+
+    def value(self) -> tuple[bool, float | None]:
+        confidence = self.presence.engine.presence(self.area, self.hub.clock())
+        return confidence is not None, None if confidence is None else round(confidence, 2)
+
+    def _urgent(self, value: tuple[bool, float | None]) -> bool:
+        return value[0] != self._written[1][0]  # on or off is written at once

@@ -1,4 +1,4 @@
-"""Wisp: WiFi Spatial Presence. Link reports from the nodes over UDP, entities per link, a live map."""
+"""Wisp: WiFi Spatial Presence. Link reports from the nodes over UDP, entities per link, presence per room, a live map."""
 from __future__ import annotations
 
 from contextlib import suppress
@@ -12,11 +12,13 @@ from homeassistant.const import EVENT_HOMEASSISTANT_STOP
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.data_entry_flow import AbortFlow, UnknownFlow
 from homeassistant.helpers import config_validation as cv
+from homeassistant.helpers.storage import Store
 from homeassistant.helpers.typing import ConfigType
 
-from . import websocket
-from .const import DOMAIN, PLATFORMS, VERSION
+from . import services, websocket
+from .const import DOMAIN, PLATFORMS, STORE_VERSION, VERSION
 from .hub import WispConfigEntry, WispHub
+from .presence import store_key
 
 _LOGGER = logging.getLogger(__name__)
 CONFIG_SCHEMA = cv.config_entry_only_config_schema(DOMAIN)
@@ -26,6 +28,7 @@ CARD_FILE = Path(__file__).parent / "frontend" / "wisp-map-card.js"
 
 async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
     websocket.async_register(hass)
+    services.async_register(hass)
     await _async_register_card(hass)
     return True
 
@@ -47,7 +50,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: WispConfigEntry) -> bool
     entry.runtime_data = hub
     entry.async_on_unload(hass.bus.async_listen_once(EVENT_HOMEASSISTANT_STOP, hub.async_stop))
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
-    entry.async_on_unload(entry.add_update_listener(_async_nodes_changed))
+    entry.async_on_unload(entry.add_update_listener(_async_entry_updated))
     _async_adopt_discovered(hass)
     return True
 
@@ -59,9 +62,15 @@ async def async_unload_entry(hass: HomeAssistant, entry: WispConfigEntry) -> boo
     return ok
 
 
-async def _async_nodes_changed(hass: HomeAssistant, entry: WispConfigEntry) -> None:
-    """A node subentry was added, changed or removed: no reload, the hub follows."""
+async def async_remove_entry(hass: HomeAssistant, entry: WispConfigEntry) -> None:
+    """Deleting the hub deletes the room calibration too, so a new setup starts clean."""
+    await Store(hass, STORE_VERSION, store_key(entry.entry_id)).async_remove()
+
+
+async def _async_entry_updated(hass: HomeAssistant, entry: WispConfigEntry) -> None:
+    """A node subentry was added, changed or removed, or the options changed: no reload, the hub follows."""
     entry.runtime_data.async_sync_nodes()
+    entry.runtime_data.presence.async_apply_options()
 
 
 @callback

@@ -11,7 +11,7 @@ from homeassistant.components.zeroconf.discovery import _match_against_props
 from homeassistant.config_entries import SOURCE_RECONFIGURE, SOURCE_USER, SOURCE_ZEROCONF
 from homeassistant.core import HomeAssistant
 from homeassistant.data_entry_flow import FlowResultType
-from homeassistant.helpers import device_registry as dr
+from homeassistant.helpers import area_registry as ar, device_registry as dr
 from homeassistant.helpers.device_registry import CONNECTION_NETWORK_MAC
 from homeassistant.helpers.service_info.zeroconf import ZeroconfServiceInfo
 from homeassistant.loader import async_get_zeroconf
@@ -238,3 +238,62 @@ async def test_reconfigure_node(hass: HomeAssistant, udp: FakeUdp) -> None:
     result, _ = await reconfigure(hass, entry, {"host": IP_B}, NODE_B)
     assert result["type"] is FlowResultType.FORM and result["errors"] == {"base": "different_node"}
     assert nodes(entry)[NODE_A]["host"] == "192.168.1.70"
+
+
+def suggested(result, field: str):
+    (key,) = [key for key in result["data_schema"].schema if key == field]
+    return (key.description or {}).get("suggested_value")
+
+
+async def test_node_area(hass: HomeAssistant, udp: FakeUdp) -> None:
+    """The room a node stands in, which gives its floor: set when adding, changed or cleared later."""
+    for name in ("Kitchen", "Office"):
+        ar.async_get(hass).async_create(name)
+    entry = await setup_hub(hass, HALL)
+    await add_node(hass, entry, {"host": IP_B, "area": "office"})
+    assert nodes(entry)[NODE_B] == {
+        "mac": NODE_B, "host": IP_B, "name": "Wisp 535002", "area": "office", "title": "Wisp 535002"
+    }
+    assert entry.runtime_data.nodes[NODE_B].area == "office"
+    assert entry.runtime_data.presence.floors[""].nodes == {NODE_A, NODE_B}  # areas without a floor share one
+
+    # Hall has no area yet: the form suggests the area of its ESPHome device
+    esphome = MockConfigEntry(domain="esphome")
+    esphome.add_to_hass(hass)
+    dev_reg = dr.async_get(hass)
+    device = dev_reg.async_get_or_create(
+        config_entry_id=esphome.entry_id, connections={(CONNECTION_NETWORK_MAC, NODE_A)}, name="Wisp 535001"
+    )
+    dev_reg.async_update_device(device.id, area_id="kitchen")
+    sub_id = next(s.subentry_id for s in entry.subentries.values() if s.unique_id == NODE_A)
+    result = await hass.config_entries.subentries.async_init(
+        (entry.entry_id, "node"), context={"source": SOURCE_RECONFIGURE, "subentry_id": sub_id}
+    )
+    assert suggested(result, "area") == "kitchen" and suggested(result, "host") == IP_A
+    result = await hass.config_entries.subentries.async_configure(
+        result["flow_id"], {"host": IP_A, "name": "Hall", "area": "kitchen"}
+    )
+    await hass.async_block_till_done()
+    assert result["reason"] == "reconfigure_successful"
+    assert nodes(entry)[NODE_A]["area"] == "kitchen" and entry.runtime_data.nodes[NODE_A].area == "kitchen"
+
+    # Cleared: the node goes back to the hub's own floor
+    result, _ = await reconfigure(hass, entry, {"host": IP_A, "name": "Hall"})
+    assert result["reason"] == "reconfigure_successful"
+    assert nodes(entry)[NODE_A] == {"mac": NODE_A, "host": IP_A, "name": "Hall", "title": "Hall"}
+    assert entry.runtime_data.nodes[NODE_A].area is None
+
+
+async def test_options_set_the_presence_hold(hass: HomeAssistant, udp: FakeUdp) -> None:
+    entry = await setup_hub(hass, HALL)
+    hub = entry.runtime_data
+    assert hub.presence.engine.hold == 60
+    result = await hass.config_entries.options.async_init(entry.entry_id)
+    assert result["type"] is FlowResultType.FORM and result["step_id"] == "init"
+    result = await hass.config_entries.options.async_configure(result["flow_id"], {"presence_hold": 120})
+    await hass.async_block_till_done()
+    assert result["type"] is FlowResultType.CREATE_ENTRY
+    assert entry.options == {"presence_hold": 120}
+    assert entry.runtime_data is hub and hub.presence.engine.hold == 120  # no reload
+    result = await hass.config_entries.options.async_init(entry.entry_id)
+    assert suggested(result, "presence_hold") == 120

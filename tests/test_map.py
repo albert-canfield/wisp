@@ -5,6 +5,7 @@ import pytest
 
 from homeassistant.components.frontend import DATA_EXTRA_MODULE_URL
 from homeassistant.core import HomeAssistant
+from homeassistant.helpers import area_registry as ar
 from homeassistant.setup import async_setup_component
 
 from custom_components.wisp.const import VERSION
@@ -24,6 +25,7 @@ from .conftest import (
 )
 from .fake_node import encode_hive_report, encode_report
 from .test_init import HALL, NODE_C, OFFICE, fire, setup_hub
+from .test_rooms import House
 
 pytestmark = pytest.mark.usefixtures("enable_custom_integrations")
 
@@ -147,6 +149,34 @@ async def test_map_from_real_packets(hass: HomeAssistant, udp: FakeUdp, hass_ws_
             {"transmitter": REAL_NODE_2, "receiver": REAL_NODE_1, "kind": "node", "score": 1.0, "motion": False},
         ],
         "hive": {"hash": "0bcd88ba", "in_sync": True, "nodes": 2, "age": 0},
+    }
+
+
+async def test_rooms_join_the_map_once_calibrated(hass: HomeAssistant, udp: FakeUdp, hass_ws_client) -> None:
+    ar.async_get(hass).async_create("Kitchen")
+    entry = await setup_hub(hass, HALL, OFFICE)
+    house = House(hass, udp, entry)
+    client = await hass_ws_client(hass)
+    assert "rooms" not in await next_map(client, await subscribe(client))  # room presence not used yet
+
+    await house.calibrate("kitchen")
+    client = await hass_ws_client(hass)
+    snapshot = await next_map(client, await subscribe(client))
+    assert list(snapshot) == ["nodes", "access_points", "links", "hive", "rooms"]
+    assert len(snapshot["nodes"]) == 2 and len(snapshot["links"]) == 4
+    assert snapshot["rooms"] == [
+        {
+            "floor": None,  # the hub's own floor: nodes without a floor
+            "name": "Wisp",
+            "room": "Kitchen",
+            "area": "kitchen",
+            "confidence": 1.0,
+            "presence": [{"area": "kitchen", "name": "Kitchen", "on": True}],
+        }
+    ]
+    await house.seconds(1, None)
+    assert entry.runtime_data.map_snapshot()["rooms"][0] | {"presence": None} == {
+        "floor": None, "name": "Wisp", "room": "none", "area": None, "confidence": None, "presence": None
     }
 
 

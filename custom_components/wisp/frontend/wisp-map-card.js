@@ -191,7 +191,10 @@ function draw(map, config) {
   }
   const loose = map.nodes.filter((n) => n.x == null || n.y == null).length;
   const summary = `${plural(map.nodes.length, "node", "nodes")}${loose ? ` (${loose} not placed yet)` : ""}, ${plural(map.access_points.length, "access point", "access points")}`;
-  const motion = moving.length ? `Motion: ${moving.join(", ")}` : "All quiet";
+  // The room someone moves in, per calibrated floor
+  const rooms = (map.rooms ?? []).filter((f) => f.area).map((f) => f.room);
+  const where = rooms.length ? `${rooms.length > 1 ? "Rooms" : "Room"}: ${rooms.join(", ")}. ` : "";
+  const motion = where + (moving.length ? `Motion: ${moving.join(", ")}` : "All quiet");
   return {
     svg: `<svg viewBox="0 0 ${W} ${h}" role="img" aria-label="${esc(`Map of ${summary}. ${motion}.`)}"><g class="lines">${lines}</g><g class="steps">${steps}</g><g class="marks">${marks}</g><g class="labels">${labels}</g></svg>`,
     summary,

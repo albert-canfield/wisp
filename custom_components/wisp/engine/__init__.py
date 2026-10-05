@@ -1,4 +1,4 @@
-"""Engine: pure Python, no Home Assistant imports, unit tested (tests/test_engine.py)."""
+"""Engine: pure Python, no Home Assistant imports, unit tested (tests/test_engine.py, tests/test_engine_rooms.py)."""
 from .hive import HiveState, HiveTracker, access_points  # noqa: F401
 from .links import LinkKey, LinkState, LinkTable, NodeState  # noqa: F401
 from .protocol import (  # noqa: F401
@@ -24,3 +24,4 @@ from .protocol import (  # noqa: F401
     parse_packet,
     parse_raw_csi,
 )
+from .rooms import ClassModel, Decision, Rooms, Run, decide, features  # noqa: F401

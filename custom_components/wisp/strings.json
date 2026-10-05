@@ -31,11 +31,13 @@
           "description": "Wisp finds nodes on its own. Add one here if it was not found, for example on another subnet.",
           "data": {
             "host": "Host or IP address",
-            "name": "Name"
+            "name": "Name",
+            "area": "Area"
           },
           "data_description": {
             "host": "For example 192.168.1.50 or wisp-a8c77c.local.",
-            "name": "Optional. Defaults to the node's name in Home Assistant."
+            "name": "Optional. Defaults to the node's name in Home Assistant.",
+            "area": "Optional. The room the node stands in: its floor is the node's floor for room presence."
           }
         },
         "reconfigure": {
@@ -43,11 +45,13 @@
           "description": "Node {mac}.",
           "data": {
             "host": "Host or IP address",
-            "name": "Name"
+            "name": "Name",
+            "area": "Area"
           },
           "data_description": {
             "host": "Found nodes follow address changes on their own.",
-            "name": "Used to name the links this node transmits."
+            "name": "Used to name the links this node transmits.",
+            "area": "The room the node stands in: its floor is the node's floor for room presence. Nodes without one share a floor."
           }
         }
       },
@@ -66,6 +70,9 @@
     "binary_sensor": {
       "motion": {
         "name": "{link} motion"
+      },
+      "presence": {
+        "name": "{area} presence"
       }
     },
     "sensor": {
@@ -77,6 +84,102 @@
       },
       "spread": {
         "name": "{link} spread"
+      },
+      "room": {
+        "name": "Room"
+      },
+      "floor_room": {
+        "name": "{floor} room"
+      },
+      "calibration": {
+        "name": "Calibration",
+        "state": {
+          "idle": "Idle",
+          "recording": "Recording"
+        }
+      },
+      "floor_calibration": {
+        "name": "{floor} calibration",
+        "state": {
+          "idle": "Idle",
+          "recording": "Recording"
+        }
+      }
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Room presence",
+        "data": {
+          "presence_hold": "Presence hold"
+        },
+        "data_description": {
+          "presence_hold": "Seconds a room stays occupied after Wisp last saw someone move in it. Someone sitting still makes little signal."
+        }
+      }
+    }
+  },
+  "exceptions": {
+    "not_loaded": {
+      "message": "Wisp is not set up."
+    },
+    "no_nodes": {
+      "message": "Wisp has no nodes yet."
+    },
+    "unknown_area": {
+      "message": "There is no area {area}."
+    },
+    "unknown_floor": {
+      "message": "There is no floor {floor}."
+    },
+    "area_without_floor": {
+      "message": "{area} has no floor, and every Wisp node is on one. Give {area} a floor in its area settings."
+    },
+    "no_nodes_on_floor": {
+      "message": "No Wisp node is on {floor}, the floor of {area}. Set the area each node stands in under Wisp, Change node."
+    },
+    "floor_without_nodes": {
+      "message": "No Wisp node is on {floor}. Set the area each node stands in under Wisp, Change node."
+    }
+  },
+  "services": {
+    "calibrate_room": {
+      "name": "Calibrate room",
+      "description": "Records how the links of the room's floor react while you walk around in the room. Start it in the room and keep moving until it ends; the floor's calibration sensor counts down. Run it again to add samples.",
+      "fields": {
+        "area": {
+          "name": "Area",
+          "description": "The room to calibrate."
+        },
+        "duration": {
+          "name": "Duration",
+          "description": "Seconds to record."
+        }
+      }
+    },
+    "calibrate_empty": {
+      "name": "Calibrate empty floor",
+      "description": "Records the floor with nobody moving on it, so a fan or an access point changing power is not taken for a person. Leave the floor or keep still until it ends.",
+      "fields": {
+        "floor": {
+          "name": "Floor",
+          "description": "Optional. Without it, every floor with Wisp nodes records at once."
+        },
+        "duration": {
+          "name": "Duration",
+          "description": "Seconds to record."
+        }
+      }
+    },
+    "clear_calibration": {
+      "name": "Clear calibration",
+      "description": "Forgets what Wisp recorded for a room, or for every room and floor. The room's presence sensor goes with it.",
+      "fields": {
+        "area": {
+          "name": "Area",
+          "description": "Optional. Without it, all calibration is cleared."
+        }
       }
     }
   }
