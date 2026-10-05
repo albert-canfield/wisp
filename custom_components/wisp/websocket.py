@@ -13,6 +13,7 @@ import voluptuous as vol
 
 from homeassistant.components import websocket_api
 from homeassistant.core import HomeAssistant, callback
+from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers import area_registry as ar, config_validation as cv
 from homeassistant.helpers.device_registry import format_mac
 from homeassistant.helpers.event import async_track_time_interval
@@ -40,6 +41,7 @@ def async_register(hass: HomeAssistant) -> None:
     websocket_api.async_register_command(hass, ws_clear_plan)
     websocket_api.async_register_command(hass, ws_set_node_area)
     websocket_api.async_register_command(hass, ws_set_rooms)
+    websocket_api.async_register_command(hass, ws_set_channel)
 
 
 def _hub(hass: HomeAssistant) -> WispHub | None:
@@ -330,3 +332,34 @@ async def ws_set_rooms(
     await presence.plans.async_save()
     presence.async_plans_changed(floor)
     connection.send_result(msg["id"], presence.plan_view(floor))
+
+
+@websocket_api.websocket_command({
+    vol.Required("type"): "wisp/floor/set_channel",
+    vol.Optional("floor"): FLOOR,
+    vol.Required("channel"): vol.All(vol.Coerce(int), vol.Range(min=0, max=13)),
+})
+@websocket_api.require_admin
+@websocket_api.async_response
+async def ws_set_channel(
+    hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict[str, Any]
+) -> None:
+    """The WiFi channel for every node on a floor (0: automatic, one channel for the house). Each
+    node moves to that channel and the access point on it, so a floor can use its own access
+    point. Answers which nodes took it and which failed, and why."""
+    hub = _hub(hass)
+    if hub is None:
+        connection.send_error(msg["id"], websocket_api.ERR_NOT_FOUND, "Wisp is not loaded.")
+        return
+    floor = msg.get("floor") or NO_FLOOR
+    if floor not in hub.presence.floors:
+        _no_floor(connection, msg, floor)
+        return
+    done, failed = [], []
+    for mac in sorted(hub.presence.floors[floor].nodes):
+        try:
+            await hub.async_set_channel(mac, msg["channel"])
+            done.append(mac)
+        except HomeAssistantError as err:
+            failed.append({"mac": mac, "name": hub.nodes[mac].name, "error": str(err)})
+    connection.send_result(msg["id"], {"set": done, "failed": failed})

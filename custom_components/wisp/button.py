@@ -11,12 +11,11 @@ from homeassistant.components.button import ButtonDeviceClass, ButtonEntity
 from homeassistant.const import STATE_UNAVAILABLE, EntityCategory
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.exceptions import HomeAssistantError
-from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 
 from .entity import WispEntity
-from .hub import WispConfigEntry, WispHub, node_devices
+from .hub import WispConfigEntry, WispHub, esphome_entity
 
 IDENTIFY_PATH = "/button/Identify/press"  # ESPHome's web server, see firmware/common/status_led_rgb.yaml
 
@@ -43,14 +42,7 @@ async def async_setup_entry(
 
 def esphome_identify(hass: HomeAssistant, mac: str) -> str | None:
     """The Identify button of the node's ESPHome device, if Home Assistant has one."""
-    registry = er.async_get(hass)
-    for device in node_devices(hass, mac):
-        for entity in er.async_entries_for_device(registry, device.id):
-            if entity.platform == "esphome" and entity.domain == "button" and (
-                (entity.original_name or "").casefold() == "identify" or entity.unique_id.endswith("-identify")
-            ):
-                return entity.entity_id
-    return None
+    return esphome_entity(hass, mac, "button", "Identify")
 
 
 class Identify(WispEntity, ButtonEntity):

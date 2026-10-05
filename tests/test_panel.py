@@ -101,16 +101,17 @@ async def test_snapshot_of_nodes_floors_and_areas(hass: HomeAssistant, udp: Fake
             {
                 "mac": NODE_A, "name": "Hall", "added": True, "host": IP_A, "area": "hall", "area_name": "Hall",
                 "floor": "ground_floor", "floor_name": "Ground floor", "online": False, "placed": False,
-                "device_id": device.id,
+                "device_id": device.id, "wifi": {"ap": None, "rssi": None, "channel": None, "fixed": None},
             },
             {
                 "mac": NODE_B, "name": "Office", "added": True, "host": "192.168.1.51", "area": None, "area_name": None,
                 "floor": None, "floor_name": "Wisp", "online": False, "placed": False, "device_id": None,
+                "wifi": {"ap": None, "rssi": None, "channel": None, "fixed": None},
             },
         ],
         "floors": [
             {
-                "floor": "ground_floor", "name": "Ground floor", "nodes": [NODE_A], "live_links": 0,
+                "floor": "ground_floor", "name": "Ground floor", "nodes": [NODE_A], "live_links": 0, "channel": None,
                 "room": None, "area": None, "confidence": None, "empty_samples": 0, "run": None,
                 "areas": [{
                     "area": "hall", "name": "Hall", "nodes": 1, "samples": 0, "still_samples": 0, "presence": False,
@@ -119,12 +120,12 @@ async def test_snapshot_of_nodes_floors_and_areas(hass: HomeAssistant, udp: Fake
                 "separation": [], "other_areas": [{"area": "kitchen", "name": "Kitchen"}],
             },
             {  # every Home Assistant floor is there, with nodes or not: a plan can wait for them
-                "floor": "upstairs", "name": "Upstairs", "nodes": [], "live_links": 0,
+                "floor": "upstairs", "name": "Upstairs", "nodes": [], "live_links": 0, "channel": None,
                 "room": None, "area": None, "confidence": None, "empty_samples": 0, "run": None,
                 "areas": [], "separation": [], "other_areas": [{"area": "bedroom", "name": "Bedroom"}],
             },
             {
-                "floor": None, "name": "Wisp", "nodes": [NODE_B], "live_links": 0,
+                "floor": None, "name": "Wisp", "nodes": [NODE_B], "live_links": 0, "channel": None,
                 "room": None, "area": None, "confidence": None, "empty_samples": 0, "run": None,
                 "areas": [], "separation": [],
                 "other_areas": [{"area": "garden", "name": "Garden"}, {"area": "office", "name": "Office"}],

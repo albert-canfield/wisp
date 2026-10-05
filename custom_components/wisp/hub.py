@@ -11,10 +11,14 @@ import socket
 import time
 from typing import Any
 
+import aiohttp
+
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.const import CONF_HOST, CONF_MAC, CONF_NAME
+from homeassistant.const import CONF_HOST, CONF_MAC, CONF_NAME, STATE_UNAVAILABLE, STATE_UNKNOWN
 from homeassistant.core import CALLBACK_TYPE, Event, HomeAssistant, callback
-from homeassistant.helpers import device_registry as dr
+from homeassistant.exceptions import HomeAssistantError
+from homeassistant.helpers import device_registry as dr, entity_registry as er
+from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.device_registry import CONNECTION_NETWORK_MAC, DeviceInfo
 from homeassistant.helpers.event import async_track_time_interval
 
@@ -442,8 +446,57 @@ class WispHub:
                 "online": node is not None and self.online(mac, now),
                 "placed": mac in layout,
                 "device_id": esphome_device_id(self.hass, mac),
+                "wifi": self.wifi(mac, now) if node else None,
             })
-        return {"nodes": nodes, **presence.panel(), "hive": _hive_summary(hive, now)}
+        panel = presence.panel()
+        wifi = {n["mac"]: n["wifi"] for n in nodes if n["wifi"]}
+        for floor in panel["floors"]:
+            fixed = {wifi[mac]["fixed"] for mac in floor["nodes"] if mac in wifi} - {None}
+            floor["channel"] = fixed.pop() if len(fixed) == 1 else None  # the floor's setting: None if mixed or unknown
+        return {"nodes": nodes, **panel, "hive": _hive_summary(hive, now)}
+
+    # WiFi channel
+
+    def wifi(self, mac: str, now: float) -> dict[str, Any]:
+        """The node's access point and signal (from its link reports), its channel and its Fixed
+        grid channel setting (0: automatic), from its ESPHome entities when Home Assistant has them."""
+        ap = rssi = None
+        for link in self.table.links.values():
+            if link.receiver == mac and link.kind == KIND_AP and now - link.updated <= LINK_TIMEOUT:
+                ap, rssi = link.transmitter, link.rssi
+
+        def value(domain: str, name: str) -> int | None:
+            entity_id = esphome_entity(self.hass, mac, domain, name)
+            state = self.hass.states.get(entity_id) if entity_id else None
+            if state is None or state.state in (STATE_UNKNOWN, STATE_UNAVAILABLE):
+                return None
+            try:
+                return int(float(state.state))
+            except ValueError:
+                return None
+
+        return {"ap": ap, "rssi": rssi, "channel": value("sensor", "Grid channel"), "fixed": value("number", CHANNEL_SETTING)}
+
+    async def async_set_channel(self, mac: str, channel: int) -> None:
+        """The node's Fixed grid channel (0: automatic): through its ESPHome entity when Home
+        Assistant has it, else on the node's own web page. The node moves at once."""
+        entity_id = esphome_entity(self.hass, mac, "number", CHANNEL_SETTING)
+        state = self.hass.states.get(entity_id) if entity_id else None
+        if state is not None and state.state != STATE_UNAVAILABLE:
+            await self.hass.services.async_call(
+                "number", "set_value", {"entity_id": entity_id, "value": channel}, blocking=True
+            )
+            return
+        node = self.nodes[mac]
+        url = f"http://{node.address or node.host}/number/Fixed%20grid%20channel/set?value={channel}"
+        try:
+            async with async_get_clientsession(self.hass).post(url, data=b"", timeout=aiohttp.ClientTimeout(total=5)) as r:
+                if r.status == 404:
+                    raise HomeAssistantError(f"{node.name} has no channel setting yet: update its firmware.")
+                if r.status >= 400:
+                    raise HomeAssistantError(f"{node.name} answered {r.status}.")
+        except (aiohttp.ClientError, TimeoutError) as err:
+            raise HomeAssistantError(f"{node.name} could not be reached: {err}") from err
 
     # Diagnostics
 
@@ -529,6 +582,22 @@ def node_devices(hass: HomeAssistant, mac: str) -> list[dr.DeviceEntry]:
         return dev_reg.async_get_devices(connections=connections)
     device = dev_reg.async_get_device(connections=connections)
     return [device] if device else []
+
+
+CHANNEL_SETTING = "Fixed grid channel"  # the node's setting, firmware/common/base.yaml
+
+
+def esphome_entity(hass: HomeAssistant, mac: str, domain: str, name: str) -> str | None:
+    """An entity of the node's ESPHome device by its name, if Home Assistant has the node."""
+    registry = er.async_get(hass)
+    key = "-" + name.casefold().replace(" ", "_")
+    for device in node_devices(hass, mac):
+        for entity in er.async_entries_for_device(registry, device.id):
+            if entity.platform == "esphome" and entity.domain == domain and (
+                (entity.original_name or "").casefold() == name.casefold() or entity.unique_id.endswith(key)
+            ):
+                return entity.entity_id
+    return None
 
 
 def esphome_device_id(hass: HomeAssistant, mac: str) -> str | None:
