@@ -107,7 +107,10 @@ class Grid:
             now = time.time()
             if now - self.last_sub >= 3:
                 for ip in self.ips:
-                    self.sock.sendto(build_subscribe(STREAM_LINK_REPORTS | STREAM_HIVE_REPORTS), (ip, PORT))
+                    try:
+                        self.sock.sendto(build_subscribe(STREAM_LINK_REPORTS | STREAM_HIVE_REPORTS), (ip, PORT))
+                    except OSError:  # this computer's network is down for a moment: try again later
+                        pass
                 self.last_sub = now
             try:
                 data, _ = self.sock.recvfrom(8192)
