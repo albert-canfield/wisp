@@ -4,6 +4,14 @@ calibrate_room:
       required: true
       selector:
         area:
+    mode:
+      default: moving
+      selector:
+        select:
+          options:
+            - moving
+            - still
+          translation_key: calibration_mode
     duration:
       default: 60
       selector:

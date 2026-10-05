@@ -3,6 +3,7 @@ import json
 import math
 import random
 import sys
+import zlib
 from pathlib import Path
 
 import pytest
@@ -29,6 +30,17 @@ ROOMS = {
     "office": {(AP, N2): 1.1, (N3, N2): 1.0, (N2, N3): 0.9, (N1, N2): 0.3},
     "hall": {(AP, N3): 1.1, (N1, N3): 1.0, (N3, N1): 0.9, (N2, N3): 0.3},
 }
+# Someone in a room weakens the same links, in dB: steadily while still, varying while walking
+DROPS = {
+    "kitchen": {(AP, N1): 3.0, (N2, N1): 2.5, (N1, N2): 2.5, (N3, N1): 1.0},
+    "office": {(AP, N2): 3.0, (N3, N2): 2.5, (N2, N3): 2.5, (N1, N2): 1.0},
+    "hall": {(AP, N3): 3.0, (N1, N3): 2.5, (N3, N1): 2.5, (N2, N3): 1.0},
+}
+
+
+def base_rssi(key: tuple[str, str]) -> float:
+    """Each link's signal with nobody there, -40 to -69 dBm."""
+    return -40.0 - zlib.crc32("".join(key).encode()) % 30
 
 
 class Floor:
@@ -48,6 +60,17 @@ class Floor:
                 mean = noise[key]
             sd = 0.25 if mean > 0.2 else 0.06
             out[key] = round(math.exp(self.rng.gauss(mean, sd)), 2)  # reports carry 2 decimals
+        return out
+
+    def signal(self, room: str | None = None, walking: bool = False, losses=None, shift=None) -> dict:
+        """RSSI per link in whole dB, as reported: weaker across the room someone is in (losses
+        instead, if given); shift: dB added per link, as when a node moved."""
+        out = {}
+        for key in self.links:
+            loss = (DROPS.get(room, {}) if losses is None else losses).get(key, 0.0)
+            if walking:
+                loss *= self.rng.uniform(0.3, 1.3)
+            out[key] = round(base_rssi(key) - loss + (shift or {}).get(key, 0.0) + self.rng.gauss(0, 0.8))
         return out
 
 

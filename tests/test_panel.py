@@ -112,18 +112,21 @@ async def test_snapshot_of_nodes_floors_and_areas(hass: HomeAssistant, udp: Fake
             {
                 "floor": "ground_floor", "name": "Ground floor", "nodes": [NODE_A], "live_links": 0,
                 "room": None, "area": None, "confidence": None, "empty_samples": 0, "run": None,
-                "areas": [{"area": "hall", "name": "Hall", "nodes": 1, "samples": 0, "presence": False, "confidence": None}],
-                "other_areas": [{"area": "kitchen", "name": "Kitchen"}],
+                "areas": [{
+                    "area": "hall", "name": "Hall", "nodes": 1, "samples": 0, "still_samples": 0, "presence": False,
+                    "still": False, "confidence": None,
+                }],
+                "separation": [], "other_areas": [{"area": "kitchen", "name": "Kitchen"}],
             },
             {  # every Home Assistant floor is there, with nodes or not: a plan can wait for them
                 "floor": "upstairs", "name": "Upstairs", "nodes": [], "live_links": 0,
                 "room": None, "area": None, "confidence": None, "empty_samples": 0, "run": None,
-                "areas": [], "other_areas": [{"area": "bedroom", "name": "Bedroom"}],
+                "areas": [], "separation": [], "other_areas": [{"area": "bedroom", "name": "Bedroom"}],
             },
             {
                 "floor": None, "name": "Wisp", "nodes": [NODE_B], "live_links": 0,
                 "room": None, "area": None, "confidence": None, "empty_samples": 0, "run": None,
-                "areas": [],
+                "areas": [], "separation": [],
                 "other_areas": [{"area": "garden", "name": "Garden"}, {"area": "office", "name": "Office"}],
             },
         ],
@@ -145,7 +148,8 @@ async def test_snapshot_of_nodes_floors_and_areas(hass: HomeAssistant, udp: Fake
     await house.seconds(5, "kitchen")
     ground_floor = entry.runtime_data.panel_snapshot()["floors"][0]
     assert ground_floor["run"] == {
-        "area": "kitchen", "name": "Kitchen", "starts_in": 0, "seconds_left": 20, "recorded": 5, "skipped": 0
+        "area": "kitchen", "name": "Kitchen", "mode": "moving", "starts_in": 0, "seconds_left": 20, "recorded": 5,
+        "skipped": 0,
     }
     assert [a["area"] for a in ground_floor["areas"]] == ["hall", "kitchen"] and ground_floor["other_areas"] == []
     await house.seconds(20, "kitchen")
@@ -153,7 +157,8 @@ async def test_snapshot_of_nodes_floors_and_areas(hass: HomeAssistant, udp: Fake
     assert ground_floor["run"] is None and ground_floor["live_links"] == 2  # Hall hears the access point and Office
     assert (ground_floor["room"], ground_floor["area"], ground_floor["confidence"]) == ("Kitchen", "kitchen", 1.0)
     assert ground_floor["areas"][1] == {
-        "area": "kitchen", "name": "Kitchen", "nodes": 0, "samples": 25, "presence": True, "confidence": 1.0
+        "area": "kitchen", "name": "Kitchen", "nodes": 0, "samples": 25, "still_samples": 0, "presence": True,
+        "still": False, "confidence": 1.0,
     }
 
     # Kitchen moves upstairs, where no node is yet: its samples go with it, shown there to clear
@@ -223,7 +228,7 @@ async def test_empty_floor_waits_for_everyone_to_leave(hass: HomeAssistant, udp:
     await hass.services.async_call(DOMAIN, "calibrate_empty", {"duration": 20, "delay": 30}, blocking=True)
     await hass.async_block_till_done()
     assert hub.panel_snapshot()["floors"][0]["run"] == {
-        "area": None, "name": None, "starts_in": 30, "seconds_left": 50, "recorded": 0, "skipped": 0
+        "area": None, "name": None, "mode": None, "starts_in": 30, "seconds_left": 50, "recorded": 0, "skipped": 0
     }
     calibration = hass.states.get(CALIBRATION)
     assert calibration.state == "recording" and calibration.attributes["seconds_left"] == 50

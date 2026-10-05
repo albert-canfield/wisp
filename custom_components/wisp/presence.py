@@ -1,7 +1,9 @@
 """Room presence in Home Assistant: floors from the area and floor registries, calibration runs kept
-in storage, and a decision per floor every second (the maths is in engine/rooms.py). The same tick
-also places one moving person per floor on the hive's layout (engine/floor.py), for the map, or on
-the floor's plan once it has one (plans.py): then every position on that floor is in plan metres.
+in storage, and a decision per floor every second (the maths is in engine/rooms.py), by motion or,
+while nobody moves, by signal. After a calibration, a check of how well each floor's classes tell
+apart. The same tick also places one moving person per floor on the hive's layout (engine/floor.py),
+for the map, or on the floor's plan once it has one (plans.py): then every position on that floor is
+in plan metres.
 
 Rooms are areas. A node's floor is the floor of its area; nodes and areas without a floor share one
 floor named after the hub. A link belongs to the floor of the node that receives it.
@@ -32,7 +34,7 @@ from .const import (
 )
 from .engine import Decision, HiveState, LinkKey, Rooms, Run, access_points
 from .engine.floor import FloorFix, FloorModel
-from .engine.rooms import HOLD
+from .engine.rooms import HOLD, SIGNAL_VAR_FLOOR, SIGNAL_WINDOW, STILL_FIT, Separation, separation
 from .plans import FloorPlans
 
 if TYPE_CHECKING:
@@ -41,6 +43,7 @@ if TYPE_CHECKING:
 _LOGGER = logging.getLogger(__name__)
 NONE = "none"  # the room while nobody moves, and the empty class among the probabilities
 EMPTY = "empty"  # the empty class in calibration
+STILL = "still"  # a room's still class in calibration, after its name
 
 
 def store_key(entry_id: str) -> str:
@@ -69,6 +72,9 @@ class RoomPresence:
         self.store: Store[dict[str, Any]] = Store(self.hass, STORE_VERSION, store_key(self.entry.entry_id))
         self.floors: dict[str, Floor] = {}
         self.live: dict[str, int] = {}  # live links per floor, at the latest second
+        self.separations: dict[str, list[Separation]] = {}  # per floor, since its latest calibration
+        self._separate: set[str] = set()  # floors whose calibration changed since their check
+        self._separating: set[str] = set()  # floors being checked
         self.models: dict[str, FloorModel] = {}  # position per floor, on the hive's layout or the plan
         self.fixes: dict[str, FloorFix] = {}
         self.plans = FloorPlans(self.hass, self.entry.entry_id)
@@ -122,13 +128,17 @@ class RoomPresence:
         area = ar.async_get(self.hass).async_get_area(area_id)
         return area.name if area else area_id
 
+    def all_areas(self) -> set[str]:
+        """Areas with samples, moving or still."""
+        return set(self.engine.areas) | set(self.engine.still)
+
     def floor_areas(self, floor: str) -> list[str]:
         """Calibrated areas on a floor."""
-        return sorted(area for area in self.engine.areas if self.area_floor(area) == floor)
+        return sorted(area for area in self.all_areas() if self.area_floor(area) == floor)
 
     def calibrated_areas(self) -> list[str]:
         """Calibrated areas Home Assistant still has."""
-        return sorted(area for area in self.engine.areas if self.area_floor(area) is not None)
+        return sorted(area for area in self.all_areas() if self.area_floor(area) is not None)
 
     def floors_in_use(self) -> list[str]:
         """Floors calibrated or calibrating: they have room entities. Others make none."""
@@ -151,9 +161,12 @@ class RoomPresence:
         changed = [(f.key, f.name) for f in ordered] != [(f.key, f.name) for f in self.floors.values()]
         self.floors = {f.key: f for f in ordered}
         for key in [key for key in self.engine.decisions if key not in self.floors]:
-            del self.engine.decisions[key]
+            self.engine.rest(key)
+        for key in [key for key in self.separations if key not in self.floors]:
+            del self.separations[key]
         self._async_raise_issues({key: f for key, f in self.floors.items() if len(f.nodes) < MIN_FLOOR_NODES})
         if changed or entities:
+            self._separate.update(self.floors)  # an area may have moved floor
             self._async_entities_changed()
 
     @callback
@@ -178,7 +191,7 @@ class RoomPresence:
     @callback
     def _async_area_updated(self, event: Event[ar.EventAreaRegistryUpdatedData]) -> None:
         area = event.data["area_id"]
-        if event.data["action"] == "remove" and area in self.engine.areas:
+        if event.data["action"] == "remove" and area in self.all_areas():
             self.engine.clear(area)  # the room is gone
             self._async_save()
         self.async_sync_floors(entities=True)
@@ -203,6 +216,10 @@ class RoomPresence:
         """The floor's live links that report motion."""
         return {key for key, link in self._live_links(floor, now) if link.motion}
 
+    def signal(self, floor: str, now: float) -> dict[LinkKey, int | None]:
+        """RSSI of the floor's live links (None without frames)."""
+        return {key: link.rssi for key, link in self._live_links(floor, now)}
+
     def _live_links(self, floor: str, now: float):
         nodes = self.floors[floor].nodes
         return (
@@ -220,7 +237,8 @@ class RoomPresence:
         for floor in self.floors:
             scores, moving = self.scores(floor, now), self.moving(floor, now)
             live[floor] = len(scores)
-            ended.append(self.engine.step(floor, self.floor_areas(floor), scores, now, bool(moving)))
+            signal = self.signal(floor, now)
+            ended.append(self.engine.step(floor, self.floor_areas(floor), scores, now, bool(moving), signal))
             model = self._layout(floor, hive)
             if (fix := model.update(scores, now, moving, self.sure_room(floor))) is not None:
                 self.fixes[floor] = fix
@@ -234,6 +252,7 @@ class RoomPresence:
             if any(run and run.recorded for run in ended):
                 self._async_save()
             self._async_entities_changed()  # an area's first calibration brings its presence entity
+        self._async_separate_due()
         self._async_notify()
 
     # Floor plans
@@ -328,9 +347,12 @@ class RoomPresence:
     # Calibration
 
     @callback
-    def async_calibrate(self, floor: str, area: str | None, duration: float, delay: float = 0.0) -> None:
-        """Record for an area, or the floor's empty class (None), after delay. Replaces the floor's run."""
-        previous = self.engine.start(floor, area, self.hub.clock(), duration, delay)
+    def async_calibrate(
+        self, floor: str, area: str | None, duration: float, delay: float = 0.0, still: bool = False
+    ) -> None:
+        """Record for an area (moving, or still), or the floor's empty class (None), after delay.
+        Replaces the floor's run."""
+        previous = self.engine.start(floor, area, self.hub.clock(), duration, delay, still)
         if previous and previous.recorded:
             self._async_save()
         self._async_entities_changed()  # the first run on a floor brings its sensors
@@ -357,9 +379,57 @@ class RoomPresence:
 
     @callback
     def _async_save(self) -> None:
+        self._separate.update(self.floors)
         self.entry.async_create_task(
             self.hass, self.store.async_save(self.engine.to_dict()), "wisp save room calibration"
         )
+
+    @callback
+    def _async_separate_due(self) -> None:
+        """Check how well a floor's classes tell apart once its calibration changed and nothing
+        records on it, off the event loop: up to 60 samples per class, against every class."""
+        for floor in list(self._separate):
+            if floor not in self.floors:
+                self._separate.discard(floor)
+            elif floor not in self.engine.runs and floor not in self._separating:
+                self._separate.discard(floor)
+                self._separating.add(floor)
+                self.entry.async_create_task(self.hass, self._async_separate(floor), "wisp room separation")
+
+    async def _async_separate(self, floor: str) -> None:
+        classes = self.engine.classes(floor, self.floor_areas(floor))
+        try:
+            result = await self.hass.async_add_executor_job(separation, classes, self.engine.min_samples)
+        finally:
+            self._separating.discard(floor)
+        if floor in self.floors:
+            self.separations[floor] = result
+            self._async_notify()
+
+    def separation_view(self, floor: str) -> list[dict[str, Any]]:
+        """Per class of the floor (empty, or an area moving or still): the share of its samples taken
+        for it, and the class most of the others were taken for."""
+
+        def name(area: str | None) -> str | None:
+            return None if area is None else self.area_name(area)
+
+        out = []
+        for s in self.separations.get(floor, ()):
+            kind, area = s.cls
+            out.append({
+                "area": area,
+                "name": name(area),
+                "kind": kind,
+                "samples": s.samples,
+                "correct": round(s.correct, 2),
+                "confused_with": None if s.confused_with is None else {
+                    "area": s.confused_with[1],
+                    "name": name(s.confused_with[1]),
+                    "kind": s.confused_with[0],
+                    "share": round(s.confused, 2),
+                },
+            })
+        return out
 
     # Entities
 
@@ -418,11 +488,23 @@ class RoomPresence:
         }
 
     def samples(self, floor: str) -> dict[str, int]:
-        """Calibration samples per class on a floor, by area name."""
-        out = {self.area_name(area): len(self.engine.areas[area]) for area in self.floor_areas(floor)}
-        if floor in self.engine.empty:
-            out[EMPTY] = len(self.engine.empty[floor])
+        """Calibration samples per class on a floor, by area name (still classes: name and still)."""
+        engine = self.engine
+        out = {}
+        for area in self.floor_areas(floor):
+            if area in engine.areas:
+                out[self.area_name(area)] = len(engine.areas[area])
+            if area in engine.still:
+                out[f"{self.area_name(area)} {STILL}"] = len(engine.still[area])
+        if floor in engine.empty:
+            out[EMPTY] = len(engine.empty[floor])
         return out
+
+    def run_name(self, run: Run) -> str:
+        """What a run records: EMPTY, an area's name, or its name and still."""
+        if run.area is None:
+            return EMPTY
+        return f"{self.area_name(run.area)} {STILL}" if run.still else self.area_name(run.area)
 
     def seconds_left(self, run: Run) -> int:
         return max(0, math.ceil(run.ends - self.hub.clock()))
@@ -536,7 +618,9 @@ class RoomPresence:
                     "name": self.area_name(area),
                     "nodes": nodes_in.get(area, 0),
                     "samples": len(engine.areas.get(area, ())),
+                    "still_samples": len(engine.still.get(area, ())),
                     "presence": win is not None,
+                    "still": engine.still_present(area, now),
                     "confidence": None if win is None else round(win, 2),
                 })
             floors.append({
@@ -551,12 +635,14 @@ class RoomPresence:
                 "run": None if run is None else {
                     "area": run.area,
                     "name": None if run.area is None else self.area_name(run.area),
+                    "mode": None if run.area is None else STILL if run.still else "moving",
                     "starts_in": self.starts_in(run),
                     "seconds_left": self.seconds_left(run),
                     "recorded": run.recorded,
                     "skipped": run.skipped,
                 },
                 "areas": sorted(areas, key=lambda a: a["name"].casefold()),
+                "separation": self.separation_view(key),
                 "other_areas": [
                     {"area": area.id, "name": area.name}
                     for area in sorted(all_areas, key=lambda a: a.name.casefold())
@@ -565,8 +651,12 @@ class RoomPresence:
                 **(self.plan_view(key) if key in self.plans.floors else {}),
             })
         elsewhere = [
-            {"area": area, "name": self.area_name(area), "samples": len(samples)}
-            for area, samples in engine.areas.items()
+            {
+                "area": area,
+                "name": self.area_name(area),
+                "samples": len(engine.areas.get(area, ())) + len(engine.still.get(area, ())),
+            }
+            for area in self.all_areas()
             if self.area_floor(area) not in shown_floors
         ]
         return {
@@ -584,7 +674,7 @@ class RoomPresence:
         now = self.hub.clock()
 
         def links(samples) -> int:
-            return len({key for vector in samples for key in vector})
+            return len({key[:2] for vector in samples for key in vector})
 
         def decision(d: Decision | None) -> dict[str, Any] | None:
             if d is None:
@@ -614,6 +704,9 @@ class RoomPresence:
                     "skipped": run.skipped,
                 } if run else None,
                 "decision": decision(engine.decisions.get(key)),
+                "still": decision(engine.still_decisions.get(key)),
+                "still_streak": engine.streaks.get(key, (None, 0))[1],
+                "separation": self.separation_view(key),
             })
         positions = {
             key or "": {
@@ -635,17 +728,23 @@ class RoomPresence:
                 "min_samples": engine.min_samples,
                 "sample_cap": engine.cap,
                 "link_age_s": ROOM_LINK_AGE,
+                "still_s": engine.still_seconds,
+                "still_fit": STILL_FIT,
+                "signal_window_s": SIGNAL_WINDOW,
+                "signal_var_floor": SIGNAL_VAR_FLOOR,
             },
             "floors": floors,
             "areas": {
                 area: {
                     "name": self.area_name(area),
                     "floor": self.area_floor(area),
-                    "samples": len(samples),
-                    "links": links(samples),
+                    "samples": len(engine.areas.get(area, ())),
+                    "links": links(engine.areas.get(area, ())),
+                    "still_samples": len(engine.still.get(area, ())),
                     "presence": engine.presence(area, now),
+                    "still": engine.still_present(area, now),
                 }
-                for area, samples in sorted(engine.areas.items())
+                for area in sorted(self.all_areas())
             },
             "empty": [
                 {"floor": floor or None, "samples": len(samples), "links": links(samples)}

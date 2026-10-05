@@ -13,7 +13,7 @@ from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 from .engine import LinkKey
 from .entity import WispLinkEntity, WispRoomEntity, async_follow_rooms, room_unique_id
 from .hub import WispConfigEntry, WispHub
-from .presence import EMPTY, floor_scope
+from .presence import floor_scope
 
 
 async def async_setup_entry(
@@ -141,7 +141,8 @@ class Room(FloorSensor):
 
 
 class Calibration(FloorSensor):
-    """Idle, or recording a room (or the empty floor) with the seconds left; samples per class."""
+    """Idle, or recording a room (moving or still) or the empty floor, with the seconds left;
+    samples per class."""
 
     key = "calibration"
     _attr_device_class = SensorDeviceClass.ENUM
@@ -158,7 +159,7 @@ class Calibration(FloorSensor):
         presence = self.presence
         run = presence.engine.runs.get(self.floor)
         attrs: dict[str, Any] = {
-            "recording": None if run is None else EMPTY if run.area is None else presence.area_name(run.area),
+            "recording": None if run is None else presence.run_name(run),
             "seconds_left": None if run is None else presence.seconds_left(run),
             "samples": presence.samples(self.floor),
         }

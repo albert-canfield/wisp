@@ -35,6 +35,10 @@ SCORES = {
     None: ((104, 102), (103, 106)),
     "restless": ((192, 185), (104, 102)),  # the Kitchen's links busy, all under the motion threshold
 }
+# RSSI with nobody there, same order, and how much weaker the links arrive with someone in a room,
+# walking or sitting still: a body near a link absorbs some of it
+RSSI = ((-50, -60), (-52, -61))
+DROPS = {"kitchen": ((3, 2), (0, 0)), "office": ((0, 0), (3, 2))}
 
 
 def moving(score: int) -> int:
@@ -53,18 +57,25 @@ class House:
         self.entry = entry
         self.clock = entry.runtime_data.clock = FakeClock()
 
-    async def seconds(self, n: int = 1, room: str | None = None, step: float = 1.0) -> None:
-        """n ticks of the rooms, with the hub's clock moving step seconds each."""
+    async def seconds(
+        self, n: int = 1, room: str | None = None, step: float = 1.0, sitting: str | None = None
+    ) -> None:
+        """n ticks of the rooms, with the hub's clock moving step seconds each: someone moving in
+        room, or sitting still in sitting (quiet scores, weaker links)."""
         for _ in range(n):
             self.seq += 1
-            jitter = (self.seq * 7) % 11 - 5
+            jitter, noise = (self.seq * 7) % 11 - 5, self.seq % 3 - 1
             (a_ap, a_b), (b_ap, b_a) = SCORES[room]
             a_ap, a_b, b_ap, b_a = a_ap + jitter, a_b - jitter, b_ap - jitter, b_a + jitter
+            (da_ap, da_b), (db_ap, db_a) = DROPS.get(sitting or room, ((0, 0), (0, 0)))
+            (ra_ap, ra_b), (rb_ap, rb_a) = RSSI
             self.udp.receive(encode_report(self.seq, NODE_A, [
-                (AP, 0, -50, a_ap, 200, 20, moving(a_ap)), (NODE_B, 1, -60, a_b, 150, 10, moving(a_b)),
+                (AP, 0, ra_ap - da_ap + noise, a_ap, 200, 20, moving(a_ap)),
+                (NODE_B, 1, ra_b - da_b - noise, a_b, 150, 10, moving(a_b)),
             ], uptime=60), IP_A)
             self.udp.receive(encode_report(self.seq, NODE_B, [
-                (AP, 0, -52, b_ap, 200, 20, moving(b_ap)), (NODE_A, 1, -61, b_a, 150, 10, moving(b_a)),
+                (AP, 0, rb_ap - db_ap - noise, b_ap, 200, 20, moving(b_ap)),
+                (NODE_A, 1, rb_a - db_a + noise, b_a, 150, 10, moving(b_a)),
             ], uptime=60), IP_B)
             self.clock.now += step
             await fire(self.hass, 1)
@@ -167,6 +178,82 @@ async def test_calibrate_rooms_then_presence(hass: HomeAssistant, house: House, 
     assert registry.async_get(CALIBRATION).entity_category == "diagnostic"
 
 
+async def test_still_presence_from_the_signal(hass: HomeAssistant, house: House) -> None:
+    """Someone sits down in the kitchen: no link reports motion, the weaker signal keeps the room on."""
+    await house.calibrate("kitchen")
+    await house.calibrate("office")
+    await house.calibrate(None)
+    await house.seconds(1, "kitchen")
+    kitchen = hass.states.get(KITCHEN)
+    assert kitchen.state == "on" and kitchen.attributes["still"] is False
+    await house.seconds(120, sitting="kitchen")
+    kitchen = hass.states.get(KITCHEN)
+    assert kitchen.state == "on" and kitchen.attributes["still"] is True and kitchen.attributes["confidence"] >= 0.6
+    assert (state(hass, ROOM), state(hass, OFFICE_PRESENCE)) == ("none", "off")  # nobody moves
+    rooms = (await async_get_config_entry_diagnostics(hass, house.entry))["rooms"]
+    (floor,) = rooms["floors"]
+    assert floor["decision"]["room"] is None and floor["still"]["room"] == "kitchen" and floor["still_streak"] >= 110
+    assert sorted(floor["still"]["probabilities"]) == ["kitchen", "none", "office"]
+    assert rooms["areas"]["kitchen"]["still"] is True and rooms["settings"]["still_s"] == 10
+
+    # Leaving: the signal comes back and the hold runs out, as after motion
+    await house.seconds(55, None)
+    assert state(hass, KITCHEN) == "on"
+    await house.seconds(10, None)
+    kitchen = hass.states.get(KITCHEN)
+    assert kitchen.state == "off" and kitchen.attributes == kitchen.attributes | {"confidence": None, "still": False}
+
+
+async def test_still_calibration_and_separation(hass: HomeAssistant, house: House, hass_storage: dict) -> None:
+    hub = house.entry.runtime_data
+    await hass.services.async_call(
+        DOMAIN, "calibrate_room", {"area": "office", "mode": "still", "duration": 25}, blocking=True
+    )
+    await hass.async_block_till_done()
+    assert hass.states.get(CALIBRATION).attributes["recording"] == "Office still"
+    assert hub.panel_snapshot()["floors"][0]["run"]["mode"] == "still"
+    await house.seconds(25, sitting="office")
+    assert hass.states.get(CALIBRATION).attributes["samples"] == {"Office still": 25}
+    assert state(hass, OFFICE_PRESENCE) == "off"  # its own entity; without an empty floor, no still presence
+    stored = store(hass_storage, house.entry)["data"]
+    assert stored["areas"] == {} and len(stored["still"]["office"]["signal"]) == 25
+
+    await house.calibrate("kitchen")
+    await hass.services.async_call(
+        DOMAIN, "calibrate_room", {"area": "kitchen", "mode": "still", "duration": 25}, blocking=True
+    )
+    await house.seconds(25, sitting="kitchen")
+    await house.calibrate(None)
+    floor = hub.panel_snapshot()["floors"][0]
+    kitchen = next(a for a in floor["areas"] if a["area"] == "kitchen")
+    assert (kitchen["samples"], kitchen["still_samples"]) == (25, 25)
+    separation = {(s["area"], s["kind"]): s for s in floor["separation"]}
+    assert set(separation) == {(None, "empty"), ("kitchen", "moving"), ("kitchen", "still"), ("office", "still")}
+    assert all(s["correct"] >= 0.9 and s["samples"] == 25 for s in separation.values()), separation
+    assert separation[("office", "still")]["name"] == "Office"
+
+    # Sitting in the office: its still class tells it
+    await house.seconds(61, None)
+    await house.seconds(30, sitting="office")
+    office = hass.states.get(OFFICE_PRESENCE)
+    assert office.state == "on" and office.attributes["still"] is True and state(hass, KITCHEN) == "off"
+
+    # An office still calibration made while sitting in the kitchen looks like the kitchen's
+    await hass.services.async_call(DOMAIN, "clear_calibration", {"area": "office"}, blocking=True)
+    await hass.services.async_call(
+        DOMAIN, "calibrate_room", {"area": "office", "mode": "still", "duration": 25}, blocking=True
+    )
+    await house.seconds(25, sitting="kitchen")
+    office = next(s for s in hub.panel_snapshot()["floors"][0]["separation"] if s["area"] == "office")
+    assert office["correct"] < 0.8 and office["confused_with"] == {
+        "area": "kitchen", "name": "Kitchen", "kind": "still", "share": office["confused_with"]["share"]
+    }
+    diag = await async_get_config_entry_diagnostics(hass, house.entry)
+    assert diag["rooms"]["floors"][0]["separation"] == hub.panel_snapshot()["floors"][0]["separation"]
+    with pytest.raises(Exception, match="mode"):
+        await hass.services.async_call(DOMAIN, "calibrate_room", {"area": "kitchen", "mode": "lying"}, blocking=True)
+
+
 async def test_restless_links_make_no_presence(hass: HomeAssistant, house: House) -> None:
     """Links below the nodes' motion threshold (no motion flag) are nobody, however they look."""
     await house.calibrate("kitchen")
@@ -202,10 +289,11 @@ async def test_calibration_survives_a_restart(hass: HomeAssistant, house: House,
     await house.calibrate("office")
     entry = house.entry
     stored = store(hass_storage, entry)
-    assert stored["version"] == 1 and sorted(stored["data"]) == ["areas", "empty"]
+    assert stored["version"] == 1 and sorted(stored["data"]) == ["areas", "empty", "still"]
     kitchen = stored["data"]["areas"]["kitchen"]
     assert kitchen["links"] == [f"{NODE_A}>{NODE_B}", f"{NODE_B}>{NODE_A}", f"{AP}>{NODE_A}", f"{AP}>{NODE_B}"]
     assert len(kitchen["samples"]) == 25 and len(kitchen["samples"][0]) == 4
+    assert len(kitchen["signal"]) == 25 and -65 < kitchen["signal"][-1][0] < -55  # RSSI, the same links
 
     assert await hass.config_entries.async_unload(entry.entry_id)
     await hass.async_block_till_done()
@@ -286,7 +374,7 @@ async def test_clear_calibration(hass: HomeAssistant, house: House, hass_storage
 
     await hass.services.async_call(DOMAIN, "clear_calibration", {}, blocking=True)
     await hass.async_block_till_done()
-    assert store(hass_storage, house.entry)["data"] == {"areas": {}, "empty": {}}
+    assert store(hass_storage, house.entry)["data"] == {"areas": {}, "empty": {}, "still": {}}
     for entity_id in (ROOM, CALIBRATION, KITCHEN):  # room presence no longer in use
         assert hass.states.get(entity_id) is None and er.async_get(hass).async_get(entity_id) is None
 
@@ -346,7 +434,8 @@ async def test_floors_follow_node_areas(hass: HomeAssistant, udp: FakeUdp, hass_
     rooms = diag["rooms"]
     assert rooms["settings"]["hold_s"] == 60 and rooms["settings"]["quiet"] == 1.5
     assert rooms["areas"]["kitchen"] == {
-        "name": "Kitchen", "floor": "upstairs", "samples": 25, "links": 2, "presence": rooms["areas"]["kitchen"]["presence"]
+        "name": "Kitchen", "floor": "upstairs", "samples": 25, "links": 2, "still_samples": 0,
+        "presence": rooms["areas"]["kitchen"]["presence"], "still": False,
     }
     assert rooms["empty"] == [
         {"floor": "ground_floor", "samples": 25, "links": 2}, {"floor": "upstairs", "samples": 50, "links": 2}

@@ -136,7 +136,7 @@
           "presence_hold": "Presence hold"
         },
         "data_description": {
-          "presence_hold": "Seconds a room stays occupied after Wisp last saw someone move in it. Someone sitting still makes little signal."
+          "presence_hold": "Seconds a room stays occupied after Wisp last found someone in it: moving, or, once the empty floor is calibrated, sitting still (a body weakens the signal of the links near it)."
         },
         "description": "Floor plans, node placement and room calibration are in the **Wisp** panel in the sidebar (or Open on the Wisp hub device). Each node's motion threshold is a setting on its ESPHome device."
       }
@@ -168,11 +168,15 @@
   "services": {
     "calibrate_room": {
       "name": "Calibrate room",
-      "description": "Records how the links of the room's floor react while you walk around in the room. Start it in the room and keep moving until it ends; the floor's calibration sensor counts down. Run it again to add samples.",
+      "description": "Records how the links of the room's floor react while you are in the room: walking around in it, or sitting still where you usually sit. Start it in the room and keep moving (or still) until it ends; the floor's calibration sensor counts down. Run it again to add samples.",
       "fields": {
         "area": {
           "name": "Area",
           "description": "The room to calibrate."
+        },
+        "mode": {
+          "name": "Mode",
+          "description": "Moving: walk around the room. Still: sit or stand still in it, so presence holds while nobody moves."
         },
         "duration": {
           "name": "Duration",
@@ -182,7 +186,7 @@
     },
     "calibrate_empty": {
       "name": "Calibrate empty floor",
-      "description": "Records the floor with nobody moving on it, so a fan or an access point changing power is not taken for a person. Leave the floor or keep still until it ends.",
+      "description": "Records the empty floor: how strong each link's signal is with nobody there, and its quiet, so a fan or an access point changing power is not taken for a person. Leave the floor until it ends: someone keeping still on it also weakens the signal.",
       "fields": {
         "floor": {
           "name": "Floor",
@@ -216,6 +220,14 @@
           "name": "Floor",
           "description": "Optional. Without it, every recording stops."
         }
+      }
+    }
+  },
+  "selector": {
+    "calibration_mode": {
+      "options": {
+        "moving": "Moving",
+        "still": "Still"
       }
     }
   },

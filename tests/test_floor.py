@@ -171,3 +171,19 @@ def test_unsure_fits_and_single_seconds_show_nobody() -> None:
     floor.min_quality = 1.01  # nothing explains the pattern that well: unsure fits count for nothing
     for t in range(2, 8):
         assert floor.update(busy, now=float(t)) is None
+
+
+def test_a_link_alone_is_not_someone() -> None:
+    """A link reporting motion with no other link backing it up (a noisy link) places nobody;
+    its reverse direction, or any other link, within 2 s makes it count."""
+    floor = FloorModel(min_streak=1, still_min=1)
+    floor.set_layout(hive_state())
+    positions = {**NODES, AP[0]: AP[1]}
+    links = [(t, r) for t in positions for r in NODES if t != r]
+    lonely = ("aa:00", "bb:00")
+    scores = {k: (3.0 if k == lonely else 1.0) for k in links}
+    for t in range(5):
+        assert floor.update(scores, now=float(t), moving={lonely}) is None
+    scores[("bb:00", "aa:00")] = 3.0  # the reverse direction agrees a second later
+    assert floor.update(scores, now=5.0, moving={lonely}) is None
+    assert floor.update(scores, now=6.0, moving={("bb:00", "aa:00")}) is not None

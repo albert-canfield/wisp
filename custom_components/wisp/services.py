@@ -1,5 +1,5 @@
-"""Services: calibrate a room or the empty floor, clear calibration. Progress shows on each floor's
-calibration sensor."""
+"""Services: calibrate a room (someone moving in it, or still) or the empty floor, clear calibration.
+Progress shows on each floor's calibration sensor."""
 from __future__ import annotations
 
 import voluptuous as vol
@@ -18,6 +18,8 @@ SERVICE_STOP_CALIBRATION = "stop_calibration"
 
 DURATION = vol.All(vol.Coerce(int), vol.Range(min=10, max=600))  # seconds; 600 samples are kept per room
 DELAY = vol.All(vol.Coerce(int), vol.Range(min=0, max=300))  # seconds to leave the floor first
+CONF_MODE = "mode"  # what a room records: someone walking around in it, or someone sitting still
+MODES = ("moving", "still")
 
 
 @callback
@@ -28,6 +30,7 @@ def async_register(hass: HomeAssistant) -> None:
         _async_calibrate_room,
         vol.Schema({
             vol.Required(CONF_AREA): cv.string,
+            vol.Optional(CONF_MODE, default=MODES[0]): vol.In(MODES),
             vol.Optional(CONF_DURATION, default=CALIBRATION_SECONDS): DURATION,
         }),
     )
@@ -89,7 +92,7 @@ async def _async_calibrate_room(call: ServiceCall) -> None:
             raise _error("area_without_floor", area=area.name)
         entry = fr.async_get(call.hass).async_get_floor(floor)
         raise _error("no_nodes_on_floor", area=area.name, floor=entry.name if entry else floor)
-    hub.presence.async_calibrate(floor, area.id, call.data[CONF_DURATION])
+    hub.presence.async_calibrate(floor, area.id, call.data[CONF_DURATION], still=call.data[CONF_MODE] == "still")
 
 
 async def _async_calibrate_empty(call: ServiceCall) -> None:

@@ -14,6 +14,11 @@ Few links leave the best fit coarse, and WiFi bounces off walls, so links away f
 too. So a fit that explains little of the pattern (min_quality) is dropped, and with rooms drawn
 on the plan a fit is kept inside the house, and inside the room that room presence is sure of.
 
+A link reporting motion counts only when another link, often its own reverse direction, also
+reports motion within corroborate seconds: on real recordings a long link through walls flagged
+motion alone 22 to 29% of the time, against 2 to 6% for the others, and each lone flag became
+someone along it on the map.
+
 Someone sitting and working makes short, scattered disturbances on the same few links, each one
 a fit somewhere along them: drawn as they come, that is someone darting about. So fits are kept
 for a while and read together. Walking: fits in most of the last 6 s, and the centre of their
@@ -75,7 +80,9 @@ class FloorModel:
     walk_span: float = 6.0  # seconds of fits that tell walking: their older half against the newer
     walk_min: int = 4  # fits in the last walk_span seconds for walking
     walk_travel: float = 1.0  # metres between the centres of the two halves, for walking
+    corroborate: float = 2.0  # seconds within which another link must also report motion
     fits: deque = field(default_factory=deque, init=False)  # (time, x, y, quality)
+    _flags: deque = field(default_factory=deque, init=False)  # (time, links reporting motion)
     walking: bool = field(default=False, init=False)
     rooms: dict[str, list[Rect]] = field(default_factory=dict, init=False)  # on a plan, by area
     streak: int = field(default=0, init=False)
@@ -143,14 +150,24 @@ class FloorModel:
             self._locator = Locator(self.positions, usable, width=self.width) if len(usable) >= 2 else None
         if self._locator is None:
             return self._read(None, now)
-        if moving is not None and not any(k in moving for k in usable):
-            return self._read(None, now)
+        if moving is not None:
+            moving = self._corroborated(moving, now)
+            if not any(k in moving for k in usable):
+                return self._read(None, now)
         values = {k: math.log(max(scores[k], 1.0)) for k in usable}
         spot = self._locator.locate(values, self.min_disturbance)
         raw: tuple[float, float, float] | None = None
         if spot is not None and spot.contrast >= self.min_quality:
             raw = (*self._keep_in(spot.x, spot.y, room), spot.contrast)
         return self._read(raw, now)
+
+    def _corroborated(self, moving: Collection[LinkKey], now: float) -> set[LinkKey]:
+        """The links reporting motion that another link backs up within corroborate seconds."""
+        self._flags.append((now, frozenset(moving)))
+        while self._flags and now - self._flags[0][0] > self.corroborate:
+            self._flags.popleft()
+        seen = set().union(*(links for _, links in self._flags))
+        return {k for k in moving if len(seen - {k}) >= 1}
 
     def _keep_in(self, x: float, y: float, room: str | None = None) -> Point:
         """On a plan: inside it, and with rooms drawn inside the house (the sure room first)."""

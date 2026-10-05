@@ -1,6 +1,8 @@
 # Changelog
 
-## 0.1.0 (unreleased)
+## 0.1.1 (unreleased)
+Versions count up with each round of changes until the first release.
+
 First working version: the grid, the hive and motion per link, with the Home Assistant integration and the map card.
 
 ### Nodes (`wisp-node`)
@@ -11,6 +13,7 @@ First working version: the grid, the hive and motion per link, with the Home Ass
 - Motion per link: the shape of the signal across 51 subcarriers, a running spread, a quiet baseline that settles for 20 s and then learns quiet fast and noise slowly; a score where 1 means as quiet as usual, and motion with hysteresis (on at the threshold, default 2, off halfway back to a quiet 1). The link to the access point is also on the node as "AP motion" and "AP motion score". The threshold is a setting on each node ("Motion threshold", 1.2 to 6), changed live from Home Assistant and kept across reboots.
 - The hive: every node keeps the latest row of every node (relayed, so nodes out of range of each other still learn them), agrees on a hash, and solves the same relative layout of the nodes.
 - UDP streams for subscribers: raw CSI (developer switch), link reports 5 times a second, hive reports every 5 s. See docs/PROTOCOL.md.
+- Fixed grid channel, a setting on each node (0 = automatic): changed from Home Assistant, the node moves to that channel and the access point on it at once, so a floor can use its own access point, without new firmware.
 - The core task runs under the task watchdog. Optional Wi-Fi FTM probe towards the access point.
 - Hardened for months of running (from two audits, each fix with a host test where it can have one):
   - Hive: relayed ages round up, so a departed node's row really expires after a day (relays had kept it young); a full hive makes room by dropping a missing node's row (a new node was refused before); the own row is reserved; a stale copy of the own row at the same version also makes the node move on; a duplicate MAC is rate limited and logged; relays older than a day are refused.
@@ -33,6 +36,8 @@ First working version: the grid, the hive and motion per link, with the Home Ass
 - The hub has its own device from the start, with Open leading to the Wisp panel, and two sensors: Nodes online (the offline ones by name) and Hive in sync. After setup, Home Assistant says where the panel is; the options and the "already set up" message say so too.
 - An access point heard by nodes standing on a line keeps its side of that line on the map (both sides fit the readings equally, and it used to flip).
 - The map shows one walker: links redden while they see motion, and a trail of footprints follows where someone moves, with a halo that widens when Wisp is less sure and fades out when they stop (it used to draw footprints along every busy link, which looked like several people). Turn and mirror work on floor plans too.
+- Still presence: calibration also records each link's signal strength (averaged over 5 s). Each room can be calibrated moving (walk around) or still (sit still; service calibrate_room with mode still). When no link reports motion, a still classifier compares the floor's empty class with every room's still class over all links, quiet ones included; a room winning for 10 s in a row keeps or turns on its presence (attribute still). After a calibration, Wisp checks how well the floor's classes can be told apart from their own samples (diagnostics and panel data: separation).
+- A link's motion counts only when another link, often its own reverse direction, also reports motion within 2 s. On real recordings the long link through walls flagged motion alone 22 to 29% of the time against 2 to 6% for the others; with the check, the map showed someone 77% of an occupied afternoon instead of 96%, and walking 18% instead of 28%.
 - Still or walking: someone sitting and working makes short, scattered disturbances on the same few links, which were drawn as someone darting about the map. The engine now reads the last fits together: walking when fits come most seconds and their centre travels a metre or more within 6 s (footsteps follow the track); present and still otherwise, at the quality-weighted centre of the last 20 s of fits, with no footsteps. The map feed's people carry walking.
 - Rooms on the plan: per Home Assistant area, rectangles drawn on the floor plan (websocket wisp/floor/set_rooms). Someone moving is kept inside the house, and inside the room room presence is sure of. A fit that explains little of the link pattern is dropped, and someone shows only after two seconds of fits in a row.
 - Floors and areas from Home Assistant: a node's area is its device's area (set in the panel, on the device, or in Change node), and its floor follows; the panel lists every Home Assistant floor, with nodes or not, so a plan can be added before its nodes.

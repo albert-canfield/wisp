@@ -11,6 +11,7 @@ from homeassistant.helpers import area_registry as ar
 from homeassistant.setup import async_setup_component
 
 from custom_components.wisp import _asset_versions
+from custom_components.wisp.engine.floor import FloorModel
 from custom_components.wisp.engine.tracking import rssi_to_metres
 
 from .conftest import (
@@ -58,7 +59,9 @@ async def next_map(client, sub: int) -> dict:
     return msg["event"]
 
 
-async def test_snapshot_then_changes_at_most_once_a_second(hass: HomeAssistant, udp: FakeUdp, hass_ws_client) -> None:
+async def test_snapshot_then_changes_at_most_once_a_second(hass: HomeAssistant, udp: FakeUdp, hass_ws_client, monkeypatch) -> None:
+    # One link's motion here; the floor model's cross-check (another link within 2 s) has its own tests
+    monkeypatch.setattr(FloorModel, "_corroborated", lambda self, moving, now: set(moving))
     entry = await setup_hub(hass, HALL, OFFICE)
     clock = entry.runtime_data.clock = FakeClock()
     client = await hass_ws_client(hass)
