@@ -144,8 +144,6 @@ function projectPlan(map, floor) {
   return { pts, frame, h: Math.round(frame.y + frame.h + PLAN_PAD + (loose.length ? 30 : 0)) };
 }
 
-/* The plan's edge and a scale bar of a round number of metres. The image itself lies under the
-   drawing as an img that stays across redraws, so it does not load again each second. */
 /* A plan without an image: a grid of whole metres (or halves, or a few), about 14 px or more apart. */
 function gridPath(f) {
   const step = [0.5, 1, 2, 5, 10].find((v) => v * f.s >= 14) ?? 10;
@@ -155,6 +153,9 @@ function gridPath(f) {
   return d;
 }
 
+/* The plan's edge, its grid without an image, and a scale bar of a round number of metres. The
+   image itself lies under the drawing as an img that stays across redraws, so it does not load
+   again each second. */
 function planLayer(f, grid = false) {
   const m = SCALES.find((v) => v * f.s >= 36) ?? SCALES[SCALES.length - 1];
   const x = f.x + 10, y = f.y + f.h - 10, len = m * f.s;

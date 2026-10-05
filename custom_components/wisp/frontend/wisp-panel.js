@@ -163,7 +163,7 @@ class WispPanel extends HTMLElement {
               <div class="head"><h2 id="wisp-nodes">Nodes</h2><span class="note nodes-note"></span></div>
               <div class="nodes"></div>
               <div class="foot">
-                <p>Set the area each node stands in under Wisp, the node, Change node: its floor comes with it.</p>
+                <p>A node's floor comes with its area. Areas and floors are set up in Home Assistant's settings.</p>
                 <button data-act="settings">Wisp settings</button>
               </div>
             </section>
@@ -360,6 +360,7 @@ class WispPanel extends HTMLElement {
   /* A node's area, set on its devices as anywhere in Home Assistant; its floor follows. The choice
      shows at once and stays until the next update brings it. */
   async _setNodeArea(mac, area) {
+    const refocus = this.shadowRoot.activeElement?.dataset.mac === mac; // the redraw takes the focus from it
     this._areaChoice = { mac, area, busy: true };
     this._areaFailure = null;
     this._render();
@@ -371,6 +372,7 @@ class WispPanel extends HTMLElement {
       this._areaFailure = { mac, message: err?.message || "Wisp could not set the area." };
     }
     this._render();
+    if (refocus && !this.shadowRoot.activeElement) this.shadowRoot.querySelector(`select[data-act=node-area][data-mac="${CSS.escape(mac)}"]`)?.focus();
   }
 
   _ask(kind, floor, area) {
@@ -437,7 +439,8 @@ class WispPanel extends HTMLElement {
     };
     this._render();
     if (plan?.url) this._loadPlanImage();
-    this.shadowRoot.querySelector(".plan-form [data-plan=url]")?.focus();
+    // The address, or the width when a grid leaves the address off
+    this.shadowRoot.querySelector(".plan-form [data-plan=url]:enabled, .plan-form [data-plan=width]")?.focus();
   }
 
   _input(e) {
@@ -573,10 +576,11 @@ class WispPanel extends HTMLElement {
       this._render();
       return;
     }
-    const fresh = !this._data.floors.find((f) => (f.floor ?? "") === key)?.plan;
+    const floor = this._data.floors.find((f) => (f.floor ?? "") === key);
+    const fresh = !floor?.plan && !!floor?.nodes.length;
     this._run({ type: "wisp/floor/set_plan", floor: key || null, url, width, height }, (view) => {
       this._mergeFloor(key, view);
-      if (fresh) this._startPlacing(key); // a new plan: on to placing the nodes
+      if (fresh) this._startPlacing(key); // a new plan on a floor with nodes: on to placing them
     });
   }
 
@@ -1161,13 +1165,14 @@ const STYLE = `
     --wisp-ink: #4b2e16; --wisp-hot: #a3301f; --wisp-mark: #f3e3b7; --wisp-on-hot: #fff6e4;
     --wisp-burn: rgba(122, 77, 31, .32); --wisp-edge: rgba(107, 67, 32, .38);
     --wisp-serif: "Iowan Old Style", "Palatino Linotype", Palatino, "Book Antiqua", Georgia, serif;
-    display: flex; flex-direction: column; height: 100%;
+    display: flex; flex-direction: column; height: 100%; color-scheme: light;
     background: var(--primary-background-color); color: var(--primary-text-color);
   }
   .page.dark {
     --wisp-paper-1: #43362a; --wisp-paper-2: #33291e; --wisp-paper-3: #211a13;
     --wisp-ink: #ead6ab; --wisp-hot: #f0905e; --wisp-mark: #3b2f22; --wisp-on-hot: #2a1d12;
     --wisp-burn: rgba(0, 0, 0, .5); --wisp-edge: rgba(234, 214, 171, .2);
+    color-scheme: dark; /* checkboxes and the lists of the selects in the dark too */
   }
   .toolbar {
     display: flex; align-items: center; flex: none; box-sizing: border-box; height: var(--header-height, 56px); padding: 0 12px;
@@ -1211,9 +1216,10 @@ const STYLE = `
   .plan-draw .grid { fill: none; stroke: var(--wisp-ink); stroke-width: .6; opacity: .16; }
   .upload-line { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin: 8px 0; }
   .upload-line small { opacity: .7; }
-  .node-area { display: flex; align-items: center; gap: 8px; margin: 6px 0 2px 22px; }
+  .node-area { display: flex; align-items: center; gap: 8px; margin: 6px 0 2px 25px; } /* under the name: dot and gap */
   .node-area label { font-size: .85em; opacity: .8; }
   .node-area select { flex: 1; min-width: 0; max-width: 280px; }
+  .node-area + .fail { margin: 6px 0 0 25px; font-size: .9rem; font-style: italic; line-height: 1.45; color: var(--wisp-hot); }
   .plan-draw text { font-family: var(--wisp-serif); fill: var(--wisp-ink); text-anchor: middle;
                     paint-order: stroke; stroke: var(--wisp-paper-1); stroke-width: 3.5px; stroke-linejoin: round; }
   .plan-draw .tray { font-size: 11px; font-style: italic; opacity: .8; }
@@ -1247,6 +1253,8 @@ const STYLE = `
   input:disabled { opacity: .6; }
   input:focus-visible { outline: 2px solid var(--wisp-hot); outline-offset: 2px; }
   .ask .check { justify-self: start; }
+  .ask .check:has(:disabled) { opacity: .6; }
+  .check input:disabled { opacity: 1; }
   .check input { width: 18px; height: 18px; margin: 0; accent-color: var(--wisp-ink); }
   .plan-status { font-size: .9rem; font-style: italic; }
   .plan-status:empty { display: none; }
