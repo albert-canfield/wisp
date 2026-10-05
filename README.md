@@ -50,7 +50,7 @@ Everything stays on your local network.
 
 | From | What | Example |
 |---|---|---|
-| Each node (ESPHome) | Motion on the link to its access point, grid size, hive in sync, AP CSI rate, restart, safe mode, identify, firmware update | `binary_sensor.wisp_a8c77c_ap_motion` |
+| Each node (ESPHome) | Motion on the link to its access point, grid size, hive in sync, AP CSI rate, motion threshold, restart, safe mode, identify, firmware update | `binary_sensor.wisp_a8c77c_ap_motion` |
 | Wisp integration | Motion score and motion per link, signal and spread (disabled by default) | `sensor.hall_ap_58_04_4f_1d_12_f9_motion_score` |
 | Wisp integration, once calibrated | Room per floor, presence per room, calibration progress per floor | `sensor.wisp_floor_2_room`, `binary_sensor.wisp_office_presence` |
 | Wisp integration, on a floor with a plan | Position x and y of someone moving, in the plan's metres, with the fit's quality | `sensor.wisp_floor_2_position_x` |
@@ -123,10 +123,10 @@ Floor plan images are best kept in Home Assistant's `www` folder: `config/www/wi
 
 ## Roadmap
 
-1. **Prove the signal (working).** Node firmware with the self-forming grid, the hive and per-link motion, the integration with link sensors, CI and the release pipeline.
-2. **Room presence.** Floor plans and node placement, a calibration walk per room, presence per room with a confidence score.
-3. **Position and map.** Tomographic imaging, a tracking filter that respects walls, and the map card.
-4. **Ready for HACS.** OTA updates for nodes, diagnostics, automatic baseline and full documentation.
+1. **Prove the signal (done).** Node firmware with the self-forming grid, the hive and per-link motion, the integration with link sensors, CI and the release pipeline.
+2. **Room presence (first version in).** Floor plans and node placement, calibration per room, presence per room. Next: a confidence score per room and calibration from a walk.
+3. **Position and map (first version in).** A best fit per floor on the plan, a tracking filter, the map card and position sensors. Next: tomographic imaging on more nodes, walls in the tracking filter, more than one person.
+4. **Ready for HACS.** The first release (web flasher and node updates from GitHub Pages), measured accuracy and full documentation.
 
 ## License
 

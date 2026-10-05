@@ -4,6 +4,7 @@ substitutions:
   name: wisp
   friendly_name: Wisp
   project_version: "0.1.0"
+  motion_threshold: "2.0" # default; then the Motion threshold entity, kept across reboots
 
 esphome:
   name: ${name}
@@ -25,7 +26,7 @@ wisp:
     name: AP CSI rate
   csi_dropped:
     name: CSI dropped
-  motion_threshold: 2.0 # score at which AP motion turns on (1 = as quiet as usual)
+  motion_threshold: ${motion_threshold} # score at which a link reports motion (1 = as quiet as usual)
   ap_motion_score:
     name: AP motion score
     filters:
@@ -76,6 +77,20 @@ update:
 
 debug:
   update_interval: 60s
+
+number:
+  - platform: template
+    name: Motion threshold
+    icon: mdi:tune-vertical
+    entity_category: config
+    min_value: 1.2
+    max_value: 6
+    step: 0.1
+    optimistic: true
+    restore_value: true
+    initial_value: ${motion_threshold}
+    on_value:
+      - lambda: id(wisp_node).set_motion_threshold(x);
 
 switch:
   - platform: template

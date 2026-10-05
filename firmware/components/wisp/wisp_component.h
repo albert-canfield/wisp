@@ -34,7 +34,7 @@ class WispComponent : public Component {
   void set_ap_ping_interval(uint32_t ms) { this->ap_ping_interval_ms_ = ms; }
   void set_raw_stream_port(uint16_t port) { this->raw_stream_port_ = port; }
   void set_report_interval(uint32_t ms) { this->report_interval_ms_ = ms; }
-  void set_motion_threshold(float t) { this->motion_threshold_ = t; }
+  void set_motion_threshold(float t) { this->motion_threshold_.store(t); }  // any task, applied within a second
   void set_ap_csi_rate_sensor(sensor::Sensor *s) { this->ap_csi_rate_sensor_ = s; }
   void set_csi_dropped_sensor(sensor::Sensor *s) { this->csi_dropped_sensor_ = s; }
   void set_ap_motion_score_sensor(sensor::Sensor *s) { this->ap_motion_score_sensor_ = s; }
@@ -70,7 +70,6 @@ class WispComponent : public Component {
   uint32_t ap_ping_interval_ms_{50};
   uint16_t raw_stream_port_{47010};
   uint32_t report_interval_ms_{200};
-  float motion_threshold_{2.0f};
   sensor::Sensor *ap_csi_rate_sensor_{nullptr};
   sensor::Sensor *csi_dropped_sensor_{nullptr};
   sensor::Sensor *ap_motion_score_sensor_{nullptr};
@@ -113,6 +112,7 @@ class WispComponent : public Component {
   uint32_t report_seq_{0};
   uint32_t raw_seq_{0};
   uint8_t live_streams_{0};
+  float threshold_applied_{0.0f};
 
   // Shared between the main loop and the core task.
   portMUX_TYPE ap_lock_ = portMUX_INITIALIZER_UNLOCKED;
@@ -121,6 +121,7 @@ class WispComponent : public Component {
   std::atomic<bool> csi_started_{false};
   std::atomic<bool> espnow_started_{false};
   std::atomic<bool> raw_stream_enabled_{false};
+  std::atomic<float> motion_threshold_{2.0f};
   std::atomic<float> ap_score_{NAN};
   std::atomic<bool> ap_active_{false};
   std::atomic<int> grid_nodes_{1};

@@ -58,7 +58,8 @@ void WispComponent::setup() {
   esp_read_mac(this->self_.b, ESP_MAC_WIFI_STA);
   this->grid_ = wisp_core::Grid(this->self_);
   this->hive_ = wisp_core::Hive(this->self_);
-  this->links_.set_threshold(this->motion_threshold_);
+  this->threshold_applied_ = this->motion_threshold_.load();
+  this->links_.set_threshold(this->threshold_applied_);
   this->csi_queue_ = xQueueCreate(CSI_QUEUE_DEPTH, sizeof(wisp_core::CsiRecord));
   this->espnow_queue_ = xQueueCreate(ESPNOW_QUEUE_DEPTH, sizeof(wisp_platform::EspNowFrame));
   if (this->csi_queue_ == nullptr || this->espnow_queue_ == nullptr) {
@@ -531,6 +532,11 @@ void WispComponent::send_report_(uint32_t now) {
 }
 
 void WispComponent::core_second_(uint32_t now) {
+  const float threshold = this->motion_threshold_.load();
+  if (threshold != this->threshold_applied_) {  // changed from Home Assistant
+    this->threshold_applied_ = threshold;
+    this->links_.set_threshold(threshold);
+  }
   this->links_.tick_second(now);
   wisp_core::Mac bssid;
   const wisp_core::Link *ap = this->home_bssid_(bssid) ? this->links_.find(bssid) : nullptr;
@@ -551,7 +557,7 @@ void WispComponent::dump_config() {
                 "  Link report interval: %" PRIu32 " ms\n"
                 "  Motion threshold: %.2f",
                 mac, this->ap_ping_interval_ms_, this->raw_stream_port_, this->stream_open_ ? "" : " (not open)",
-                this->report_interval_ms_, this->motion_threshold_);
+                this->report_interval_ms_, this->motion_threshold_.load());
   LOG_SENSOR("  ", "AP CSI rate", this->ap_csi_rate_sensor_);
   LOG_SENSOR("  ", "CSI dropped", this->csi_dropped_sensor_);
   LOG_SENSOR("  ", "AP motion score", this->ap_motion_score_sensor_);

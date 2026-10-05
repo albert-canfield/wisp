@@ -88,5 +88,5 @@ It asks you to stand still, walk across links and leave the room, and prints for
 | Grid nodes stays at 1 | Nodes on different channels: check Grid channel on each; with several access points they settle within a minute |
 | Hive in sync flickers | A node keeps dropping out: check its WiFi signal and power supply |
 | AP CSI rate 0 | The node is not connected, or the gateway does not answer pings |
-| Motion with nobody around | Pets, fans, curtains in a draft, or a washing machine on the line; or raise the motion threshold |
+| Motion with nobody around | Pets, fans, curtains in a draft, or a washing machine on the line; or raise the node's Motion threshold (a setting on its device page) |
 | A node is "unavailable" in Home Assistant | It is offline or rebooting; the grid keeps working without it |
