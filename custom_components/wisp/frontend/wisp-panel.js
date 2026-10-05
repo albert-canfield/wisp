@@ -530,14 +530,13 @@ class WispPanel extends HTMLElement {
       url: plan?.url ?? "",
       width: plan ? String(plan.width) : "",
       height: plan ? String(plan.height) : "",
-      keep: !plan, // a new plan takes the image's proportions; a saved one keeps its size
-      blank: plan?.url === "", // no image: a grid of metres
+      keep: false, // an image's proportions give the height: set when an image is chosen
+      blank: plan ? plan.url === "" : true, // drawn: a grid of metres, rooms drawn on it (a new plan's default)
       status: "",
     };
     this._render();
     if (plan?.url) this._loadPlanImage();
-    // The address, or the width when a grid leaves the address off
-    this.shadowRoot.querySelector(".plan-form [data-plan=url]:enabled, .plan-form [data-plan=width]")?.focus();
+    this.shadowRoot.querySelector(`.plan-form ${this._planForm.blank ? "[data-plan=width]" : "[data-act=upload-plan]"}`)?.focus();
   }
 
   _input(e) {
@@ -549,12 +548,15 @@ class WispPanel extends HTMLElement {
       if (file) this._uploadPlan(file);
       return;
     }
-    if (field === "blank") {
-      form.blank = el.checked;
+    if (field === "kind") {
+      form.blank = el.value === "draw";
       if (form.blank) {
         form.keep = false;
         Object.assign(form, { aspect: null, size: null, loaded: null, status: "" });
-      } else if (form.url.trim()) this._loadPlanImage();
+      } else {
+        if (!form.url.trim()) form.keep = true; // a new image gives the height
+        if (form.url.trim()) this._loadPlanImage();
+      }
       this._fillPlanForm();
       return;
     }
@@ -628,7 +630,8 @@ class WispPanel extends HTMLElement {
     put(input("url"), form.url);
     put(input("width"), form.width);
     input("url").disabled = form.blank || form.status === "uploading";
-    input("blank").checked = form.blank;
+    for (const radio of box.querySelectorAll("[data-plan=kind]")) radio.checked = (radio.value === "draw") === form.blank;
+    for (const el of box.querySelectorAll(".image-only")) el.hidden = form.blank;
     input("keep").checked = form.keep;
     input("keep").disabled = form.blank;
     box.querySelector("[data-act=upload-plan]").disabled = form.status === "uploading";
@@ -637,7 +640,7 @@ class WispPanel extends HTMLElement {
     if (form.keep) height.value = form.aspect && Number(form.width) > 0 ? String(metres(form.width * form.aspect)) : "";
     else put(height, form.height);
     const status = box.querySelector(".plan-status");
-    status.textContent = form.blank ? "Wisp draws a grid of metres to place the nodes on." : {
+    status.textContent = form.blank ? "After Save, draw the rooms on the grid, then place the nodes." : {
       uploading: "Uploading the image…",
       "upload-error": form.uploadError,
       loading: "Loading the image…",
@@ -663,7 +666,7 @@ class WispPanel extends HTMLElement {
       nosize: "The image has no size of its own: untick Keep the image's proportions and give the height.",
     };
     const problem = form.status === "uploading" && !form.blank ? "The image is still uploading: try again in a moment."
-      : !url && !form.blank ? "Upload an image, give its address, or tick No image."
+      : !url && !form.blank ? "Upload an image or give its address, or choose Draw it."
       : !(width >= 1 && width <= 500) ? "Give the width in metres, from 1 to 500."
         : form.keep && !form.blank && !form.aspect ? waiting[form.status] ?? "The image has not loaded yet."
           : !(height >= 1 && height <= 500) ? "Give the height in metres, from 1 to 500."
@@ -674,10 +677,12 @@ class WispPanel extends HTMLElement {
       return;
     }
     const floor = this._data.floors.find((f) => (f.floor ?? "") === key);
-    const fresh = !floor?.plan && !!floor?.nodes.length;
+    const fresh = !floor?.plan;
     this._run({ type: "wisp/floor/set_plan", floor: key || null, url, width, height }, (view) => {
       this._mergeFloor(key, view);
-      if (fresh) this._startPlacing(key); // a new plan on a floor with nodes: on to placing them
+      // A new plan: on to its rooms when drawn, or to placing the nodes on an image
+      if (fresh && !url) this._startRooms(key);
+      else if (fresh && floor?.nodes.length) this._startPlacing(key);
     });
   }
 
@@ -1336,7 +1341,7 @@ class WispPanel extends HTMLElement {
     const rooms = f.rooms?.length ? `, ${plural(f.rooms.length, "room", "rooms")} drawn` : "";
     const meta = plan
       ? `${kind}${metres(plan.width)} by ${metres(plan.height)} m, ${f.nodes.length ? `${placed} of ${plural(f.nodes.length, "node", "nodes")} placed` : "no nodes on this floor yet"}${rooms}`
-      : f.nodes.length ? "none yet: the map shows the hive's own layout" : "none yet";
+      : "none yet: draw it, or use an image";
     const placing = this._placing?.floor === key, drawing = this._roomEdit?.floor === key;
     const acts = plan
       ? `<button data-act="place"${attr("floor", key)}${placing || form || removing || !f.nodes.length ? " disabled" : ""}>Place nodes</button>
@@ -1355,17 +1360,20 @@ class WispPanel extends HTMLElement {
 
   _askPlan(f) {
     const key = f.floor ?? "";
+    const kind = (value, title, text) => `<label class="mode"><input type="radio" name="wisp-plan-${esc(key)}" value="${value}" data-plan="kind"><span><b>${title}</b><small>${text}</small></span></label>`;
     return `<div class="ask plan-form" role="group" aria-label="Floor plan">
-      <p>An image of ${esc(floorPhrase(f))} seen from above, and its size in metres: upload one, give its address, or use no image and place the nodes on a grid of metres.</p>
-      <div class="upload-line"><button data-act="upload-plan">Upload an image</button><small>PNG, JPEG, GIF or WebP, up to 20 MB</small>
+      <div class="modes" role="radiogroup" aria-label="The floor plan">
+        ${kind("draw", "Draw it", `A grid of metres the size of ${esc(floorPhrase(f))}, with its rooms drawn on it.`)}
+        ${kind("image", "Use an image", `A drawing or photo of ${esc(floorPhrase(f))} seen from above.`)}
+      </div>
+      <div class="upload-line image-only"><button data-act="upload-plan">Upload an image</button><small>PNG, JPEG, GIF or WebP, up to 20 MB</small>
         <input data-plan="file" type="file" accept="image/png,image/jpeg,image/gif,image/webp" hidden></div>
-      <label class="field"><span>or its address</span><input data-plan="url" type="text" inputmode="url" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="/local/wisp/plan.png"></label>
-      <label class="check"><input data-plan="blank" type="checkbox">No image: a grid of metres</label>
+      <label class="field image-only"><span>or its address</span><input data-plan="url" type="text" inputmode="url" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="/local/wisp/plan.png"></label>
       <div class="fields">
         <label class="field"><span>Width, m</span><input data-plan="width" type="number" inputmode="decimal" min="1" max="500" step="0.01"></label>
         <label class="field"><span>Height, m</span><input data-plan="height" type="number" inputmode="decimal" min="1" max="500" step="0.01"></label>
       </div>
-      <label class="check"><input data-plan="keep" type="checkbox">Keep the image's proportions</label>
+      <label class="check image-only"><input data-plan="keep" type="checkbox">Keep the image's proportions</label>
       <p class="plan-status" aria-live="polite"></p>
       <img class="preview" alt="The image" hidden>
       ${this._buttons("save-plan", "Save", "primary", attr("floor", key), { busy: "Saving", duration: false })}
@@ -1707,6 +1715,8 @@ const STYLE = `
   .plan-draw .edge { fill: none; stroke: var(--wisp-ink); stroke-width: 1; opacity: .35; }
   .plan-draw .grid { fill: none; stroke: var(--wisp-ink); stroke-width: .6; opacity: .16; }
   .upload-line { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin: 8px 0; }
+  .plan-form .image-only[hidden] { display: none; }
+  .plan-form .modes { margin-bottom: 4px; }
   .upload-line small { opacity: .7; }
   .node-area { display: flex; align-items: center; gap: 8px; margin: 6px 0 2px 25px; } /* under the name: dot and gap */
   .node-area label { font-size: .85em; opacity: .8; }
