@@ -1,0 +1,4 @@
+# python3.13 -m venv .venv-ha && .venv-ha/bin/pip install -r tests/requirements.txt
+# Last plugin release for Python 3.13 (Home Assistant 2026.2.3); Home Assistant 2026.3 and later need Python 3.14.
+pytest-homeassistant-custom-component==0.13.316
+ruff  # lint: .venv-ha/bin/ruff check --select F,E9 custom_components tests

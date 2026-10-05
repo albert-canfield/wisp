@@ -1,0 +1,25 @@
+{
+  "domain": "wisp",
+  "name": "Wisp",
+  "after_dependencies": [
+    "esphome"
+  ],
+  "codeowners": [
+    "@albert-canfield"
+  ],
+  "config_flow": true,
+  "documentation": "https://github.com/albert-canfield/wisp",
+  "integration_type": "hub",
+  "iot_class": "local_push",
+  "issue_tracker": "https://github.com/albert-canfield/wisp/issues",
+  "requirements": [],
+  "version": "0.1.0",
+  "zeroconf": [
+    {
+      "type": "_esphomelib._tcp.local.",
+      "properties": {
+        "project_name": "albert-canfield.wisp-node"
+      }
+    }
+  ]
+}

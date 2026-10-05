@@ -1,0 +1,41 @@
+name: Integration
+
+on:
+  push:
+    paths:
+      - "custom_components/**"
+      - "tests/**"
+      - "pytest.ini"
+      - ".github/workflows/integration.yml"
+  pull_request:
+    paths:
+      - "custom_components/**"
+      - "tests/**"
+      - "pytest.ini"
+      - ".github/workflows/integration.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  tests:
+    name: Tests (${{ matrix.name }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Home Assistant 2026.2, Python 3.13
+            python: "3.13"
+            install: -r tests/requirements.txt
+          - name: latest Home Assistant, Python 3.14
+            python: "3.14"
+            install: pytest-homeassistant-custom-component ruff
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v6
+        with:
+          python-version: ${{ matrix.python }}
+      - run: pip install ${{ matrix.install }}
+      - run: python -m pytest -q tests
+      - run: ruff check --select F,E9 custom_components tests

@@ -1,0 +1,83 @@
+{
+  "config": {
+    "flow_title": "{name}",
+    "step": {
+      "user": {
+        "title": "Set up Wisp",
+        "description": "Wisp listens to your Wisp nodes on the local network. Nodes that Home Assistant finds join on their own. To add a node by its address, use Add node on the Wisp integration page."
+      },
+      "discovery_confirm": {
+        "title": "Wisp node found",
+        "description": "Set up Wisp with {name} ({host})? Other Wisp nodes on your network join on their own."
+      }
+    },
+    "abort": {
+      "already_configured": "Already set up.",
+      "already_in_progress": "Setup is already in progress.",
+      "node_added": "The node was added to Wisp.",
+      "not_wisp_node": "This device does not run the Wisp node firmware."
+    }
+  },
+  "config_subentries": {
+    "node": {
+      "entry_type": "Node",
+      "initiate_flow": {
+        "user": "Add node",
+        "reconfigure": "Change node"
+      },
+      "step": {
+        "user": {
+          "title": "Add a node",
+          "description": "Wisp finds nodes on its own. Add one here if it was not found, for example on another subnet.",
+          "data": {
+            "host": "Host or IP address",
+            "name": "Name"
+          },
+          "data_description": {
+            "host": "For example 192.168.1.50 or wisp-a8c77c.local.",
+            "name": "Optional. Defaults to the node's name in Home Assistant."
+          }
+        },
+        "reconfigure": {
+          "title": "Change node",
+          "description": "Node {mac}.",
+          "data": {
+            "host": "Host or IP address",
+            "name": "Name"
+          },
+          "data_description": {
+            "host": "Found nodes follow address changes on their own.",
+            "name": "Used to name the links this node transmits."
+          }
+        }
+      },
+      "error": {
+        "cannot_resolve": "This host name could not be found. Try the IP address.",
+        "no_answer": "No Wisp node answered at this address. Check the address and that the node is on.",
+        "different_node": "Another Wisp node answered at this address."
+      },
+      "abort": {
+        "already_configured": "This node is already added.",
+        "reconfigure_successful": "The node was updated."
+      }
+    }
+  },
+  "entity": {
+    "binary_sensor": {
+      "motion": {
+        "name": "{link} motion"
+      }
+    },
+    "sensor": {
+      "motion_score": {
+        "name": "{link} motion score"
+      },
+      "signal": {
+        "name": "{link} signal"
+      },
+      "spread": {
+        "name": "{link} spread"
+      }
+    }
+  }
+}

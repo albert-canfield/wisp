@@ -298,7 +298,7 @@ The core compiles on a computer too, so it has host unit tests and a simulator t
 | M2 (done) | First disturbance score on the node, as a slow ESPHome sensor. | 1 node |
 | M3 (done) | ESP-NOW beacons, membership, slots, node-to-node CSI. | 3 nodes |
 | M4 (done) | Hive rows, node lifecycle and self-healing, proven in the simulator first. | Simulator, then 3 nodes |
-| M5 | UDP link stream and the Wisp integration skeleton with one sensor per link. | 3 nodes |
+| M5 (done) | UDP link stream and the Wisp integration skeleton with one sensor per link. | 3 nodes |
 | M6 | Several access points: BSSID grouping, overhearing, CSI from beacons. | 3 nodes |
 | M7 | CI builds, web flasher on GitHub Pages, update manifest. | None |
 

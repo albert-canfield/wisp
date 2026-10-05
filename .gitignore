@@ -25,3 +25,4 @@ data/
 
 # Local agent worktrees
 .claude/
+.venv-ha/
