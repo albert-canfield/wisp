@@ -68,7 +68,7 @@ python3.13 -m venv .venv && .venv/bin/pip install esphome
 2. Add the node in Home Assistant under ESPHome when it is discovered.
 3. Copy `custom_components/wisp` into Home Assistant's `config/custom_components` (or add this repository to HACS as a custom integration repository) and restart. Wisp finds the nodes by itself.
 
-Tools are in [firmware/tools](firmware/tools): a guided walk test that reports how well each link sees you (`walk_test.py`), a live recorder with a plot, an overnight logger and a replay of the motion score.
+Tools are in [firmware/tools](firmware/tools): a guided walk test that reports how well each link sees you (`walk_test.py`), a live recorder with a plot, an overnight logger, and replays of the motion score (`replay.py`) and of positions (`replay_floor.py`) from its recordings.
 
 ## Hardware
 
