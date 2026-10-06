@@ -42,11 +42,14 @@ in some seconds. Breathing counts only for the room shown, so it never starts pr
 it to another room: someone must walk in.
 
 The forward pass gives every state's probability each second; the room shown is the likeliest
-(a room's three states summed, against the empty floor). On the owner's labelled evening
-(firmware/tools/study/REPORT.md) it got every present second right, with no room changes while
-sitting, against 84% for the hand rules it replaced (an occupied desk lost after 3 quiet
-minutes); error over the labelled seconds 1.4% (3.4% leave one window out), walking recall 84%
-against 57%. A walk out it misses leaves someone shown for about 6 minutes (341 s replayed).
+(a room's three states summed, against the empty floor), and only while it holds `show` (0.6) of
+the probability: started under someone sitting (Home Assistant restarted), with no walk seen, the
+rooms tie and a guess would stick, breathing counting for the room shown. On the owner's labelled
+evening (firmware/tools/study/REPORT.md) it got every present second right, with no room changes
+while sitting, against 84% for the hand rules it replaced (an occupied desk lost after 3 quiet
+minutes); error over the labelled seconds 0.0% (1.4% showing the likeliest room however unsure,
+3.4% then leaving one window out), walking recall 84% against 57%. A walk out it misses leaves
+someone shown for about 5 minutes (292 s replayed).
 Cost per second: the classes' fits (2R+1 diagonal Gaussians over the live links, R rooms, shared
 with Rooms) and a forward step over 3R+1 states (about 100 multiply-adds for 5 rooms).
 """
@@ -102,6 +105,10 @@ class Params:
     p_breathing: tuple[float, float, float] = (0.30, 0.05, 0.001)  # rest, busy there; anyone else
     # Output
     switch: float = 0.0  # probability margin before the room shown changes
+    show: float = 0.6  # probability a room needs to be shown; below it, nobody is shown. On the
+    # labelled evening 0.6 and 0.7: 0.0 and 0.1% error (0: 1.4%), 0.8 missed present seconds. Started
+    # while the owner sat at his desk (after an update), the rooms tied at 0.2 to 0.26 and the WC,
+    # a hair ahead, was shown and then held by breathing on its links (the desk shadows one)
 
 
 @dataclass(frozen=True, slots=True)
@@ -346,6 +353,8 @@ class RoomTracker:
         best = max(rooms, key=rooms.__getitem__)
         if self.shown not in rooms or rooms[best] > rooms[self.shown] + self.params.switch:
             self.shown = best
+        if self.shown is not None and rooms[self.shown] < self.params.show:
+            self.shown = None  # someone, maybe, but where is unclear
         return Estimate(self.shown, walking > 0.5, rooms, walking)
 
 

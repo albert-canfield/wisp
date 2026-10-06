@@ -17,11 +17,13 @@ import logging
 import math
 from typing import TYPE_CHECKING, Any
 
+from homeassistant.const import EVENT_HOMEASSISTANT_STOP
 from homeassistant.core import CALLBACK_TYPE, Event, callback
 from homeassistant.helpers import area_registry as ar, floor_registry as fr, issue_registry as ir
 from homeassistant.helpers.device_registry import DeviceEntryType, DeviceInfo
 from homeassistant.helpers.event import async_track_time_interval
 from homeassistant.helpers.storage import Store
+from homeassistant.util import dt as dt_util
 
 from .const import (
     DOMAIN,
@@ -60,6 +62,16 @@ def store_key(entry_id: str) -> str:
     return f"{DOMAIN}.{entry_id}.calibration"
 
 
+def who_store_key(entry_id: str) -> str:
+    return f"{DOMAIN}.{entry_id}.who"
+
+
+WHO_STORE_VERSION = 1
+# Someone shown in a room when Home Assistant stopped starts there again if it is back within this
+# (the tracker's quiet hold): an update restarts it under someone sitting, and no walk shows then
+RESTORE_WITHIN = 600.0
+
+
 def floor_scope(floor: str) -> str:
     """Floor part of a unique id. The hub's own floor has no id."""
     return f"floor_{floor}" if floor else "house"
@@ -93,6 +105,8 @@ class RoomPresence:
         self.estimates: dict[str, Estimate] = {}
         self._built: dict[str, tuple] = {}  # by floor: what its tracker was built from
         self._calibration = 0  # counts calibration changes
+        self.who_store: Store[dict[str, Any]] = Store(self.hass, WHO_STORE_VERSION, who_store_key(self.entry.entry_id))
+        self._restore: dict[str, str] = {}  # by floor: the room shown when Home Assistant stopped
         self._flags: dict[str, deque[tuple[float, frozenset]]] = {}  # by floor: links moving, the last seconds
         self.plans = FloorPlans(self.hass, self.entry.entry_id)
         self._listeners: list[Callable[[], None]] = []
@@ -107,10 +121,15 @@ class RoomPresence:
             except ValueError as err:
                 _LOGGER.warning("Discarding the stored room calibration: %s", err)
         await self.plans.async_load()
+        who = await self.who_store.async_load()
+        if isinstance(who, dict) and isinstance(at := who.get("at"), int | float):
+            if 0 <= dt_util.utcnow().timestamp() - at <= RESTORE_WITHIN and isinstance(who.get("floors"), dict):
+                self._restore = {f: r for f, r in who["floors"].items() if isinstance(r, str)}
         self._unsubs = [
             async_track_time_interval(
                 self.hass, self._async_tick, ROOMS_INTERVAL, name="wisp rooms", cancel_on_shutdown=True
             ),
+            self.hass.bus.async_listen(EVENT_HOMEASSISTANT_STOP, self._async_stopping),
             self.hass.bus.async_listen(ar.EVENT_AREA_REGISTRY_UPDATED, self._async_area_updated),
             self.hass.bus.async_listen(fr.EVENT_FLOOR_REGISTRY_UPDATED, self._async_floor_updated),
         ]
@@ -121,11 +140,22 @@ class RoomPresence:
             unsub()
         self._unsubs = []
         self._async_raise_issues({})
+        self.entry.async_create_task(self.hass, self.who_store.async_save(self._who()), "wisp save who is where")
         if self.engine.runs:  # keep what the unfinished runs recorded
             recorded = any(run.recorded for run in self.engine.runs.values())
             self.engine.runs.clear()
             if recorded:
                 self._async_save()
+
+    @callback
+    def _async_stopping(self, _event: Event) -> None:
+        """Home Assistant stops: who is where is written with its final writes."""
+        self.who_store.async_delay_save(self._who, 0)
+
+    def _who(self) -> dict[str, Any]:
+        """The room shown per floor, and when (wall clock: the hub's clock restarts with it)."""
+        rooms = {floor: e.room for floor, e in self.estimates.items() if e.room is not None}
+        return {"at": dt_util.utcnow().timestamp(), "floors": rooms}
 
     # Floors and areas
 
@@ -415,8 +445,9 @@ class RoomPresence:
 
     def _tracker(self, floor: str, areas: list[str], now: float) -> RoomTracker | None:
         """The floor's room tracker, rebuilt (carrying on from the old one) when its calibration,
-        areas, drawn rooms or exits changed; a first one starts from what the floor showed (the
-        calibration just recorded says where everyone is). None without an empty class or a
+        areas, drawn rooms or exits changed; a first one starts where the floor's person was when
+        Home Assistant stopped (if it is back within RESTORE_WITHIN), or from what the floor showed
+        (the calibration just recorded says where everyone is). None without an empty class or a
         walking class."""
         plan = self.plans.floors.get(floor)
         drawn = tuple(sorted(plan.rooms)) if plan is not None else ()
@@ -429,6 +460,8 @@ class RoomPresence:
                 tracker = self.trackers[floor] = RoomTracker(classes, drawn, exits)
                 if old is not None:
                     tracker.adopt(old)
+                elif (room := self._restore.pop(floor, None)) is not None:
+                    tracker.pin(room, False, now)  # where they were when Home Assistant stopped
                 elif (shown := self.estimates.get(floor)) is not None:
                     tracker.pin(shown.room, shown.walking, now)
         return self.trackers.get(floor)

@@ -2,7 +2,7 @@
 from datetime import timedelta
 
 DOMAIN = "wisp"
-VERSION = "0.1.17"  # keep in sync with manifest.json (cache-busts the card)
+VERSION = "0.1.18"  # keep in sync with manifest.json (cache-busts the card)
 PLATFORMS = ["binary_sensor", "button", "sensor"]
 TITLE = "Wisp"
 

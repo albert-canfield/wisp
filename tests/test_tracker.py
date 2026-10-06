@@ -152,6 +152,22 @@ def test_breathing_elsewhere_does_not_hold_a_room(engine: Rooms):
     assert day.estimate.room is None
 
 
+def test_an_unsure_room_is_not_shown_nor_held_by_breathing(engine: Rooms):
+    """Started while someone sits (Home Assistant restarted under them): no walk seen, the rooms
+    tie. Nobody is shown rather than a guess, and breathing, which counts only for a room shown,
+    cannot make the guess stick (on the owner's floor it held the WC for an hour while he sat in
+    the office: his desk shadows one of the WC's links)."""
+    day = Day(engine, seed=165)
+    tracker = day.tracker
+    tracker.alpha = [0.0] * len(tracker.states)
+    for room in tracker.rooms:
+        tracker.alpha[tracker.index[("busy", room)]] = 1 / len(tracker.rooms)
+    own = from_rooms(engine, FLOOR, list(ROOMS)).own["kitchen"]
+    rooms = day.quiet(600, breathing={(AP, N1), (N2, N1)})
+    assert {(AP, N1), (N2, N1)} <= own and set(rooms) == {None}
+    assert max(p for room, p in day.estimate.probabilities.items() if room) < tracker.params.show
+
+
 def test_breathing_needs_two_transmitters_or_a_link_and_its_reverse():
     assert not breathing_second({(N1, N2)})
     assert not breathing_second({(N3, N1), (N3, N2)})  # one transmitter's two links: its own quirk

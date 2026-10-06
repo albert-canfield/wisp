@@ -456,6 +456,34 @@ async def test_calibration_survives_a_restart(hass: HomeAssistant, house: House,
     assert f"wisp.{entry.entry_id}.calibration" not in hass_storage
 
 
+async def test_someone_sitting_is_kept_across_a_restart(hass: HomeAssistant, house: House, hass_storage: dict) -> None:
+    """An update restarts Home Assistant under someone sitting, and no walk shows them then: the
+    room shown when it stopped is where they start, if it is back within 10 minutes."""
+    await house.calibrate("kitchen")
+    await house.calibrate("office")
+    await house.calibrate(None)
+    await house.seconds(2, "office")
+    await house.seconds(3, sitting="office", fidget=1)
+    assert state(hass, OFFICE_PRESENCE) == "on"
+    entry = house.entry
+    for minutes, after in ((1, "on"), (11, "off")):
+        assert await hass.config_entries.async_unload(entry.entry_id)
+        await hass.async_block_till_done()
+        who = hass_storage[f"wisp.{entry.entry_id}.who"]["data"]
+        assert who["floors"] == {"": "office"}
+        who["at"] -= 60 * minutes  # Home Assistant back after that long
+        assert await hass.config_entries.async_setup(entry.entry_id)
+        await hass.async_block_till_done()
+        house.attach(entry)
+        await house.seconds(10, sitting="office")
+        assert state(hass, OFFICE_PRESENCE) == after, minutes
+
+    # Deleting the hub deletes it too
+    assert await hass.config_entries.async_remove(entry.entry_id)
+    await hass.async_block_till_done()
+    assert f"wisp.{entry.entry_id}.who" not in hass_storage
+
+
 async def test_a_run_cut_short_keeps_its_samples(hass: HomeAssistant, house: House, hass_storage: dict) -> None:
     await hass.services.async_call(DOMAIN, "calibrate_room", {"area": "kitchen"}, blocking=True)
     await house.seconds(30, "kitchen")

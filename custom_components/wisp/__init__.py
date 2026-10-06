@@ -22,7 +22,7 @@ from .const import DOMAIN, PLANS_STORE_VERSION, PLATFORMS, STORE_VERSION, TITLE,
 from .hub import WispConfigEntry, WispHub
 from .plan_images import PlanImageServeView, PlanImageUploadView, images_dir
 from .plans import plans_store_key
-from .presence import store_key
+from .presence import WHO_STORE_VERSION, store_key, who_store_key
 
 _LOGGER = logging.getLogger(__name__)
 CONFIG_SCHEMA = cv.config_entry_only_config_schema(DOMAIN)
@@ -112,6 +112,7 @@ async def async_remove_entry(hass: HomeAssistant, entry: WispConfigEntry) -> Non
     clean, and the panel."""
     await Store(hass, STORE_VERSION, store_key(entry.entry_id)).async_remove()
     await Store(hass, PLANS_STORE_VERSION, plans_store_key(entry.entry_id)).async_remove()
+    await Store(hass, WHO_STORE_VERSION, who_store_key(entry.entry_id)).async_remove()
     await hass.async_add_executor_job(shutil.rmtree, images_dir(hass), True)  # the uploaded plan images
     frontend.async_remove_panel(hass, PANEL_PATH, warn_if_unknown=False)
 
