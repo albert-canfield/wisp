@@ -732,18 +732,23 @@ void WispComponent::core_second_(uint32_t now) {
   // Each link learns its quiet scores while the hive confirms no motion anywhere
   this->links_.learn_quiet(this->pairs_.n > 0, now);
   this->max_link_threshold_.store(this->links_.max_threshold());
-  bool breathing = false;
+  // Breathing: BREATHING_AGREE links at once (the night's only false alarms were one link alone)
+  int breathing = 0;
   float rate = NAN, clearest = 0.0f;
   for (int i = 0; i < this->links_.count() && this->breathing_bank_ != nullptr; i++) {
     const wisp_core::Link &l = this->links_.link(i);
+    if (!l.breathing)
+      continue;
+    breathing++;
     const float ratio = this->breathing_bank_->ratio(l.source);
-    if (l.breathing && ratio > clearest) {
-      breathing = true;
+    if (ratio > clearest) {
       clearest = ratio;
       rate = l.breath_rate;
     }
   }
-  this->breathing_.store(breathing);
+  this->breathing_.store(breathing >= wisp_core::BREATHING_AGREE);
+  if (breathing < wisp_core::BREATHING_AGREE)
+    rate = NAN;
   this->breath_rate_.store(rate);
   this->motion_.store(motion);
   if (motion)

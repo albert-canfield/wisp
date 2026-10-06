@@ -36,6 +36,10 @@ constexpr uint32_t BREATH_BIN_MS = 125;               // 8 a second
 constexpr int BREATH_LEN = 256;                       // 32 s
 constexpr uint32_t BREATH_WINDOW_MS = BREATH_LEN * BREATH_BIN_MS;
 constexpr uint32_t BREATH_EVAL_MS = 4000;
+// A node says someone breathes only while this many of its links do: over the owner's empty night
+// (8 hours, detection on) the only breathing was one link at a time, 3 episodes of 9 to 13 s; sitting
+// quietly, 1 to 7 links breathed together.
+constexpr int BREATHING_AGREE = 2;
 constexpr uint32_t BREATH_GAP_BINS = 40;        // 5 s without frames starts the ring over
 constexpr uint32_t BREATH_RELEASE_MS = 60000;  // a link silent this long gives up its slot
 constexpr float BREATH_SLOW = 0.02f;           // slow mean, per bin: about 6 s
