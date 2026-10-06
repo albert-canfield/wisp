@@ -30,13 +30,19 @@ a fit somewhere along them: drawn as they come, that is someone darting about. S
 for a while and read together. Walking: fits in most of the last 6 s, and the centre of their
 newer half a metre or more from the centre of their older half; the Track follows them. Still: a few fits in
 the last 20 s without that travel; the spot is their centre, weighted by quality, and stays put.
+
+The mark shown moves no faster than someone walks (1.5 m/s; 0.5 m/s while still): on the owner's
+floor the hallway, not drawn, is searched for in all the space between the rooms, and its fits
+jumped 4 to 7 m from one second to the next, and a still spot 2 m as fits came and went. The map
+card starts a new trail at a 3 m jump, so footprints scattered. Capped, a room change slides
+across the nearest wall of the new room.
 """
 
 from __future__ import annotations
 
 from collections import deque
 from collections.abc import Collection, Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 import math
 
 from .anchor import Similarity, anchor_layout
@@ -88,6 +94,9 @@ class FloorModel:
     walk_min: int = 4  # fits in the last walk_span seconds for walking
     walk_travel: float = 1.0  # metres between the centres of the two halves, for walking
     corroborate: float = 2.0  # seconds within which another link must also report motion
+    walk_speed: float = 1.5  # m/s the mark shown moves at most while walking
+    still_speed: float = 0.5  # m/s while still
+    follow_for: float = 10.0  # s after which a mark shown again starts where its fix is
     fits: deque = field(default_factory=deque, init=False)  # (time, x, y, quality)
     _flags: deque = field(default_factory=deque, init=False)  # (time, links reporting motion)
     walking: bool = field(default=False, init=False)
@@ -101,6 +110,7 @@ class FloorModel:
     _key: tuple = field(default=(), init=False)
     _plan: tuple[float, float] | None = field(default=None, init=False)
     _aps: dict[str, Point] = field(default_factory=dict, init=False)  # last placed, to keep their side
+    _shown: tuple[float, float, float] | None = field(default=None, init=False)  # (time, x, y) of the last mark
 
     def set_layout(
         self,
@@ -128,6 +138,7 @@ class FloorModel:
             self.track = Track()
             self._aps = {}
             self.spots = {}
+            self._shown = None
         # What the user did not place stays on the plan (in the house, with rooms drawn): the
         # layout and the access points come from signal strength, which can put them far out.
         positions = {key: p if key in (placed or {}) else self._keep_in(*p) for key, p in positions.items()}
@@ -199,6 +210,21 @@ class FloorModel:
         return inside([_inset(r) for r in rects], x, y) if rects else (x, y)
 
     def _read(
+        self, raw: tuple[float, float, float] | None, now: float, room: str | None = None, walking: bool = True
+    ) -> FloorFix | None:
+        fix = self._fix(raw, now, room, walking)
+        if fix is None:
+            return None
+        if self._shown is not None and now - self._shown[0] <= self.follow_for:
+            t, x0, y0 = self._shown
+            step = (self.walk_speed if fix.walking else self.still_speed) * max(now - t, 1.0)
+            if (d := math.dist((x0, y0), (fix.x, fix.y))) > step:
+                x, y = self._keep_in(x0 + (fix.x - x0) * step / d, y0 + (fix.y - y0) * step / d, room)
+                fix = replace(fix, x=x, y=y)
+        self._shown = (now, fix.x, fix.y)
+        return fix
+
+    def _fix(
         self, raw: tuple[float, float, float] | None, now: float, room: str | None = None, walking: bool = True
     ) -> FloorFix | None:
         """This second's fit (or none) read with the recent ones: walking (when room presence

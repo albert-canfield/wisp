@@ -308,7 +308,8 @@ class RoomPresence:
             if calibrated and estimate.room is None:
                 moving = set()
             model = self._layout(floor, hive)
-            if (fix := model.update(scores, now, moving, estimate.room, walking=estimate.walking or not calibrated)) is not None:
+            fix = model.update(scores, now, moving, estimate.room, walking=estimate.walking or not calibrated)
+            if fix is not None and not (calibrated and estimate.room is None):  # not the last fits' spot
                 self.fixes[floor] = fix
             else:
                 self.fixes.pop(floor, None)

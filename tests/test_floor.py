@@ -5,6 +5,8 @@ from __future__ import annotations
 import math
 import random
 
+import pytest
+
 from custom_components.wisp.engine.floor import FloorModel
 from custom_components.wisp.engine.hive import HiveState
 from custom_components.wisp.engine.protocol import HiveEntry, HiveRow
@@ -235,4 +237,25 @@ def test_someone_still_in_a_room_stays_on_the_map() -> None:
     fix = floor.update(quiet, now=1.0, moving=set(), room="office", walking=False)
     assert (fix.x, fix.y, fix.walking) == (1.5, 2.5, False)
     floor.spots["office"] = (0.8, 4.0)  # where a fit last put them
-    assert (floor.update(quiet, now=2.0, moving=set(), room="office", walking=False).x) == 0.8
+    fix = floor.update(quiet, now=2.0, moving=set(), room="office", walking=False)
+    assert math.dist((1.5, 2.5), (fix.x, fix.y)) == pytest.approx(0.5)  # the mark glides there, still: 0.5 m/s
+    for now in range(3, 7):
+        fix = floor.update(quiet, now=float(now), moving=set(), room="office", walking=False)
+    assert (fix.x, fix.y) == (0.8, 4.0)
+
+
+def test_the_mark_moves_no_faster_than_someone_walks() -> None:
+    """A fit far from the last one (the hallway, not drawn, is searched for in all the space
+    between the rooms: 4 to 7 m apart on the owner's floor) moves the mark at walking speed; the
+    map card starts a new trail at a 3 m jump."""
+    floor = FloorModel()
+    floor.set_layout(hive_state(), plan=(10.0, 8.0), nodes=set(NODES))
+    for now in range(8):  # walking along y = 1 at 1 m/s
+        fix = floor._read((1.0 + now, 1.0, 0.9), float(now))
+    assert fix.walking and (fix.x, fix.y) == pytest.approx((8.0, 1.0), abs=0.6)
+    steps = []
+    for now in range(8, 20):  # fits bouncing between two spots 6 m apart, as in the hallway
+        last = (fix.x, fix.y)
+        fix = floor._read(((2.0, 7.0) if now % 2 else (8.0, 1.0)) + (0.9,), float(now))
+        steps.append(math.dist(last, (fix.x, fix.y)))
+    assert max(steps) <= 1.5 + 1e-9  # 3.2 m without the cap
