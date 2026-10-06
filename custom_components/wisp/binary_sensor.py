@@ -55,8 +55,8 @@ class Motion(WispLinkEntity, BinarySensorEntity):
 
 
 class Presence(WispRoomEntity, BinarySensorEntity):
-    """On while the room won within the hold time; confidence of its latest win, and whether it was
-    a still one (someone there, not moving)."""
+    """On while the floor's room tracker shows someone in the room (or gives it half the
+    probability); its probability, and whether they are still (there, not walking)."""
 
     key = "presence"
     _attr_device_class = BinarySensorDeviceClass.OCCUPANCY
@@ -81,11 +81,7 @@ class Presence(WispRoomEntity, BinarySensorEntity):
         return {"confidence": confidence, "still": still}
 
     def value(self) -> tuple[bool, float | None, bool]:
-        now = self.hub.clock()
-        engine = self.presence.engine
-        confidence = engine.presence(self.area, now)
-        rounded = None if confidence is None else round(confidence, 2)
-        return confidence is not None, rounded, engine.still_present(self.area, now)
+        return self.presence.area_presence(self.area)
 
     def _urgent(self, value: tuple[bool, float | None, bool]) -> bool:
         return value[0] != self._written[1][0]  # on or off is written at once

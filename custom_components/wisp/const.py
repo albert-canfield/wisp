@@ -2,7 +2,7 @@
 from datetime import timedelta
 
 DOMAIN = "wisp"
-VERSION = "0.1.16"  # keep in sync with manifest.json (cache-busts the card)
+VERSION = "0.1.17"  # keep in sync with manifest.json (cache-busts the card)
 PLATFORMS = ["binary_sensor", "button", "sensor"]
 TITLE = "Wisp"
 
@@ -15,7 +15,6 @@ CONF_AREA = "area"  # the area a node stands in; its floor is the node's floor
 CONF_FLOOR = "floor"
 CONF_DURATION = "duration"
 CONF_DELAY = "delay"  # seconds before a calibration records
-CONF_PRESENCE_HOLD = "presence_hold"  # option, seconds
 
 NODE_PORT = 47010
 SUBSCRIBE_INTERVAL = timedelta(seconds=3)  # the node's lease lasts 10 s

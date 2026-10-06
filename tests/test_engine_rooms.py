@@ -11,7 +11,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).parents[1] / "custom_components" / "wisp"))
 
 from engine import ClassModel, Rooms, decide, features  # noqa: E402
-from engine.rooms import CONFIDENCE, HOLD, QUIET, SCORE_FLOOR, VAR_FLOOR  # noqa: E402
+from engine.rooms import CONFIDENCE, QUIET, SCORE_FLOOR, VAR_FLOOR  # noqa: E402
 
 AP = "a8:29:48:db:b6:70"
 N1, N2, N3, N4 = (f"02:57:49:53:50:0{i}" for i in range(1, 5))
@@ -307,30 +307,21 @@ def test_samples_are_capped_at_the_latest():
     assert samples[0] == {("a", "x"): pytest.approx(math.log(2.21))}
 
 
-def test_presence_holds_after_the_last_win(engine: Rooms):
+def test_each_second_fits_the_classes_once(engine: Rooms):
+    """Rooms.step fits every class of the floor once a second and keeps the fits for the room
+    tracker; the moving decision is made from the same fits. Without live links there is none."""
     floor = Floor(seed=41)
     rooms = Rooms()
     rooms.areas, rooms.empty = engine.areas, engine.empty
-    assert rooms.presence("kitchen", 0.0) is None
-    rooms.step(FLOOR, ROOMS, floor.scores("kitchen"), 99.0)
-    assert rooms.decisions[FLOOR].room == "kitchen" and rooms.presence("kitchen", 99.0) is None  # one second: not yet
     rooms.step(FLOOR, ROOMS, floor.scores("kitchen"), 100.0)
-    confidence = rooms.presence("kitchen", 100.0)
-    assert confidence >= CONFIDENCE and rooms.decisions[FLOOR].room == "kitchen"
-    # Nobody moving: the floor is empty at once, presence holds for the hold time
-    rooms.step(FLOOR, ROOMS, floor.scores(None), 101.0)
-    assert rooms.decisions[FLOOR].room is None and rooms.decisions[FLOOR].confidence is None
-    assert rooms.presence("kitchen", 100.0 + HOLD) == confidence
-    assert rooms.presence("kitchen", 100.0 + HOLD + 0.5) is None
-    # Another room winning does not end it: two people can be in two rooms
-    rooms.step(FLOOR, ROOMS, floor.scores("office"), 109.0)
-    rooms.step(FLOOR, ROOMS, floor.scores("office"), 110.0)
-    assert rooms.presence("kitchen", 110.0) and rooms.presence("office", 110.0)
-    # A win below the confidence threshold does not count
-    strict = Rooms(confidence=1.01)
-    strict.areas, strict.empty = engine.areas, engine.empty
-    strict.step(FLOOR, ROOMS, floor.scores("kitchen"), 100.0)
-    assert strict.decisions[FLOOR].room == "kitchen" and strict.presence("kitchen", 100.0) is None
+    fits = rooms.fits[FLOOR]
+    assert fits.empty is not None and set(fits.walking) == set(ROOMS) and fits.still == {}
+    best = max(fits.walking, key=lambda area: fits.walking[area][0])
+    assert best == "kitchen" == rooms.decisions[FLOOR].room and rooms.decisions[FLOOR].confidence >= CONFIDENCE
+    rooms.step(FLOOR, ROOMS, floor.scores(None), 101.0)  # nobody moving: no decision of a room, fits all the same
+    assert rooms.decisions[FLOOR].room is None and rooms.fits[FLOOR] is not None
+    rooms.step(FLOOR, ROOMS, {}, 102.0)
+    assert rooms.fits[FLOOR] is None and rooms.decisions[FLOOR] is None
 
 
 def test_storage_round_trip(engine: Rooms):

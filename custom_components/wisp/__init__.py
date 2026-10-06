@@ -119,7 +119,6 @@ async def async_remove_entry(hass: HomeAssistant, entry: WispConfigEntry) -> Non
 async def _async_entry_updated(hass: HomeAssistant, entry: WispConfigEntry) -> None:
     """A node subentry was added, changed or removed, or the options changed: no reload, the hub follows."""
     entry.runtime_data.async_sync_nodes()
-    entry.runtime_data.presence.async_apply_options()
 
 
 @callback

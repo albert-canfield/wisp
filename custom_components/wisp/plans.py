@@ -62,6 +62,9 @@ class FloorPlans:
     def __init__(self, hass: HomeAssistant, entry_id: str) -> None:
         self.store: Store[dict[str, Any]] = Store(hass, PLANS_STORE_VERSION, plans_store_key(entry_id))
         self.floors: dict[str, FloorPlan] = {}
+        # Per floor, the rooms that lead off it besides the undrawn ones (stairs, a door outside):
+        # kept apart from the plan, so they hold with or without one, and through its changes
+        self.exits: dict[str, list[str]] = {}
 
     async def async_load(self) -> None:
         data = await self.store.async_load()
@@ -69,12 +72,16 @@ class FloorPlans:
             return
         try:
             self.floors = {str(key): FloorPlan.from_dict(plan) for key, plan in data["floors"].items()}
+            self.exits = {str(key): [str(a) for a in areas] for key, areas in data.get("exits", {}).items() if areas}
         except (KeyError, TypeError, ValueError, AttributeError) as err:
             _LOGGER.warning("Discarding the stored floor plans: %s", err)
-            self.floors = {}
+            self.floors, self.exits = {}, {}
 
     async def async_save(self) -> None:
-        await self.store.async_save({"floors": {key: plan.to_dict() for key, plan in self.floors.items()}})
+        await self.store.async_save({
+            "floors": {key: plan.to_dict() for key, plan in self.floors.items()},
+            "exits": {key: areas for key, areas in sorted(self.exits.items()) if areas},
+        })
 
     def set_plan(self, floor: str, url: str, width: float, height: float) -> FloorPlan:
         """A new plan, or a new image or size for one: placements stay, in metres."""
@@ -100,6 +107,15 @@ class FloorPlans:
         self.floors[floor].rooms = {
             area: [tuple(round(float(v), 3) for v in r) for r in rects] for area, rects in rooms.items() if rects
         }
+
+    def set_exits(self, floor: str, exits: list[str]) -> list[str]:
+        """The rooms that lead off the floor, all of them; an empty list clears them."""
+        areas = sorted(set(exits))
+        if areas:
+            self.exits[floor] = areas
+        else:
+            self.exits.pop(floor, None)
+        return areas
 
     def remove(self, floor: str) -> bool:
         return self.floors.pop(floor, None) is not None

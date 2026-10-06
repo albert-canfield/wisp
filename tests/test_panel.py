@@ -113,7 +113,7 @@ async def test_snapshot_of_nodes_floors_and_areas(hass: HomeAssistant, udp: Fake
         "floors": [
             {
                 "floor": "ground_floor", "name": "Ground floor", "nodes": [NODE_A], "live_links": 0, "channel": None,
-                "room": None, "area": None, "confidence": None, "empty_samples": 0, "run": None,
+                "room": None, "area": None, "confidence": None, "walking": False, "exits": [], "empty_samples": 0, "run": None,
                 "areas": [{
                     "area": "hall", "name": "Hall", "nodes": 1, "samples": 0, "still_samples": 0, "presence": False,
                     "still": False, "confidence": None,
@@ -122,12 +122,12 @@ async def test_snapshot_of_nodes_floors_and_areas(hass: HomeAssistant, udp: Fake
             },
             {  # every Home Assistant floor is there, with nodes or not: a plan can wait for them
                 "floor": "upstairs", "name": "Upstairs", "nodes": [], "live_links": 0, "channel": None,
-                "room": None, "area": None, "confidence": None, "empty_samples": 0, "run": None,
+                "room": None, "area": None, "confidence": None, "walking": False, "exits": [], "empty_samples": 0, "run": None,
                 "areas": [], "separation": [], "other_areas": [{"area": "bedroom", "name": "Bedroom"}],
             },
             {
                 "floor": None, "name": "Wisp", "nodes": [NODE_B], "live_links": 0, "channel": None,
-                "room": None, "area": None, "confidence": None, "empty_samples": 0, "run": None,
+                "room": None, "area": None, "confidence": None, "walking": False, "exits": [], "empty_samples": 0, "run": None,
                 "areas": [], "separation": [],
                 "other_areas": [{"area": "garden", "name": "Garden"}, {"area": "office", "name": "Office"}],
             },

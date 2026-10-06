@@ -25,8 +25,7 @@ from homeassistant.helpers import device_registry as dr, selector
 from homeassistant.helpers.device_registry import CONNECTION_NETWORK_MAC, format_mac
 from homeassistant.helpers.service_info.zeroconf import ZeroconfServiceInfo
 
-from .const import CONF_AREA, CONF_PRESENCE_HOLD, DOMAIN, MANUFACTURER, MODEL, PROJECT_NAME, SUBENTRY_NODE, TITLE
-from .engine.rooms import HOLD
+from .const import CONF_AREA, DOMAIN, MANUFACTURER, MODEL, PROJECT_NAME, SUBENTRY_NODE, TITLE
 from .hub import ProbeError, async_probe, default_node_name, node_devices
 
 NODE_SCHEMA = vol.Schema({
@@ -34,13 +33,9 @@ NODE_SCHEMA = vol.Schema({
     vol.Optional(CONF_NAME): str,
     vol.Optional(CONF_AREA): selector.AreaSelector(),
 })
-OPTIONS_SCHEMA = vol.Schema({
-    vol.Required(CONF_PRESENCE_HOLD, default=HOLD): selector.NumberSelector(
-        selector.NumberSelectorConfig(
-            min=0, max=3600, step=1, unit_of_measurement="s", mode=selector.NumberSelectorMode.BOX
-        )
-    ),
-})
+# No settings left: the room tracker times presence itself (the presence hold it replaced kept a
+# room occupied a minute after everyone left). The form says where the panel is.
+OPTIONS_SCHEMA = vol.Schema({})
 
 
 def hub_entry(hass: HomeAssistant) -> ConfigEntry | None:
@@ -222,7 +217,7 @@ class NodeSubentryFlow(ConfigSubentryFlow):
 
 
 class WispOptionsFlow(OptionsFlow):
-    """Room presence: how long a room stays occupied after it last won."""
+    """Where Wisp's settings are: the panel, and each node's ESPHome device."""
 
     async def async_step_init(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
         if user_input is not None:

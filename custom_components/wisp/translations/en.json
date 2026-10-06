@@ -131,13 +131,7 @@
   "options": {
     "step": {
       "init": {
-        "title": "Room presence",
-        "data": {
-          "presence_hold": "Presence hold"
-        },
-        "data_description": {
-          "presence_hold": "Seconds a room stays occupied after Wisp last found someone in it: moving, or, once the empty floor is calibrated, sitting still (a body weakens the signal of the links near it)."
-        },
+        "title": "Wisp",
         "description": "Floor plans, node placement and room calibration are in the **Wisp** panel in the sidebar (or Open on the Wisp hub device). Each node's motion threshold is a setting on its ESPHome device."
       }
     }

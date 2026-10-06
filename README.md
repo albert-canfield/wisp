@@ -118,10 +118,12 @@ Rooms are your Home Assistant areas and floors are your Home Assistant floors. G
 
 1. `wisp.calibrate_room` with the area, standing in that room: walk around in it until the floor's calibration sensor is idle again (60 seconds by default). A room needs 20 seconds of movement before it counts.
 2. `wisp.calibrate_room` with `mode: still`: sit still where you usually are in that room (desk, sofa). Moments with motion are left out.
-3. `wisp.calibrate_empty` with nobody on the floor: needed for still presence, the reference a still person is told apart from.
+3. `wisp.calibrate_empty` with nobody on the floor: the reference a quiet room is told apart from, needed to follow anyone. Seconds with someone moving (people on the floor above can cause them) are left out.
 4. `wisp.clear_calibration` forgets a room, or everything.
 
-Each floor then gets a room sensor (the room someone moves in, `none` while nobody moves, with a confidence) and each calibrated room an occupancy sensor. It stays on for 60 seconds after its last movement, and while nobody moves, a room whose still calibration matches the signal for 10 seconds keeps it on (attribute `still`). The hold time is in the Wisp options. Calibrate again after adding nodes: new links only count once the rooms have samples of them.
+Each floor then gets a room sensor (the room its person is in, `none` while nobody is on the floor, with a confidence and whether they walk) and each calibrated room an occupancy sensor (attribute `still` while someone sits there). Wisp follows one person per floor: someone who walks into a room and sits down stays there until they walk out, nobody changes room without walking, and the floor empties when they walk off it. Someone sitting perfectly still is kept for some minutes, as long as they breathe with the nodes' Breathing detection on.
+
+Draw the rooms on the floor plan and, in the panel, tick the rooms with stairs or a door outside (Way off the floor): people leave the floor only through those and the rooms you leave undrawn (the hallway). Without a plan any room can be the way out. Calibrate the hallway walk with the first steps of the stairs and the area by the front door, so leaving looks like leaving. Calibrate again after adding nodes: new links only count once the rooms have samples of them.
 
 ## Wisp panel
 

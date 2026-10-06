@@ -11,8 +11,8 @@ floor named after the hub. A link belongs to the floor of the node that receives
 from __future__ import annotations
 
 from collections import deque
-from collections.abc import Callable
-from dataclasses import dataclass, field
+from collections.abc import Callable, Mapping
+from dataclasses import asdict, dataclass, field
 import logging
 import math
 from typing import TYPE_CHECKING, Any
@@ -24,7 +24,6 @@ from homeassistant.helpers.event import async_track_time_interval
 from homeassistant.helpers.storage import Store
 
 from .const import (
-    CONF_PRESENCE_HOLD,
     DOMAIN,
     MANUFACTURER,
     MIN_FLOOR_NODES,
@@ -36,7 +35,8 @@ from .const import (
 from .engine import Decision, HiveState, LinkKey, Rooms, Run, access_points
 from .engine.floor import FloorFix, FloorModel
 from .engine.imaging import line_distance
-from .engine.rooms import HOLD, SIGNAL_VAR_FLOOR, SIGNAL_WINDOW, STILL_FIT, Separation, separation
+from .engine.rooms import CONFIDENCE, SIGNAL_VAR_FLOOR, SIGNAL_WINDOW, STILL_FIT, Separation, separation
+from .engine.tracker import Estimate, Params, RoomTracker, from_decision, from_rooms, recorded
 from .plans import FloorPlans
 
 if TYPE_CHECKING:
@@ -78,7 +78,7 @@ class RoomPresence:
         self.hub = hub
         self.hass = hub.hass
         self.entry = hub.entry
-        self.engine = Rooms(hold=self.hold_option())
+        self.engine = Rooms()
         self.store: Store[dict[str, Any]] = Store(self.hass, STORE_VERSION, store_key(self.entry.entry_id))
         self.floors: dict[str, Floor] = {}
         self.live: dict[str, int] = {}  # live links per floor, at the latest second
@@ -87,6 +87,12 @@ class RoomPresence:
         self._separating: set[str] = set()  # floors being checked
         self.models: dict[str, FloorModel] = {}  # position per floor, on the hive's layout or the plan
         self.fixes: dict[str, FloorFix] = {}
+        # Who is where, per floor: a room tracker over the floor's calibration (engine/tracker.py),
+        # rebuilt when the calibration or the plan's rooms or exits change, and its latest estimate
+        self.trackers: dict[str, RoomTracker] = {}
+        self.estimates: dict[str, Estimate] = {}
+        self._built: dict[str, tuple] = {}  # by floor: what its tracker was built from
+        self._calibration = 0  # counts calibration changes
         self._flags: dict[str, deque[tuple[float, frozenset]]] = {}  # by floor: links moving, the last seconds
         self.plans = FloorPlans(self.hass, self.entry.entry_id)
         self._listeners: list[Callable[[], None]] = []
@@ -120,13 +126,6 @@ class RoomPresence:
             self.engine.runs.clear()
             if recorded:
                 self._async_save()
-
-    def hold_option(self) -> float:
-        return float(self.entry.options.get(CONF_PRESENCE_HOLD, HOLD))
-
-    @callback
-    def async_apply_options(self) -> None:
-        self.engine.hold = self.hold_option()
 
     # Floors and areas
 
@@ -173,6 +172,10 @@ class RoomPresence:
         self.floors = {f.key: f for f in ordered}
         for key in [key for key in self.engine.decisions if key not in self.floors]:
             self.engine.rest(key)
+        for key in [key for key in self.trackers.keys() | self.estimates.keys() if key not in self.floors]:
+            self.trackers.pop(key, None)
+            self.estimates.pop(key, None)
+            self._built.pop(key, None)
         for key in [key for key in self.separations if key not in self.floors]:
             del self.separations[key]
         self._async_raise_issues({key: f for key, f in self.floors.items() if len(f.nodes) < MIN_FLOOR_NODES})
@@ -254,21 +257,28 @@ class RoomPresence:
             live[floor] = len(scores)
             signal = self.signal(floor, now)
             active = self._active(floor, moving, now)
-            ended.append(self.engine.step(
-                floor, self.floor_areas(floor), scores, now, bool(moving), signal, bool(active), active,
-                breathing_links=self.breathing(floor, now),
-            ))
-            # Room presence first: with rooms calibrated, the map shows someone only in a room with
-            # presence (the one someone walks in now, else the latest to win), walking only while
-            # room presence says so. The empty floor winning, or no room with presence, is nobody,
+            run = self.engine.runs.get(floor)
+            recording = run is not None and run.starts < now <= run.ends
+            areas = self.floor_areas(floor)
+            ended.append(self.engine.step(floor, areas, scores, now, bool(moving), signal, bool(active)))
+            # Who is where: the room tracker, on the classes fitted once in Rooms.step. While a
+            # calibration records, its instructions say where everyone is.
+            tracker = self._tracker(floor, areas, now)
+            if recording:
+                estimate = tracker.pin(run.area, not run.still, now) if tracker else recorded(run.area, not run.still)
+            elif tracker is None:
+                estimate = from_decision(self.engine.decisions.get(floor), CONFIDENCE)
+            else:
+                estimate = tracker.step_fits(self.engine.fits.get(floor), now, bool(active), self.breathing(floor, now))
+            self.estimates[floor] = estimate
+            # Presence first on the map: with rooms calibrated, someone is shown only in the room the
+            # tracker puts them in, with footprints only while it says they walk; nobody otherwise,
             # whatever the links' geometry says (people upstairs, someone shifting in a chair).
-            sure = self.sure_room(floor)
-            room = sure or self.presence_room(floor, now)
-            calibrated = any(self.engine.areas.get(area) for area in self.floor_areas(floor))
-            if calibrated and room is None:
+            calibrated = tracker is not None or any(self.engine.areas.get(area) for area in areas)
+            if calibrated and estimate.room is None:
                 moving = set()
             model = self._layout(floor, hive)
-            if (fix := model.update(scores, now, moving, room, walking=sure is not None or not calibrated)) is not None:
+            if (fix := model.update(scores, now, moving, estimate.room, walking=estimate.walking or not calibrated)) is not None:
                 self.fixes[floor] = fix
             else:
                 self.fixes.pop(floor, None)
@@ -296,6 +306,12 @@ class RoomPresence:
             placed = {mac: p for mac, p in plan.nodes.items() if mac in nodes} | plan.access_points
             model.set_layout(hive, placed, plan=(plan.width, plan.height), nodes=nodes, rooms=plan.rooms)
         return model
+
+    @callback
+    def async_exits_changed(self, floor: str) -> None:
+        """A floor's ways off changed: its tracker is rebuilt on the next second (_tracker sees the
+        change); the panel shows them now."""
+        self._async_notify()
 
     @callback
     def async_plans_changed(self, floor: str) -> None:
@@ -397,18 +413,40 @@ class RoomPresence:
 
         return set(sorted(others, key=away)[:CONFIRM_SUPPORT_NEAREST])
 
-    def presence_room(self, floor: str, now: float) -> str | None:
-        """The floor's room whose presence won last, while it holds: where someone is when room
-        presence is not sure of anyone moving this second."""
-        held = [(win[0], area) for area in self.floor_areas(floor) if (win := self.engine.wins.get(area)) and self.engine.presence(area, now) is not None]
-        return max(held)[1] if held else None
+    def _tracker(self, floor: str, areas: list[str], now: float) -> RoomTracker | None:
+        """The floor's room tracker, rebuilt (carrying on from the old one) when its calibration,
+        areas, drawn rooms or exits changed; a first one starts from what the floor showed (the
+        calibration just recorded says where everyone is). None without an empty class or a
+        walking class."""
+        plan = self.plans.floors.get(floor)
+        drawn = tuple(sorted(plan.rooms)) if plan is not None else ()
+        exits = tuple(sorted(self.plans.exits.get(floor, ())))
+        key = (self._calibration, tuple(sorted(areas)), drawn, exits)
+        if self._built.get(floor) != key:
+            self._built[floor] = key
+            old = self.trackers.pop(floor, None)
+            if (classes := from_rooms(self.engine, floor, areas)) is not None:
+                tracker = self.trackers[floor] = RoomTracker(classes, drawn, exits)
+                if old is not None:
+                    tracker.adopt(old)
+                elif (shown := self.estimates.get(floor)) is not None:
+                    tracker.pin(shown.room, shown.walking, now)
+        return self.trackers.get(floor)
 
-    def sure_room(self, floor: str) -> str | None:
-        """The area room presence is sure someone moves in on the floor, to keep the map in it."""
-        decision = self.engine.decisions.get(floor)
-        if decision is None or decision.room is None or (decision.confidence or 0) < self.engine.confidence:
-            return None
-        return decision.room
+    @staticmethod
+    def confidence(estimate: Estimate | None) -> float | None:
+        """The probability of what a floor shows (its room, or nobody), rounded for display."""
+        q = None if estimate is None else estimate.confidence
+        return None if q is None else round(q, 2)
+
+    def area_presence(self, area: str) -> tuple[bool, float | None, bool]:
+        """An area's presence from its floor's tracker: on, its probability, and still (someone in
+        it who is not walking)."""
+        estimate = self.estimates.get(self.area_floor(area) or NO_FLOOR)
+        if estimate is None or not estimate.present(area):
+            return False, None, False
+        still = area == estimate.room and not estimate.walking
+        return True, round(estimate.probabilities.get(area, 0.0), 2), still
 
     def rooms_view(self, floor: str) -> list[dict[str, Any]]:
         """The rooms drawn on the floor's plan, with their area names."""
@@ -470,6 +508,7 @@ class RoomPresence:
 
     @callback
     def _async_save(self) -> None:
+        self._calibration += 1  # the trackers rebuild on the new classes
         self._separate.update(self.floors)
         self.entry.async_create_task(
             self.hass, self.store.async_save(self.engine.to_dict()), "wisp save room calibration"
@@ -563,19 +602,22 @@ class RoomPresence:
         return self.hub.transport is not None and floor is not None and self.live.get(floor, 0) > 0
 
     def room(self, floor: str) -> str | None:
-        """The room sensor's state: the area someone moves in, NONE, or None when it cannot tell."""
-        decision = self.engine.decisions.get(floor)
-        if decision is None:
+        """The room sensor's state: the area the floor's person is in (walking or still), NONE for
+        nobody on the floor, or None before the floor's first second."""
+        estimate = self.estimates.get(floor)
+        if estimate is None:
             return None
-        return NONE if decision.room is None else self.area_name(decision.room)
+        return NONE if estimate.room is None else self.area_name(estimate.room)
 
-    def probabilities(self, decision: Decision | None, by_name: bool = True, digits: int = 2) -> dict[str, float]:
-        """Per class, most likely first: by area name (or id), NONE for nobody moving."""
-        if decision is None:
+    def probabilities(
+        self, probabilities: Mapping[str | None, float] | None, by_name: bool = True, digits: int = 2
+    ) -> dict[str, float]:
+        """Per room, most likely first: by area name (or id), NONE for nobody on the floor."""
+        if not probabilities:
             return {}
         return {
             NONE if cls is None else self.area_name(cls) if by_name else cls: round(p, digits)
-            for cls, p in sorted(decision.probabilities.items(), key=lambda item: -item[1])
+            for cls, p in sorted(probabilities.items(), key=lambda item: -item[1])
         }
 
     def samples(self, floor: str) -> dict[str, int]:
@@ -611,18 +653,17 @@ class RoomPresence:
         engine = self.engine
         if not (engine.areas or engine.empty or engine.runs):
             return None
-        now = self.hub.clock()
         out = []
         for key, floor in self.floors.items():
-            decision = engine.decisions.get(key)
+            estimate = self.estimates.get(key)
             out.append({
                 "floor": key or None,
                 "name": floor.name,
                 "room": self.room(key),
-                "area": decision.room if decision else None,
-                "confidence": None if decision is None or decision.confidence is None else round(decision.confidence, 2),
+                "area": estimate.room if estimate else None,
+                "confidence": self.confidence(estimate),
                 "presence": [
-                    {"area": area, "name": self.area_name(area), "on": engine.presence(area, now) is not None}
+                    {"area": area, "name": self.area_name(area), "on": self.area_presence(area)[0]}
                     for area in self.floor_areas(key)
                 ],
             })
@@ -681,7 +722,6 @@ class RoomPresence:
         on it to calibrate; every Home Assistant floor is there, with nodes or not, so a plan can
         wait for its nodes. Calibrated areas on no floor with nodes come last, to clear."""
         engine = self.engine
-        now = self.hub.clock()
         nodes_in: dict[str, int] = {}
         for node in self.hub.nodes.values():
             if node.area:
@@ -696,23 +736,23 @@ class RoomPresence:
         floor_names = {f.floor_id: f.name for f in registry_floors}
         floors = []
         for key, floor in sorted(shown_floors.items(), key=lambda kv: (kv[0] == NO_FLOOR, order.get(kv[0], 0))):
-            decision = engine.decisions.get(key)
+            estimate = self.estimates.get(key)
             run = engine.runs.get(key)
             shown = {area for area in nodes_in if self.area_floor(area) == key} | set(self.floor_areas(key))
             if run and run.area:  # its first samples are on the way
                 shown.add(run.area)
             areas = []
             for area in shown:
-                win = engine.presence(area, now)
+                on, confidence, still = self.area_presence(area)
                 areas.append({
                     "area": area,
                     "name": self.area_name(area),
                     "nodes": nodes_in.get(area, 0),
                     "samples": len(engine.areas.get(area, ())),
                     "still_samples": len(engine.still.get(area, ())),
-                    "presence": win is not None,
-                    "still": engine.still_present(area, now),
-                    "confidence": None if win is None else round(win, 2),
+                    "presence": on,
+                    "still": still,
+                    "confidence": confidence,
                 })
             floors.append({
                 "floor": key or None,
@@ -720,8 +760,10 @@ class RoomPresence:
                 "nodes": sorted(floor.nodes),
                 "live_links": self.live.get(key, 0),
                 "room": self.room(key),
-                "area": decision.room if decision else None,
-                "confidence": None if decision is None or decision.confidence is None else round(decision.confidence, 2),
+                "area": estimate.room if estimate else None,
+                "confidence": self.confidence(estimate),
+                "walking": bool(estimate and estimate.walking),
+                "exits": sorted(self.plans.exits.get(key, ())),
                 "empty_samples": len(engine.empty.get(key, ())),
                 "run": None if run is None else {
                     "area": run.area,
@@ -773,9 +815,25 @@ class RoomPresence:
             return {
                 "room": d.room,
                 "confidence": d.confidence,
-                "probabilities": self.probabilities(d, by_name=False, digits=3),
+                "probabilities": self.probabilities(d.probabilities, by_name=False, digits=3),
                 "motion": d.motion,
                 "links": d.links,
+            }
+
+        def tracked(key: str) -> dict[str, Any] | None:
+            estimate, tracker = self.estimates.get(key), self.trackers.get(key)
+            if estimate is None:
+                return None
+            ago = (lambda t: None if tracker is None or t == -math.inf else round(now - t))
+            return {
+                "room": estimate.room,
+                "walking": estimate.walking,
+                "walking_probability": round(estimate.walking_probability, 3),
+                "probabilities": self.probabilities(estimate.probabilities, by_name=False, digits=3),
+                "tracker": tracker is not None,
+                "ways_off": sorted(tracker.ways_off) if tracker else [],
+                "active_s_ago": ago(tracker.last_active) if tracker else None,
+                "breathing_s_ago": ago(tracker.last_breathing) if tracker else None,
             }
 
         floors = []
@@ -795,10 +853,9 @@ class RoomPresence:
                     "skipped": run.skipped,
                 } if run else None,
                 "decision": decision(engine.decisions.get(key)),
-                "still": decision(engine.still_decisions.get(key)),
-                "walked": engine.walked.get(key),
-                "active_s_ago": None if (at := engine.active_at.get(key)) is None else round(now - at),
-                "breathing_s_ago": None if not (b := engine.link_breathing.get(key)) else round(now - max(b.values())),
+                "still": decision(engine.still_decision(key, self.floor_areas(key))),
+                "estimate": tracked(key),
+                "exits": sorted(self.plans.exits.get(key, ())),
                 "separation": self.separation_view(key),
             })
         positions = {
@@ -816,15 +873,14 @@ class RoomPresence:
             "positions": positions,
             "settings": {
                 "quiet": engine.quiet,
-                "confidence": engine.confidence,
-                "hold_s": engine.hold,
+                "confidence": CONFIDENCE,
                 "min_samples": engine.min_samples,
                 "sample_cap": engine.cap,
                 "link_age_s": ROOM_LINK_AGE,
-                "active_hold_s": engine.active_hold,
                 "still_fit": STILL_FIT,
                 "signal_window_s": SIGNAL_WINDOW,
                 "signal_var_floor": SIGNAL_VAR_FLOOR,
+                "tracker": asdict(Params()),
             },
             "floors": floors,
             "areas": {
@@ -834,8 +890,8 @@ class RoomPresence:
                     "samples": len(engine.areas.get(area, ())),
                     "links": links(engine.areas.get(area, ())),
                     "still_samples": len(engine.still.get(area, ())),
-                    "presence": engine.presence(area, now),
-                    "still": engine.still_present(area, now),
+                    "presence": self.area_presence(area)[1],
+                    "still": self.area_presence(area)[2],
                 }
                 for area in sorted(self.all_areas())
             },

@@ -34,7 +34,9 @@ SCORES = {  # someone walking reaches the link between the nodes both ways, as o
     "office": ((105, 220), (310, 260)),
     None: ((104, 102), (103, 106)),
     "restless": ((192, 185), (104, 102)),  # the Kitchen's links busy, all under the motion threshold
-    "upstairs": ((104, 215), (103, 225)),  # someone on the floor above: two links flag motion, no room's pattern
+    # Someone on the floor above, where the access point hangs: its links flag motion, no room's
+    # pattern, and no pair of nodes moves both ways (no activity: the empty floor records it)
+    "upstairs": ((215, 104), (225, 103)),
 }
 # RSSI with nobody there, same order, and how much weaker the links arrive with someone in a room,
 # walking or sitting still: a body near a link absorbs some of it
@@ -148,37 +150,36 @@ async def test_calibrate_rooms_then_presence(hass: HomeAssistant, house: House, 
     await house.calibrate("office")
     await house.calibrate(None)  # the empty floor, nobody moving
     assert hass.states.get(CALIBRATION).attributes["samples"] == {"Kitchen": 25, "Office": 25, "empty": 25}
-    await house.seconds(61, None)  # the presence the recordings gave has ended
-    assert (state(hass, KITCHEN), state(hass, OFFICE_PRESENCE)) == ("off", "off")
-
-    await house.seconds(2, "kitchen")  # a room's presence takes two seconds of walking in a row
+    await house.seconds(1, None)  # the empty floor's recording said nobody is there
     room = hass.states.get(ROOM)
-    assert room.state == "Kitchen" and room.attributes["confidence"] >= 0.9
+    assert room.state == "none" and room.attributes["confidence"] >= 0.9 and room.attributes["walking"] is False
+    assert (state(hass, KITCHEN), state(hass, OFFICE_PRESENCE)) == ("off", "off")
+    assert hass.states.get(KITCHEN).attributes["confidence"] is None
+
+    await house.seconds(2, "kitchen")
+    room = hass.states.get(ROOM)
+    assert room.state == "Kitchen" and room.attributes["confidence"] >= 0.9 and room.attributes["walking"] is True
     probabilities = room.attributes["probabilities"]
     assert list(probabilities)[0] == "Kitchen" and sorted(probabilities) == ["Kitchen", "Office", "none"]
     assert room.attributes["friendly_name"] == "Wisp Room"
     assert state(hass, KITCHEN) == "on" and hass.states.get(KITCHEN).attributes["confidence"] >= 0.9
     assert hass.states.get(KITCHEN).attributes["device_class"] == "occupancy"
-    await house.seconds(2, "office")
-    assert state(hass, ROOM) == "Office"
-    assert (state(hass, OFFICE_PRESENCE), state(hass, KITCHEN)) == ("on", "on")
 
-    # Nobody moving: the floor is empty at once; the office holds 60 s after it last won, the
-    # kitchen 10 s once its walker was seen walking in the office (nobody changes room unseen)
-    await house.seconds(1, None)
+    # One person a floor: walking on into the office takes them out of the kitchen
+    await house.seconds(2, "office")
+    assert (state(hass, ROOM), state(hass, OFFICE_PRESENCE), state(hass, KITCHEN)) == ("Office", "on", "off")
+
+    # Sitting down (a few shifts in the chair), then quietly: still there, not walking
+    await house.seconds(3, sitting="office", fidget=1)
+    await house.seconds(120, sitting="office")
     room = hass.states.get(ROOM)
-    assert room.state == "none" and room.attributes == {
-        "confidence": None, "probabilities": {}, "icon": "mdi:floor-plan", "friendly_name": "Wisp Room"
-    }
-    await house.seconds(8, None)
-    assert (state(hass, KITCHEN), state(hass, OFFICE_PRESENCE)) == ("on", "on")
-    await house.seconds(2, None)
-    assert (state(hass, KITCHEN), state(hass, OFFICE_PRESENCE)) == ("off", "on")
-    assert hass.states.get(KITCHEN).attributes["confidence"] is None
-    await house.seconds(48, None)
-    assert state(hass, OFFICE_PRESENCE) == "on"
-    await house.seconds(2, None)
-    assert state(hass, OFFICE_PRESENCE) == "off"
+    assert room.state == "Office" and room.attributes["walking"] is False
+    assert hass.states.get(OFFICE_PRESENCE).attributes["still"] is True and state(hass, KITCHEN) == "off"
+
+    # Walking out (no plan: every room can be the way out) and gone
+    await house.seconds(3, "kitchen")
+    await house.seconds(30, None)
+    assert (state(hass, ROOM), state(hass, KITCHEN), state(hass, OFFICE_PRESENCE)) == ("none", "off", "off")
 
     # Every room entity is on the hub's device, not a node's
     registry = er.async_get(hass)
@@ -193,64 +194,62 @@ async def test_calibrate_rooms_then_presence(hass: HomeAssistant, house: House, 
 async def test_sitting_presence_from_the_walk_and_activity(hass: HomeAssistant, house: House) -> None:
     """Someone walks into the kitchen and sits down to work: the room they walked in stays on while
     the link between the nodes moves both ways now and then (each node confirming the other's), and
-    ends once that stops. A link moving one way only is a node's noise and keeps no one."""
+    ends some minutes after that stops. A link moving one way only is a node's noise, no activity."""
     await house.calibrate("kitchen")
     await hass.services.async_call(DOMAIN, "calibrate_room", {"area": "kitchen", "mode": "still", "duration": 25}, blocking=True)
     await house.seconds(25, sitting="kitchen")  # the kitchen is a room people sit in
     await house.calibrate("office")
     await house.calibrate(None)
-    await house.seconds(61, None)  # the recordings' presence has ended
+    await house.seconds(1, None)
     assert state(hass, KITCHEN) == "off"
     await house.seconds(2, "kitchen")
     kitchen = hass.states.get(KITCHEN)
     assert kitchen.state == "on" and kitchen.attributes["still"] is False
-    await house.seconds(300, sitting="kitchen", fidget=60)  # a shift in the chair a minute
+    await house.seconds(900, sitting="kitchen", fidget=10)  # working at a desk: a shift every few seconds
     kitchen = hass.states.get(KITCHEN)
     assert kitchen.state == "on" and kitchen.attributes["still"] is True and kitchen.attributes["confidence"] >= 0.6
-    assert (state(hass, ROOM), state(hass, OFFICE_PRESENCE)) == ("none", "off")  # nobody walks
+    assert (state(hass, ROOM), state(hass, OFFICE_PRESENCE)) == ("Kitchen", "off")
+    assert hass.states.get(ROOM).attributes["walking"] is False
     rooms = (await async_get_config_entry_diagnostics(hass, house.entry))["rooms"]
     (floor,) = rooms["floors"]
-    assert floor["decision"]["room"] is None and floor["walked"] == "kitchen" and floor["active_s_ago"] < 60
+    estimate = floor["estimate"]
+    assert (estimate["room"], estimate["walking"], estimate["tracker"]) == ("kitchen", False, True)
+    assert estimate["active_s_ago"] < 10 and estimate["ways_off"] == ["kitchen", "office"]
     assert sorted(floor["still"]["probabilities"]) == ["kitchen", "none", "office"]
-    assert rooms["areas"]["kitchen"]["still"] is True and rooms["settings"]["active_hold_s"] == 180
+    assert rooms["areas"]["kitchen"]["still"] is True and rooms["settings"]["tracker"]["quiet_hold"] == 600
 
-    # Gone without a sign: after 3 minutes without activity the presence ends at once
-    await house.seconds(1, sitting="kitchen", fidget=1)  # a last shift in the chair
-    await house.seconds(170, None)
-    assert state(hass, KITCHEN) == "on"
-    await house.seconds(15, None)
+    # Gone without a sign: some minutes without activity and the presence ends
+    await house.seconds(1200, None)
     kitchen = hass.states.get(KITCHEN)
     assert kitchen.state == "off" and kitchen.attributes == kitchen.attributes | {"confidence": None, "still": False}
 
-    # A node's noise, one way only, keeps no one: the office walked in, then only Hall's link flags
-    await house.seconds(2, "office")
+    # A node's noise, one way only, is no activity: only Hall's link flags
     for _ in range(4):
         await house.seconds(50, None)
         house.udp.receive(encode_report(house.seq + 1, NODE_A, [(NODE_B, 1, -60, 230, 150, 10, 1)], uptime=60), IP_A)
-    assert state(hass, OFFICE_PRESENCE) == "off"
+    (floor,) = (await async_get_config_entry_diagnostics(hass, house.entry))["rooms"]["floors"]
+    assert floor["estimate"]["active_s_ago"] > 1000 and state(hass, OFFICE_PRESENCE) == "off"
 
 
 async def test_breathing_holds_someone_sitting_still(hass: HomeAssistant, house: House) -> None:
     """Node firmware 0.1.7 with breathing detection on: someone who walked into the kitchen and sits
-    perfectly still, never shifting in the chair, stays while its links show breathing, and is gone
-    3 minutes after that stops. Breathing with nobody seen walking in starts nothing."""
+    perfectly still, never shifting in the chair, stays while its links show breathing, and may
+    have left some minutes after that stops. Breathing with nobody seen walking in starts nothing."""
     await house.calibrate("kitchen")
     await hass.services.async_call(DOMAIN, "calibrate_room", {"area": "kitchen", "mode": "still", "duration": 25}, blocking=True)
     await house.seconds(25, sitting="kitchen")
     await house.calibrate("office")
     await house.calibrate(None)
-    await house.seconds(61, None)
     await house.seconds(60, sitting="kitchen", breathing=True)  # nobody walked in: nobody
     assert state(hass, KITCHEN) == "off"
     await house.seconds(2, "kitchen")
-    await house.seconds(400, sitting="kitchen", breathing=True)
+    await house.seconds(3, sitting="kitchen", fidget=1)  # sitting down
+    await house.seconds(1800, sitting="kitchen", breathing=True)  # half an hour, perfectly still
     kitchen = hass.states.get(KITCHEN)
     assert kitchen.state == "on" and kitchen.attributes["still"] is True
     (floor,) = (await async_get_config_entry_diagnostics(hass, house.entry))["rooms"]["floors"]
-    assert floor["breathing_s_ago"] <= 1 and floor["active_s_ago"] > 300
-    await house.seconds(170, sitting="kitchen")
-    assert state(hass, KITCHEN) == "on"
-    await house.seconds(20, sitting="kitchen")
+    assert floor["estimate"]["breathing_s_ago"] <= 1 and floor["estimate"]["active_s_ago"] > 1700
+    await house.seconds(1200, sitting="kitchen")
     assert state(hass, KITCHEN) == "off"
 
 
@@ -348,8 +347,8 @@ async def test_still_calibration_and_separation(hass: HomeAssistant, house: Hous
     assert separation[("office", "still")]["name"] == "Office"
 
     # Walking into the kitchen and sitting down to work: the room walked in, held by activity
-    await house.seconds(61, None)
     await house.seconds(2, "kitchen")
+    await house.seconds(3, sitting="kitchen", fidget=1)
     await house.seconds(70, sitting="kitchen", fidget=10)  # sitting and working: a shift now and then
     kitchen = hass.states.get(KITCHEN)
     assert kitchen.state == "on" and kitchen.attributes["still"] is True and state(hass, OFFICE_PRESENCE) == "off"
@@ -374,13 +373,11 @@ async def test_restless_links_make_no_presence(hass: HomeAssistant, house: House
     """Links below the nodes' motion threshold (no motion flag) are nobody, however they look."""
     await house.calibrate("kitchen")
     await house.calibrate(None)
-    await house.seconds(61, None)
+    await house.seconds(1, None)
     assert state(hass, KITCHEN) == "off"
-    await house.seconds(5, "restless")
+    await house.seconds(30, "restless")
     assert (state(hass, ROOM), state(hass, KITCHEN)) == ("none", "off")
-    await house.seconds(1, "kitchen")
-    assert (state(hass, ROOM), state(hass, KITCHEN)) == ("Kitchen", "off")  # one second: not yet
-    await house.seconds(1, "kitchen")
+    await house.seconds(2, "kitchen")
     assert (state(hass, ROOM), state(hass, KITCHEN)) == ("Kitchen", "on")
 
 
@@ -399,11 +396,12 @@ async def test_no_walker_when_the_empty_floor_wins(hass: HomeAssistant, house: H
     await house.hass.services.async_call(DOMAIN, "calibrate_empty", {"duration": 25}, blocking=True)
     await house.seconds(25, "upstairs")  # the empty floor learns what the floor above does to it
     hub = house.entry.runtime_data
-    await house.seconds(5, "upstairs")  # the Office's presence from its recording still holds:
-    (person,) = hub.map_snapshot()["people"]  # someone shown there, still, as its presence sensor says
-    assert person["walking"] is False and state(hass, OFFICE_PRESENCE) == "on"
-    await house.seconds(60, "upstairs")  # once it ends, nobody: the motion is the floor above's
+    await house.seconds(60, "upstairs")  # nobody: the motion is the floor above's
     assert state(hass, ROOM) == "none" and state(hass, OFFICE_PRESENCE) == "off" and "people" not in hub.map_snapshot()
+    await house.seconds(2, "office")
+    await house.seconds(3, sitting="office", fidget=1)  # sits down there
+    (person,) = hub.map_snapshot()["people"]  # shown there, still, as its sensor says
+    assert person["walking"] is False and state(hass, OFFICE_PRESENCE) == "on"
     await house.seconds(5, "kitchen")  # someone walking in a room still shows
     assert state(hass, ROOM) == "Kitchen" and hub.map_snapshot()["people"]
 
@@ -411,7 +409,8 @@ async def test_no_walker_when_the_empty_floor_wins(hass: HomeAssistant, house: H
 async def test_room_writes(hass: HomeAssistant, house: House) -> None:
     await house.calibrate("kitchen")
     await house.calibrate("office")
-    await house.seconds(61, None)  # both rooms won while calibrating: wait out the hold
+    await house.calibrate(None)
+    await house.seconds(1, None)
     assert (state(hass, KITCHEN), state(hass, OFFICE_PRESENCE)) == ("off", "off")
     events = async_capture_events(hass, EVENT_STATE_CHANGED)
 
@@ -575,7 +574,7 @@ async def test_floors_follow_node_areas(hass: HomeAssistant, udp: FakeUdp, hass_
 
     diag = await async_get_config_entry_diagnostics(hass, entry)
     rooms = diag["rooms"]
-    assert rooms["settings"]["hold_s"] == 60 and rooms["settings"]["quiet"] == 1.5
+    assert "hold_s" not in rooms["settings"] and rooms["settings"]["quiet"] == 1.5
     assert rooms["areas"]["kitchen"] == {
         "name": "Kitchen", "floor": "upstairs", "samples": 25, "links": 2, "still_samples": 0,
         "presence": rooms["areas"]["kitchen"]["presence"], "still": False,

@@ -21,7 +21,7 @@ from .fake_node import encode_hive_report, encode_report
 from .test_init import HALL, OFFICE, fire, setup_hub
 from .test_map import subscribe as subscribe_map
 from .test_panel import subscribe as subscribe_panel
-from .test_rooms import node_subentry, setup_with_areas
+from .test_rooms import House, node_subentry, setup_with_areas
 
 pytestmark = pytest.mark.usefixtures("enable_custom_integrations")
 
@@ -114,7 +114,7 @@ async def test_someone_moving_lands_on_the_plan(
         "nodes": {NODE_A: [2.0, 4.0], NODE_B: [8.0, 4.0]},
         "access_points": {AP: [5.0, 0.5]},
         "rooms": {},
-    }}}
+    }}, "exits": {}}
     assert await hass.config_entries.async_reload(entry.entry_id)
     await hass.async_block_till_done()
     hub = entry.runtime_data
@@ -134,7 +134,7 @@ async def test_someone_moving_lands_on_the_plan(
     # Removing the plan takes its positions; the map is the hive's again
     assert await ok(client, type="wisp/floor/clear") is None
     assert "floors" not in hub.map_snapshot() and "plan" not in hub.panel_snapshot()["floors"][0]
-    assert hass_storage[f"wisp.{entry.entry_id}.plans"]["data"] == {"floors": {}}
+    assert hass_storage[f"wisp.{entry.entry_id}.plans"]["data"] == {"floors": {}, "exits": {}}
     assert await ok(client, type="wisp/floor/clear") is None  # nothing to remove is fine
 
     # Deleting the hub deletes its plans
@@ -344,6 +344,47 @@ async def test_plan_images_are_uploaded_served_and_cleaned_up(
     await ok(ws_client, type="wisp/floor/clear")
     assert (await client.get(second)).status == 404
 
+
+
+async def test_ways_off_a_floor(hass: HomeAssistant, udp: FakeUdp, hass_ws_client, hass_storage: dict) -> None:
+    """The rooms with stairs or a door outside, with or without a plan: stored, shown in the panel,
+    and the floor's room tracker lets someone leave only through them."""
+    floors, areas = fr.async_get(hass), ar.async_get(hass)
+    ground, upstairs = floors.async_create("Ground floor"), floors.async_create("Upstairs")
+    areas.async_create("Hall", floor_id=ground.floor_id)
+    areas.async_create("Kitchen", floor_id=ground.floor_id)
+    areas.async_create("Bedroom", floor_id=upstairs.floor_id)
+    entry = await setup_with_areas(hass, (*HALL, "hall"), (*OFFICE, "hall"))
+    hub = entry.runtime_data
+    client = await hass_ws_client(hass)
+    floor = "ground_floor"
+    assert await error(client, type="wisp/floor/set_exits", floor=floor, exits=["garage"]) == ("not_found", "No area garage.")
+    assert await error(client, type="wisp/floor/set_exits", floor=floor, exits=["bedroom"]) == (
+        "invalid_format", "Bedroom is on another floor."
+    )
+    assert (await error(client, type="wisp/floor/set_exits", floor="cellar", exits=[]))[0] == "not_found"
+
+    assert await ok(client, type="wisp/floor/set_exits", floor=floor, exits=["kitchen", "hall", "kitchen"]) == {
+        "exits": ["hall", "kitchen"]  # no plan: nothing else to show
+    }
+    assert hass_storage[f"wisp.{entry.entry_id}.plans"]["data"]["exits"] == {floor: ["hall", "kitchen"]}
+    assert next(f for f in hub.panel_snapshot()["floors"] if f["floor"] == floor)["exits"] == ["hall", "kitchen"]
+    await ok(client, type="wisp/floor/set_plan", floor=floor, url=URL, width=10, height=6)
+    view = await ok(client, type="wisp/floor/set_exits", floor=floor, exits=["kitchen"])
+    assert view["exits"] == ["kitchen"] and view["plan"]["width"] == 10.0  # with the plan's view
+
+    # The tracker takes them: a floor calibrated for the kitchen and the hall leaves by the kitchen
+    house = House(hass, udp, entry)
+    await house.calibrate("kitchen")
+    await hass.services.async_call(DOMAIN, "calibrate_room", {"area": "hall", "duration": 25}, blocking=True)
+    await house.seconds(25, "office")  # the hall walked where the house's office would be
+    await house.calibrate(None)
+    await house.seconds(1)
+    assert hub.presence.trackers[floor].ways_off == {"kitchen"}
+    await ok(client, type="wisp/floor/set_exits", floor=floor, exits=[])
+    assert floor not in hass_storage[f"wisp.{entry.entry_id}.plans"]["data"]["exits"]
+    await house.seconds(1)
+    assert hub.presence.trackers[floor].ways_off == {"hall", "kitchen"}  # none: any room
 
 
 async def test_rooms_drawn_on_a_plan(hass: HomeAssistant, udp: FakeUdp, hass_ws_client, hass_storage: dict) -> None:

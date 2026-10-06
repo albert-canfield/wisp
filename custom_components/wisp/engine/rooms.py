@@ -6,18 +6,17 @@ seconds), since a body near a link's path weakens it. Missing links are left out
 Each room learns from vectors recorded while someone moves in it and, apart, while someone sits
 still in it; each floor learns an empty class while nobody is on it.
 
-A floor is classified by motion only while one of its links reports motion (the node's detector,
-so its Motion threshold, with hysteresis); without those flags, while a link scores QUIET or more.
-Replaying 1.5 quiet hours, a link touched QUIET 16 times, the motion flags came on once. That
-classification uses the log scores, among the rooms' moving classes and the empty class.
+Each second every class of the floor is fitted once to the live log scores (Fits): the moving
+decision here and the room tracker (tracker.py), which says who is where over time, share them.
+The moving decision classifies the floor only while one of its links reports motion (the node's
+detector, so its Motion threshold, with hysteresis); without those flags, while a link scores QUIET
+or more. Replaying 1.5 quiet hours, a link touched QUIET 16 times, the motion flags came on once.
+It picks among the rooms' moving classes and the empty class, and stays for diagnostics and for
+floors without an empty class, where the tracker has no reference.
 
-Nobody changes room without walking: a walk names the room, and someone sitting there keeps its
-presence while the floor shows activity (a link moving both ways, the node at each end agreeing),
-or while the room's own links show someone breathing (node firmware 0.1.7+, when switched on):
-breathing holds a presence, it never starts one.
 The still classification (log scores and signal, the empty class against each room's still
-class) no longer names rooms: signal strength drifts more with nobody there than a seated person
-changes it. It stays for the separation check and diagnostics.
+class) names no rooms: signal strength drifts more with nobody there than a seated person
+changes it. It stays for the separation check and diagnostics, worked out only when asked.
 The caller owns the clock (seconds) and says which floor each area is on.
 """
 from __future__ import annotations
@@ -35,10 +34,10 @@ type Feature = LinkKey | SignalKey
 type Vector = dict[Feature, float]
 type ClassId = str | None  # an area, or None for the floor's empty class
 type ClassKey = tuple[str, str | None]  # (EMPTY, None), or (MOVING or STILL, area)
+type Fit = tuple[float, tuple[int, int]]  # ClassModel.fit: mean log-likelihood per feature, features shared
 
 QUIET = 1.5  # every live score below this: nobody moving (a node's motion flag turns off here)
-CONFIDENCE = 0.6  # a room wins presence from this probability
-HOLD = 60.0  # s presence stays on after the room last won
+CONFIDENCE = 0.6  # a moving decision names its room from this probability
 MIN_SAMPLES = 20  # samples before a class takes part, and per feature before it counts in the class
 SAMPLE_CAP = 600  # latest vectors kept per class: 10 minutes
 VAR_FLOOR = 0.01  # per link, in log score: about 10 %
@@ -48,15 +47,12 @@ SIGNAL_WINDOW = 5  # s: a link's signal is its mean RSSI over the latest reading
 SIGNAL_VAR_FLOOR = 1.0  # dB squared, per link: one link's noise does not dominate
 SIGNAL_LINKS = 4  # links a still body weakens, about: the signal's mean log-likelihood per link
 # counts once per this many live links, so a few weakened links are not diluted on a large floor
-MOVE_SECONDS = 2  # s of walking (gaps up to WALK_GAP) before its seconds count: one stray second lit a room for HOLD
-WALK_GAP = 2.0  # s without a walking second that still continue a walk
-ACTIVE_HOLD = 180.0  # s: someone sitting keeps a room's presence while its links show activity this often
-HANDOFF = 10.0  # s a room's walking presence holds once someone is seen walking in another room
 OWN_LINKS = 0.5  # a room's own links: those its walking class disturbs at least this share of its most disturbed
 STILL_FIT = 4.0  # mean squared z-score of the winner's signal at most: beyond, the signal is unlike
 # every class (a node moved, the empty floor changed) and the still classification cannot tell
 SEPARATION_SAMPLES = 60  # samples tried per class in the separation check, spread over its recording
 EMPTY, MOVING, STILL = "empty", "moving", "still"  # kinds of class
+_LOG_2PI = math.log(2 * math.pi)
 
 
 def features(scores: Mapping[LinkKey, float | None]) -> Vector:
@@ -69,11 +65,6 @@ def signal_features(signal: Mapping[LinkKey, float]) -> Vector:
     return {(tx, rx, SIGNAL): float(rssi) for (tx, rx), rssi in signal.items()}
 
 
-def _kind(key: Feature) -> int:
-    """0 for a log score, 1 for a signal feature."""
-    return len(key) - 2
-
-
 def _var_floor(key: Feature) -> float:
     return SIGNAL_VAR_FLOOR if len(key) == 3 else VAR_FLOOR
 
@@ -81,7 +72,7 @@ def _var_floor(key: Feature) -> float:
 class ClassModel:
     """Diagonal Gaussian of one class: mean and variance per feature, for features seen in enough samples."""
 
-    __slots__ = ("links", "samples", "signal", "sums")
+    __slots__ = ("links", "samples", "signal", "sums", "terms")
 
     def __init__(self, vectors: Iterable[Vector], min_samples: int = MIN_SAMPLES) -> None:
         sums: dict[Feature, list[float]] = {}  # count, sum, sum of squares
@@ -98,6 +89,12 @@ class ClassModel:
         for key, (n, total, squares) in self.sums.items():
             mean = total / n
             self.links[key] = (mean, max(squares / n - mean * mean, _var_floor(key)))
+        self._prepare()
+
+    def _prepare(self) -> None:
+        """Per feature its mean, 1 / (2 variance) and log normaliser, so a fit takes no log: it runs
+        for every class of a floor each second."""
+        self.terms = {key: (mean, 0.5 / var, 0.5 * (_LOG_2PI + math.log(var))) for key, (mean, var) in self.links.items()}
         self.signal = sum(len(key) == 3 for key in self.links)  # signal features
 
     @classmethod
@@ -107,7 +104,8 @@ class ClassModel:
         model.links = {k: g for k, g in scores.links.items() if len(k) == 2} | {
             k: g for k, g in signal.links.items() if len(k) == 3
         }
-        model.samples, model.signal = signal.samples, signal.signal
+        model._prepare()
+        model.samples = signal.samples
         return model
 
     def score(self, vector: Vector) -> tuple[float, int]:
@@ -122,26 +120,28 @@ class ClassModel:
             shared += 1
         return (total / shared if shared else -math.inf), shared
 
-    def fit(self, vector: Vector, held_out: bool = False) -> tuple[float, tuple[int, int]]:
+    def fit(self, vector: Vector, held_out: bool = False) -> Fit:
         """Mean log-likelihood per feature of each kind (log scores, signal) the class shares with
         the vector, the signal's weighted by the vector's signal features over SIGNAL_LINKS, and
         summed: motion and attenuation are two views of one person. And how many of each kind it
         shares. held_out: the vector is one of this class's samples, left out of it."""
         totals, shared, signal = [0.0, 0.0], [0, 0], 0
+        terms = self.terms
         for key, x in vector.items():
-            signal += len(key) == 3
+            kind = len(key) - 2  # 0 for a log score, 1 for a signal feature
+            signal += kind
             if held_out:
                 if (sums := self.sums.get(key)) is None or sums[0] < 2:
                     continue
                 n = sums[0] - 1
                 mean = (sums[1] - x) / n
                 var = max((sums[2] - x * x) / n - mean * mean, _var_floor(key))
-            elif (gauss := self.links.get(key)) is not None:
-                mean, var = gauss
+                totals[kind] -= 0.5 * ((x - mean) ** 2 / var + math.log(2 * math.pi * var))
+            elif (term := terms.get(key)) is not None:
+                d = x - term[0]
+                totals[kind] -= d * d * term[1] + term[2]
             else:
                 continue
-            kind = _kind(key)
-            totals[kind] -= 0.5 * ((x - mean) ** 2 / var + math.log(2 * math.pi * var))
             shared[kind] += 1
         ll = totals[0] / shared[0] if shared[0] else 0.0
         if shared[1]:
@@ -158,29 +158,54 @@ class ClassModel:
         return total / shared if shared else 0.0
 
 
-def _probabilities[K](scored: Mapping[K, tuple[float, tuple[int, int]]]) -> dict[K, float]:
-    """Softmax of fit() over the classes taking part. A class sharing under half the features of a
-    kind that the best covered class shares (calibrated before a node joined, or for an area now
-    on another floor) sits out. The links of a floor see the same person, so their evidence is not
-    independent: a mean log-likelihood per feature (see fit) keeps the confidence honest."""
-    scored = {cls: s for cls, s in scored.items() if any(s[1])}
-    if not scored:
+def _probabilities[K](scored: Mapping[K, Fit]) -> dict[K, float]:
+    """Softmax of fit() over the classes taking part (see taking_part). The links of a floor see
+    the same person, so their evidence is not independent: a mean log-likelihood per feature (see
+    fit) keeps the confidence honest."""
+    counted = {cls: scored[cls][0] for cls in taking_part(scored)}
+    if not counted:
         return {}
-    best = [max(shared[kind] for _, shared in scored.values()) for kind in (0, 1)]
-    taking_part = {
-        cls: ll for cls, (ll, shared) in scored.items() if all(2 * n >= b for n, b in zip(shared, best, strict=True))
-    }
-    if not taking_part:
-        return {}
-    top = max(taking_part.values())
-    weights = {cls: math.exp(ll - top) for cls, ll in taking_part.items()}
+    top = max(counted.values())
+    weights = {cls: math.exp(ll - top) for cls, ll in counted.items()}
     total = sum(weights.values())
     return {cls: w / total for cls, w in weights.items()}
+
+
+def taking_part[K](scored: Mapping[K, Fit]) -> list[K]:
+    """The classes whose fit counts: a class sharing under half the features of a kind that the
+    best covered class shares (calibrated before a node joined, or for an area now on another
+    floor) sits out, and so does one sharing none."""
+    scored = {cls: s for cls, s in scored.items() if any(s[1])}
+    if not scored:
+        return []
+    best = [max(shared[kind] for _, shared in scored.values()) for kind in (0, 1)]
+    return [cls for cls, (_, shared) in scored.items() if all(2 * n >= b for n, b in zip(shared, best, strict=True))]
 
 
 def _moving(motion: float, quiet: float, moving: bool | None) -> bool:
     """Someone moves on the floor: a link reports motion, or without flags (None) scores quiet or more."""
     return motion >= quiet if moving is None else moving
+
+
+@dataclass(frozen=True, slots=True)
+class Fits:
+    """One second of a floor under each of its classes, fitted to the live log scores once and
+    shared by the moving decision and the room tracker: per class ClassModel.fit, by area."""
+
+    empty: Fit | None  # None without an empty class
+    walking: dict[str, Fit]
+    still: dict[str, Fit]
+
+
+def fit_classes(
+    vector: Vector, empty: ClassModel | None, walking: Mapping[str, ClassModel], still: Mapping[str, ClassModel]
+) -> Fits:
+    """Every class fitted to the vector once (log scores only: see Rooms.step)."""
+    return Fits(
+        None if empty is None else empty.fit(vector),
+        {area: model.fit(vector) for area, model in walking.items()},
+        {area: model.fit(vector) for area, model in still.items()},
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -192,6 +217,15 @@ class Decision:
     motion: float  # largest live score
     links: int  # live links
     still: bool = False  # from the still classification
+
+
+def _decision(scored: Mapping[ClassId, Fit], motion: float, links: int) -> Decision | None:
+    """The moving decision from the classes' fits: None with no room to tell."""
+    probabilities = _probabilities(scored)
+    if all(cls is None for cls in probabilities):
+        return None
+    room = max(probabilities, key=probabilities.__getitem__)
+    return Decision(room, probabilities[room], probabilities, motion, links)
 
 
 def decide(
@@ -208,11 +242,7 @@ def decide(
     motion = max(score for score in scores.values() if score is not None)
     if not _moving(motion, quiet, moving):
         return Decision(None, None, {}, motion, len(vector))
-    probabilities = _probabilities({cls: model.fit(vector) for cls, model in models.items()})
-    if all(cls is None for cls in probabilities):
-        return None
-    room = max(probabilities, key=probabilities.__getitem__)
-    return Decision(room, probabilities[room], probabilities, motion, len(vector))
+    return _decision({cls: model.fit(vector) for cls, model in models.items()}, motion, len(vector))
 
 
 def decide_still(
@@ -286,45 +316,32 @@ class Run:
     ends: float
     starts: float = -math.inf  # nothing is recorded until after it: time to leave the floor
     recorded: int = 0
-    skipped: int = 0  # seconds left out: quiet while recording a room moving, moving while
-    # recording it still, or no live links
+    skipped: int = 0  # seconds left out: quiet while recording a room moving, activity while
+    # recording the empty floor, or no live links
     still: bool = False  # a room's still class: someone sits still in it
 
 
 class Rooms:
-    """Calibration samples, recording runs, the latest decisions per floor and presence per area."""
+    """Calibration samples, recording runs, and per floor the latest second: its class fits and
+    moving decision."""
 
     def __init__(
         self,
-        hold: float = HOLD,
         *,
         quiet: float = QUIET,
-        confidence: float = CONFIDENCE,
         min_samples: int = MIN_SAMPLES,
         cap: int = SAMPLE_CAP,
-        move_seconds: int = MOVE_SECONDS,
-        active_hold: float = ACTIVE_HOLD,
     ) -> None:
-        self.hold = hold
         self.quiet = quiet
-        self.confidence = confidence
         self.min_samples = min_samples
         self.cap = cap
-        self.move_seconds = move_seconds
-        self.active_hold = active_hold
-        self.active_at: dict[str, float] = {}  # by floor: when the nodes last confirmed motion
-        self.link_active: dict[str, dict[LinkKey, float]] = {}  # by floor: when each link last was active
-        self.link_breathing: dict[str, dict[LinkKey, float]] = {}  # by floor: when each link last showed breathing
-        self.moves: dict[str, tuple[int, float]] = {}  # by floor: seconds of the current walk, and its last
-        self.walked: dict[str, str] = {}  # by floor: the room someone last walked in, where they sit down
-        self.walked_at: dict[str, float] = {}  # by floor: when they last walked there
         self.areas: dict[str, deque[Vector]] = {}  # moving samples, by area
         self.still: dict[str, deque[Vector]] = {}  # still samples, by area
         self.empty: dict[str, deque[Vector]] = {}  # by floor
         self.runs: dict[str, Run] = {}  # by floor, one at a time
+        self.fits: dict[str, Fits | None] = {}  # the latest second's, by floor; None without live links
         self.decisions: dict[str, Decision | None] = {}  # the latest moving decision, by floor
-        self.still_decisions: dict[str, Decision | None] = {}  # the latest still one, by floor
-        self.wins: dict[str, tuple[float, float, bool]] = {}  # area: time, confidence, still of its latest win
+        self.vectors: dict[str, Vector] = {}  # the latest vector, by floor: for the still classification
         self._models: dict[tuple[str, str], ClassModel] = {}  # (kind, area or floor)
         self._signal: dict[str, dict[LinkKey, deque[float]]] = {}  # latest readings per link, by floor
 
@@ -350,18 +367,11 @@ class Rooms:
             self.still.clear()
             self.empty.clear()
             self.runs.clear()
-            self.wins.clear()
-            self.moves.clear()
-            self.walked.clear()
-            self.walked_at.clear()
-            self.active_at.clear()
-            self.link_active.clear()
-            self.link_breathing.clear()
+            self.fits.clear()
             self._models.clear()
             return
         self.areas.pop(area, None)
         self.still.pop(area, None)
-        self.wins.pop(area, None)
         self._models.pop((MOVING, area), None)
         self._models.pop((STILL, area), None)
         for floor, run in list(self.runs.items()):
@@ -376,21 +386,21 @@ class Rooms:
         self.rest(floor)
 
     def rest(self, floor: str) -> None:
-        """A floor no longer stepped (no node on it now): its decisions, streak and signal readings go."""
+        """A floor no longer stepped (no node on it now): its latest second and signal readings go."""
+        self.fits.pop(floor, None)
         self.decisions.pop(floor, None)
-        self.still_decisions.pop(floor, None)
-        self.moves.pop(floor, None)
-        self.walked.pop(floor, None)
-        self.walked_at.pop(floor, None)
-        self.active_at.pop(floor, None)
-        self.link_active.pop(floor, None)
-        self.link_breathing.pop(floor, None)
+        self.vectors.pop(floor, None)
         self._signal.pop(floor, None)
 
-    def _record(self, run: Run, vector: Vector, motion: float, moving: bool | None) -> None:
-        """moving: as in decide, so a class learns from the seconds it will be asked about."""
-        moves = _moving(motion, self.quiet, moving)
-        if not vector or (run.area is not None and not run.still and not moves):
+    def _record(self, run: Run, vector: Vector, motion: float, moving: bool | None, active: bool | None) -> None:
+        """moving: as in decide, so a class learns from the seconds it will be asked about. active:
+        the nodes confirm motion; the empty floor skips those seconds, so its class never learns
+        someone moving (2 of the owner's 5 empty runs had someone moving: 47% of his empty samples)."""
+        if (
+            not vector
+            or (run.area is None and active)
+            or (run.area is not None and not run.still and not _moving(motion, self.quiet, moving))
+        ):
             run.skipped += 1  # a room's moving class skips still moments; still keeps small motion,
             return  # since sitting and working (typing, shifting in a chair) is never motionless
         kind = EMPTY if run.area is None else STILL if run.still else MOVING
@@ -411,9 +421,9 @@ class Rooms:
         """The classes of a floor's moving classification with enough samples: its areas, then its empty class."""
         out: dict[ClassId, ClassModel] = {}
         for area in areas:
-            if (model := self._model(MOVING, area)) is not None:
+            if (model := self.model(MOVING, area)) is not None:
                 out[area] = model
-        if (model := self._model(EMPTY, floor)) is not None:
+        if (model := self.model(EMPTY, floor)) is not None:
             out[None] = model
         return out
 
@@ -422,19 +432,20 @@ class Rooms:
         one its moving class's signal on the empty class's log scores (someone still leaves them as
         quiet as nobody), then the empty class. None without an empty class with signal: it is the
         reference."""
-        empty = self._model(EMPTY, floor)
+        empty = self.model(EMPTY, floor)
         if empty is None or not empty.signal:
             return {}
         out: dict[ClassId, ClassModel] = {}
         for area in areas:
-            if (model := self._model(STILL, area)) is not None:
+            if (model := self.model(STILL, area)) is not None:
                 out[area] = model
-            elif (model := self._model(MOVING, area)) is not None and model.signal:
+            elif (model := self.model(MOVING, area)) is not None and model.signal:
                 out[area] = ClassModel.borrowed(empty, model)
         out[None] = empty
         return out
 
-    def _model(self, kind: str, key: str) -> ClassModel | None:
+    def model(self, kind: str, key: str) -> ClassModel | None:
+        """A class (EMPTY with a floor, MOVING or STILL with an area), once it has enough samples."""
         samples = self._samples(kind).get(key)
         if samples is None or len(samples) < self.min_samples:
             return None
@@ -442,6 +453,18 @@ class Rooms:
         if model is None:
             model = self._models[(kind, key)] = ClassModel(samples, self.min_samples)
         return model
+
+    def fit(self, floor: str, areas: Iterable[str], vector: Vector) -> Fits:
+        """The floor's classes fitted to one second's log scores: its empty class, and per area
+        its moving and still classes."""
+        walking: dict[str, ClassModel] = {}
+        still: dict[str, ClassModel] = {}
+        for area in areas:
+            if (model := self.model(MOVING, area)) is not None:
+                walking[area] = model
+            if (model := self.model(STILL, area)) is not None:
+                still[area] = model
+        return fit_classes(vector, self.model(EMPTY, floor), walking, still)
 
     def _average(self, floor: str, signal: Mapping[LinkKey, float | None]) -> dict[LinkKey, float]:
         """Mean signal per link over its latest SIGNAL_WINDOW readings; a link missing a second starts over."""
@@ -465,152 +488,72 @@ class Rooms:
         moving: bool | None = None,
         signal: Mapping[LinkKey, float | None] | None = None,
         active: bool | None = None,
-        active_links: Iterable[LinkKey] = (),
-        breathing_links: Iterable[LinkKey] = (),
     ) -> Run | None:
-        """One second of one floor: record for its run, then decide (moving: see decide; signal: RSSI
-        per live link this second; active: whether the nodes confirm motion this second, a link
-        moving both ways with a nearby node agreeing; None when unknown; breathing_links: links
-        that show someone breathing, which only hold a sitting presence). A walking second counts
-        only when the nodes confirm motion: every second of the owner's real walks was, and a
-        node's own noise is not. Returns its run if it just ended."""
-        areas = list(areas)
-        if active:
-            self.active_at[floor] = now
-        if active_links:
-            seen = self.link_active.setdefault(floor, {})
-            for key in active_links:
-                seen[key] = now
-        if breathing_links:
-            breaths = self.link_breathing.setdefault(floor, {})
-            for key in breathing_links:
-                breaths[key] = now
-        vector = features(scores) | signal_features(self._average(floor, signal or {}))
-        live = [score for score in scores.values() if score is not None]
-        motion = max(live, default=0.0)
+        """One second of one floor: record for its run, then fit its classes once (fits[floor], for
+        the room tracker too) and decide (moving: see decide; signal: RSSI per live link this
+        second; active: whether the nodes confirm motion this second, None when unknown). The
+        fits use the log scores only: signal strength drifted more with nobody there than a body
+        changes it. Returns its run if it just ended."""
+        scores_vector = features(scores)
+        vector = scores_vector | signal_features(self._average(floor, signal or {}))
+        motion = max((score for score in scores.values() if score is not None), default=0.0)
         ended = None
         run = self.runs.get(floor)
         recording = run is not None and run.starts < now <= run.ends
         if run is not None:
             if recording:
-                self._record(run, vector, motion, moving)
+                self._record(run, vector, motion, moving, active)
             if now >= run.ends:
                 ended = self.runs.pop(floor)
-        if recording and live:
-            self._known(floor, run, motion, len(live), now)
+        self.vectors[floor] = vector
+        if not scores_vector:
+            self.fits[floor] = self.decisions[floor] = None
             return ended
-        decision = decide(scores, self.models(floor, areas), self.quiet, moving)
-        self.decisions[floor] = decision
-        walks = (
-            decision is not None and decision.room is not None and decision.confidence >= self.confidence
-            and active is not False
-        )
-        if walks:
-            # A walk: confident walking seconds with short gaps. Once it lasts move_seconds each of
-            # its seconds counts for its room, the last one included (someone who sits down a
-            # second after stepping in), while a stray second alone counts for none.
-            count, last = self.moves.get(floor, (0, -math.inf))
-            count = count + 1 if now - last <= WALK_GAP else 1
-            self.moves[floor] = (count, now)
-            if count >= self.move_seconds:
-                self.wins[decision.room] = (now, decision.confidence, False)
-                left = self.walked.get(floor)
-                if left is not None and left != decision.room and (win := self.wins.get(left)) is not None:
-                    # Seen walking here: the room left keeps its presence HANDOFF s more, not HOLD
-                    self.wins[left] = (min(win[0], now - self.hold + HANDOFF), win[1], win[2])
-                self.walked[floor] = decision.room
-                self.walked_at[floor] = now
-                self.active_at[floor] = now  # walking in is activity: sitting down starts from it
-        if not live:
-            self.still_decisions[floor] = None
-        elif walks:
-            self.still_decisions[floor] = None  # not asked while someone walks
+        if recording:
+            self.fits[floor] = None  # the recording says where everyone is: nothing to fit
+            self._known(floor, run, motion, len(scores_vector))
+            return ended
+        areas = list(areas)
+        fits = self.fits[floor] = self.fit(floor, areas, scores_vector)
+        if not _moving(motion, self.quiet, moving):
+            self.decisions[floor] = Decision(None, None, {}, motion, len(scores_vector))
         else:
-            # Nobody moving, or motion no room's walking explains (the empty floor wins, or no room
-            # clearly): someone sitting and working, shifting in a chair, is asked for still
-            self._still_step(floor, areas, vector, motion, now)
+            scored: dict[ClassId, Fit] = dict(fits.walking)
+            if fits.empty is not None:
+                scored[None] = fits.empty
+            self.decisions[floor] = _decision(scored, motion, len(scores_vector))
         return ended
 
-    def _known(self, floor: str, run: Run, motion: float, links: int, now: float) -> None:
+    def _known(self, floor: str, run: Run, motion: float, links: int) -> None:
         """While a recording runs, its instructions say where everyone is: moving or still in its
-        room, or off the floor for the empty floor. Presence and the map follow that instead of
-        classifying with the classes being recorded, which lit up other rooms meanwhile."""
-        self.moves.pop(floor, None)
-        if run.area is None:  # the empty floor: nobody, and the map places nobody walking
-            self.walked.pop(floor, None)
+        room, or off the floor for the empty floor. The decision follows that instead of
+        classifying with the classes being recorded."""
+        if run.area is None:
             self.decisions[floor] = Decision(None, None, {None: 1.0}, motion, links)
-            self.still_decisions[floor] = None
         elif run.still:
             self.decisions[floor] = Decision(None, None, {}, motion, links)
-            self.still_decisions[floor] = Decision(run.area, 1.0, {run.area: 1.0}, motion, links, still=True)
-            self.wins[run.area] = (now, 1.0, True)
         else:
             self.decisions[floor] = Decision(run.area, 1.0, {run.area: 1.0}, motion, links)
-            self.still_decisions[floor] = None
-            self.wins[run.area] = (now, 1.0, False)
-        if run.area is not None:
-            self.walked[floor] = run.area
-            self.walked_at[floor] = now
-            self.active_at[floor] = now
 
-    def _still_step(self, floor: str, areas: list[str], vector: Vector, motion: float, now: float) -> None:
-        """Nobody walks on the floor. Someone who walked into a room people sit in (one with a still
-        calibration) keeps its presence while the floor shows activity, a link moving both ways
-        (the nodes at both ends agree), or the room's own links show breathing, at least every
-        active_hold seconds: nobody changes room without walking, and someone sitting and working
-        moves a little, someone sitting still breathes. Signal strength keeps no
-        one: on the owner's floor it drifted more with nobody there than a seated person changes
-        it, and the still classification found someone on the empty floor every second. A room
-        nobody sits in (a hallway) keeps no one once the walk's own hold ends, and without a walk
-        (after a restart) nobody is held: the still classification lit empty rooms. With no
-        activity for active_hold, the walk is forgotten and a sitting presence ends."""
-        self.still_decisions[floor] = decide_still(vector, self.still_models(floor, areas), motion)
-        last = self._last_activity(floor, self.walked.get(floor))
-        if last is None or now - last > self.active_hold:
-            walked = self.walked.pop(floor, None)
-            if walked is not None and (win := self.wins.get(walked)) is not None and win[2]:
-                del self.wins[walked]  # no sign of anyone sitting for active_hold: gone, not one more HOLD
-            return
-        walked = self.walked.get(floor)
-        if walked in areas and self._model(STILL, walked) is not None:
-            self.wins[walked] = (now, self.confidence, True)
+    def still_decision(self, floor: str, areas: Iterable[str]) -> Decision | None:
+        """The still classification of the floor's latest second, for diagnostics: worked out only
+        when asked, since it names no rooms (see decide_still)."""
+        vector = self.vectors.get(floor)
+        if not vector:
+            return None
+        motion = (self.decisions.get(floor) or Decision(None, None, {}, 0.0, 0)).motion
+        return decide_still(vector, self.still_models(floor, areas), motion)
 
     def own_links(self, area: str) -> set[LinkKey]:
-        """The links someone walking in the area disturbs most, from its walking class: activity on
-        them is someone in it; activity elsewhere on the floor is not."""
-        model = self._model(MOVING, area)
+        """The links someone walking in the area disturbs most, from its walking class, both ways:
+        breathing on them is someone in it; elsewhere on the floor it is not."""
+        model = self.model(MOVING, area)
         if model is None:
             return set()
         means = {key: gauss[0] for key, gauss in model.links.items() if len(key) == 2}
         top = max(means.values(), default=0.0)
         own = {key for key, mean in means.items() if top > 0 and mean >= OWN_LINKS * top}
         return own | {(b, a) for a, b in own}
-
-    def _last_activity(self, floor: str, area: str | None) -> float | None:
-        """When the area's own links last showed activity or breathing (the walk into it counts),
-        else, without per-link activity or a walking class, when the floor did (or the area's own
-        links breathed). Breathing elsewhere on the floor holds nobody here."""
-        last = self.active_at.get(floor)
-        seen = self.link_active.get(floor)
-        own = self.own_links(area) if area is not None else set()
-        if not own:
-            return last
-        breaths = self.link_breathing.get(floor, {})
-        breathed = [breaths[key] for key in own if key in breaths]
-        if not seen:
-            return max([t for t in (last, *breathed) if t is not None], default=None)
-        times = [seen[key] for key in own if key in seen] + breathed + [self.walked_at.get(floor, -math.inf)]
-        return max(times)
-
-    def presence(self, area: str, now: float) -> float | None:
-        """Confidence of the area's latest win while its presence holds, else None."""
-        win = self.wins.get(area)
-        return win[1] if win is not None and now - win[0] <= self.hold else None
-
-    def still_present(self, area: str, now: float) -> bool:
-        """The area's presence holds from a still win: someone is there, not moving."""
-        win = self.wins.get(area)
-        return win is not None and now - win[0] <= self.hold and win[2]
 
     def classes(self, floor: str, areas: Iterable[str]) -> dict[ClassKey, list[Vector]]:
         """The samples of a floor's classes, copied, for separation off the event loop."""

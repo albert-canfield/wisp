@@ -321,16 +321,17 @@ async def test_node_area(hass: HomeAssistant, udp: FakeUdp) -> None:
     assert {d.area_id for d in node_devices(hass, NODE_A)} == {None}
 
 
-async def test_options_set_the_presence_hold(hass: HomeAssistant, udp: FakeUdp) -> None:
+async def test_options_point_to_the_panel(hass: HomeAssistant, udp: FakeUdp) -> None:
+    """No settings: the form says where they are (the panel, each node's ESPHome device). An older
+    entry's presence hold is dropped once the form is saved; nothing reloads."""
     entry = await setup_hub(hass, HALL)
+    hass.config_entries.async_update_entry(entry, options={"presence_hold": 120})
+    await hass.async_block_till_done()
     hub = entry.runtime_data
-    assert hub.presence.engine.hold == 60
     result = await hass.config_entries.options.async_init(entry.entry_id)
     assert result["type"] is FlowResultType.FORM and result["step_id"] == "init"
-    result = await hass.config_entries.options.async_configure(result["flow_id"], {"presence_hold": 120})
+    assert not result["data_schema"].schema
+    result = await hass.config_entries.options.async_configure(result["flow_id"], {})
     await hass.async_block_till_done()
-    assert result["type"] is FlowResultType.CREATE_ENTRY
-    assert entry.options == {"presence_hold": 120}
-    assert entry.runtime_data is hub and hub.presence.engine.hold == 120  # no reload
-    result = await hass.config_entries.options.async_init(entry.entry_id)
-    assert suggested(result, "presence_hold") == 120
+    assert result["type"] is FlowResultType.CREATE_ENTRY and entry.options == {}
+    assert entry.runtime_data is hub

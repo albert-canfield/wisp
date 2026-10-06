@@ -41,6 +41,7 @@ def async_register(hass: HomeAssistant) -> None:
     websocket_api.async_register_command(hass, ws_clear_plan)
     websocket_api.async_register_command(hass, ws_set_node_area)
     websocket_api.async_register_command(hass, ws_set_rooms)
+    websocket_api.async_register_command(hass, ws_set_exits)
     websocket_api.async_register_command(hass, ws_set_channel)
 
 
@@ -332,6 +333,43 @@ async def ws_set_rooms(
     await presence.plans.async_save()
     presence.async_plans_changed(floor)
     connection.send_result(msg["id"], presence.plan_view(floor))
+
+
+@websocket_api.websocket_command({
+    vol.Required("type"): "wisp/floor/set_exits",
+    vol.Optional("floor"): FLOOR,
+    vol.Required("exits"): vol.All([cv.string], vol.Length(max=MAX_ROOMS)),
+})
+@websocket_api.require_admin
+@websocket_api.async_response
+async def ws_set_exits(
+    hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict[str, Any]
+) -> None:
+    """The rooms that lead off a floor besides the ones not drawn on its plan (the hallway): next to
+    the stairs, or with a door outside. The room tracker lets someone leave the floor only through
+    them, so someone who went upstairs is not shown downstairs for minutes. Replaces the floor's
+    list; works with or without a plan."""
+    if (presence := _presence(hass, connection, msg)) is None:
+        return
+    floor = msg.get("floor") or NO_FLOOR
+    if floor not in presence.floors and floor not in presence.plans.floors:
+        _no_floor(connection, msg, floor)
+        return
+    areas = ar.async_get(hass)
+    for area in msg["exits"]:
+        if areas.async_get_area(area) is None:
+            connection.send_error(msg["id"], websocket_api.ERR_NOT_FOUND, f"No area {area}.")
+            return
+        if presence.area_floor(area) != floor:
+            connection.send_error(
+                msg["id"], websocket_api.ERR_INVALID_FORMAT, f"{areas.async_get_area(area).name} is on another floor."
+            )
+            return
+    exits = presence.plans.set_exits(floor, msg["exits"])
+    await presence.plans.async_save()
+    presence.async_exits_changed(floor)
+    view = presence.plan_view(floor) if floor in presence.plans.floors else {}
+    connection.send_result(msg["id"], {"exits": exits, **view})
 
 
 @websocket_api.websocket_command({

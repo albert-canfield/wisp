@@ -93,9 +93,9 @@ class Classes:
 def from_rooms(engine, floor: str, areas: Iterable[str]) -> Classes | None:
     """The classes of a Rooms engine (engine/rooms.py) with its calibration loaded; None without
     an empty class or any walking class."""
-    walking = {a: m for a in areas if (m := engine._model("moving", a)) is not None}
-    still = {a: m for a in walking if (m := engine._model("still", a)) is not None}
-    empty = engine._model("empty", floor)
+    walking = {a: m for a in areas if (m := engine.model("moving", a)) is not None}
+    still = {a: m for a in walking if (m := engine.model("still", a)) is not None}
+    empty = engine.model("empty", floor)
     if not walking or empty is None:
         return None
     return Classes(walking, still, empty)

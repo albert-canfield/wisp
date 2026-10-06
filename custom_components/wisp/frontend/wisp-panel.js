@@ -443,6 +443,8 @@ class WispPanel extends HTMLElement {
       this._rectArea(el.value);
     } else if (el.dataset.act === "node-area") {
       this._setNodeArea(el.dataset.mac, el.value || null);
+    } else if (el.dataset.act === "exit") {
+      this._setExit(el.dataset.floor ?? "", el.dataset.area, el.checked);
     } else if (el.dataset.plan === "file") {
       this._input(e); // browsers that send no input event for a chosen file
     }
@@ -490,6 +492,31 @@ class WispPanel extends HTMLElement {
     }
     this._render();
     if (refocus && !this.shadowRoot.activeElement) this.shadowRoot.querySelector(`select[data-act=channel][data-floor="${CSS.escape(key)}"]`)?.focus();
+  }
+
+  /* A room ticked or not as a way off the floor: the floor's whole list goes, saved at once. The
+     ticks wait for the answer; a failure says why under the room. */
+  async _setExit(key, area, on) {
+    const f = this._data?.floors.find((x) => (x.floor ?? "") === key);
+    if (!f || this._exitChoice) return;
+    const refocus = this.shadowRoot.activeElement?.dataset.act === "exit"; // the redraw takes the focus from it
+    const exits = new Set(f.exits ?? []);
+    if (on) exits.add(area);
+    else exits.delete(area);
+    const list = [...exits].sort();
+    this._exitChoice = { floor: key, exits: list };
+    this._exitFailure = null;
+    this._render();
+    try {
+      const view = await this._hass.callWS({ type: "wisp/floor/set_exits", floor: key || null, exits: list });
+      this._mergeFloor(key, { exits: list, ...(view ?? {}) }); // until the next update brings it
+    } catch (err) {
+      this._exitFailure = { floor: key, area, message: err?.message || "Wisp could not save the ways off the floor." };
+    } finally {
+      this._exitChoice = null;
+      this._render();
+    }
+    if (refocus && !this.shadowRoot.activeElement) this.shadowRoot.querySelector(`input[data-act=exit][data-floor="${CSS.escape(key)}"][data-area="${CSS.escape(area)}"]`)?.focus();
   }
 
   _ask(kind, floor, area) {
@@ -1155,7 +1182,8 @@ class WispPanel extends HTMLElement {
       text = `Everyone must stay out until it ends. Recording starts in ${r.starts_in} s and lasts ${secs(r.seconds_left - r.starts_in)}.`;
     } else {
       title = `Keep ${floorPhrase(f)} empty`;
-      text = `${plural(r.recorded, "sample", "samples")} so far.`;
+      const skipped = r.skipped ? `, ${r.skipped} s with someone moving left out` : ""; // seconds Wisp saw motion in
+      text = `${plural(r.recorded, "sample", "samples")} so far${skipped}.`;
     }
     const left = waiting ? r.starts_in : r.seconds_left;
     return `<div class="run${waiting ? " wait" : ""}">
@@ -1470,6 +1498,7 @@ class WispPanel extends HTMLElement {
       rows.push(["hint", `<p class="hint">Calibrate each room: stand in it, tap Calibrate and keep at it until the countdown ends. A room counts from ${d.min_samples} samples.</p>`]);
     }
     for (const a of f.areas) rows.push([`area:${a.area}`, this._area(f, a, d)]);
+    if (f.areas.length && f.nodes.length) rows.push(["exits", `<p class="row tip">${esc(this._exitsTip(f, d))}</p>`]);
     if (f.other_areas.length && f.nodes.length) rows.push(["other", this._other(f, d)]);
     if (f.nodes.length) rows.push(["empty", this._empty(f)]);
     rows.push(["plan", this._planRow(f)]);
@@ -1516,17 +1545,41 @@ class WispPanel extends HTMLElement {
     const meta = kinds.length ? `${kinds.join(", ")} ${one}` : "not calibrated";
     const chip = recording ? `<span class="chip rec">recording</span>` : `<span class="state" hidden></span>`; // filled after each update
     const asking = this._isOpen("room", key, a.area) ? this._askRoom(f, a.area, a.name) : this._isOpen("clear", key, a.area) ? this._askClear(key, a) : "";
+    const fail = this._exitFailure?.floor === key && this._exitFailure.area === a.area ? `<p class="fail" role="alert">${esc(this._exitFailure.message)}</p>` : "";
     return `<div class="row">
       <div class="line">
-        <div class="what"><b>${esc(a.name)}</b><small>${esc(meta)}</small></div>
+        <div class="what"><b>${esc(a.name)}</b><small class="meta-line"><span>${esc(meta)}</span>${f.nodes.length ? this._exit(f, a, d) : ""}</small></div>
         ${chip}
         <div class="acts">
           <button data-act="ask-room"${attr("floor", key)}${attr("area", a.area)}${asking || recording || !f.nodes.length ? " disabled" : ""}>Calibrate</button>
           ${a.samples || still ? `<button class="quiet" data-act="ask-clear"${attr("floor", key)}${attr("area", a.area)}${asking ? " disabled" : ""}>Clear</button>` : ""}
         </div>
       </div>
+      ${fail}
       ${asking}
     </div>`;
+  }
+
+  /* A tick for a room with stairs or a door outside: Wisp lets the floor's person leave the floor
+     only through these. A room not drawn on a plan with rooms (the hallway, say) is one always. */
+  _exit(f, a, d) {
+    const key = f.floor ?? "";
+    const [out, brief] = oneLevel(f, d.floors) ? ["way out", "Way out"] : ["way off the floor", "Way off"];
+    if (f.plan && f.rooms?.length && !f.rooms.some((r) => r.area === a.area)) {
+      const why = `Not drawn on the plan: always a ${out}`;
+      return `<label class="exit" title="${esc(why)}"><input type="checkbox" checked disabled aria-label="${esc(`${a.name}: ${why}`)}"><span>${brief}: not drawn</span></label>`;
+    }
+    const choice = this._exitChoice?.floor === key ? this._exitChoice : null;
+    const on = (choice ? choice.exits : f.exits ?? []).includes(a.area);
+    return `<label class="exit"><input type="checkbox" data-act="exit"${attr("floor", key)}${attr("area", a.area)} aria-label="${esc(`${a.name}: a ${out}`)}"${on ? " checked" : ""}${this._exitChoice ? " disabled" : ""}><span>${out[0].toUpperCase()}${out.slice(1)}</span></label>`;
+  }
+
+  /* Once under a floor's rooms: what the ticks are for. */
+  _exitsTip(f, d) {
+    const [what, where] = oneLevel(f, d.floors) ? ["a door outside", "the home"] : ["stairs or a door outside", "the floor"];
+    return f.plan && f.rooms?.length
+      ? `Tick the rooms with ${what}: people leave ${where} only through them and the rooms not drawn (the hallway).`
+      : `Tick the rooms with ${what}: people leave ${where} only through them. With none ticked, any room can be the way out.`;
   }
 
   _other(f) {
@@ -1871,6 +1924,14 @@ const STYLE = `
   .what b { font-size: .975rem; font-weight: 500; line-height: 1.35; overflow-wrap: anywhere; }
   .what small { font-size: .8125rem; line-height: 1.35; color: var(--wisp-muted); overflow-wrap: anywhere; }
   .acts { display: flex; flex-wrap: wrap; gap: 6px; }
+  /* Under a room's name its samples, and beside them, or under them where they do not fit, its tick */
+  .meta-line { display: flex; flex-wrap: wrap; align-items: center; column-gap: 12px; }
+  .exit { display: inline-flex; align-items: center; gap: 5px; cursor: pointer; }
+  .exit:has(:disabled) { cursor: default; }
+  .exit input { flex: none; width: 14px; height: 14px; margin: 0; accent-color: var(--wisp-primary); cursor: inherit; }
+  .exit input:focus-visible { outline: 2px solid var(--wisp-primary); outline-offset: 2px; }
+  @media (pointer: coarse) { .exit { min-height: 26px; } .exit input { width: 16px; height: 16px; } }
+  .tip { margin: 0; font-size: .8125rem; line-height: 1.45; color: var(--wisp-muted); }
   /* A node: name, area and ESPHome on a line, what is wrong, where and its WiFi under them; the area
      goes under on a narrow card */
   .nodes-col { container-type: inline-size; }

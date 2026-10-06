@@ -120,7 +120,8 @@ class FloorSensor(WispRoomEntity, SensorEntity):
 
 
 class Room(FloorSensor):
-    """The room someone moves in on the floor, "none" while nobody moves."""
+    """The room the floor's person is in, walking or still (the room tracker), "none" while nobody
+    is on the floor."""
 
     key = "room"
     _attr_icon = "mdi:floor-plan"
@@ -131,9 +132,12 @@ class Room(FloorSensor):
         return self.presence.available(self.floor)
 
     def value(self) -> tuple[str | None, dict[str, Any]]:
-        decision = self.presence.engine.decisions.get(self.floor)
-        confidence = None if decision is None or decision.confidence is None else round(decision.confidence, 2)
-        attrs = {"confidence": confidence, "probabilities": self.presence.probabilities(decision)}
+        estimate = self.presence.estimates.get(self.floor)
+        attrs = {
+            "confidence": self.presence.confidence(estimate),
+            "walking": bool(estimate and estimate.walking),
+            "probabilities": self.presence.probabilities(estimate.probabilities if estimate else None),
+        }
         return self.presence.room(self.floor), attrs
 
     def _urgent(self, value: tuple[str | None, dict[str, Any]]) -> bool:

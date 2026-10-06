@@ -1,7 +1,11 @@
 """Today's room presence, as presence.py drives it each second: Rooms.step with the floor's live
 scores, motion flags, signal and activity (the nodes' confirmations, or presence.py's own check
 for older firmware), then "presence first": the room someone walks in now, else the room whose
-presence won last while it holds; walking only while the moving decision is sure."""
+presence won last while it holds; walking only while the moving decision is sure.
+
+The hand rules it drives left the engine with integration 0.1.17 (the room tracker replaced them):
+run it on the engine of commit c2411a5, e.g. `git worktree add /tmp/wisp-c2411a5 c2411a5` and
+WISP_ENGINE_ROOT=/tmp/wisp-c2411a5."""
 from __future__ import annotations
 
 from collections import deque
