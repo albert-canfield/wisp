@@ -144,6 +144,21 @@ def test_breathing_keeps_a_quiet_sitter(engine: Rooms):
     assert still.estimate.room == "kitchen" and gone.estimate.room is None
 
 
+def test_breathing_in_bursts_keeps_a_quiet_sitter(engine: Rooms):
+    """Breathing shows in bursts with minutes between (the owner at his desk: two nodes' links
+    together in 12% of seconds). It restarts the quiet hold like activity, and counts for the
+    person's room while it stays the likeliest, even under the bar to be shown: before, the office
+    went 10 minutes after the last shift in the chair, sliding under the bar in a gap."""
+    day = Day(engine, seed=167)
+    day.walk("kitchen", 5)
+    day.sit("kitchen", 3, every=1)
+    rooms = []
+    for _ in range(20):  # 40 minutes
+        rooms += day.quiet(20, breathing={(AP, N1), (N2, N1)})
+        rooms += day.quiet(100)
+    assert set(rooms) == {"kitchen"}
+
+
 def test_breathing_elsewhere_does_not_hold_a_room(engine: Rooms):
     """Breathing on the office's links does not keep someone in the kitchen."""
     day = Day(engine, seed=159)

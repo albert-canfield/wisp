@@ -12,7 +12,7 @@ next to it). Without either (no plan, or only a picture of one) every room is a 
 the rate, the door being in one of N rooms: otherwise anyone who stops walking and sits quietly
 would as likely have left. Someone still starts walking in the room they are in. So nobody
 changes room without walking, and nobody leaves without walking out. Someone still who shows no
-activity for quiet_hold seconds may also have left unseen, at `gone` per second; nobody stays
+activity or breathing for quiet_hold seconds may also have left unseen, at `gone` per second; nobody stays
 still for long in a room no one sits in (undrawn while others are drawn, and without a still
 calibration: a hallway).
 
@@ -38,13 +38,16 @@ P(breathing | busy there) 0.05 (desk work breathes on fewer links: any link 19% 
 against 68% sitting quietly), against P(breathing | nobody, walking, or anyone elsewhere) 0.001,
 ten times the night's bound (no two-link second in 28,800, so at most about 1e-4). A second
 without breathing says nothing: the detection is off by default, and a quiet sitter shows it only
-in some seconds. Breathing counts only for the room shown, so it never starts presence or moves
-it to another room: someone must walk in.
+in some seconds. Breathing counts only for the person's room (`held`: shown once at least `show`
+sure, kept while it stays the likeliest, also under the bar), so it never starts presence or moves
+it to another room: someone must walk in. Counted for every room whose links breathe, it moved
+mass from the faint chance of an unseen walk into them, and put someone in a room never walked
+to. At the owner's desk, breathing on two nodes' links came in 12% of seconds, in bursts.
 
 The forward pass gives every state's probability each second; the room shown is the likeliest
 (a room's three states summed, against the empty floor), and only while it holds `show` (0.6) of
 the probability: started under someone sitting (Home Assistant restarted), with no walk seen, the
-rooms tie and a guess would stick, breathing counting for the room shown. On the owner's labelled
+rooms tie and a guess would stick if breathing counted for it. On the owner's labelled
 evening (firmware/tools/study/REPORT.md) it got every present second right, with no room changes
 while sitting, against 84% for the hand rules it replaced (an occupied desk lost after 3 quiet
 minutes); error over the labelled seconds 0.0% (1.4% showing the likeliest room however unsure,
@@ -202,7 +205,8 @@ class RoomTracker:
         self.alpha: list[float] | None = None
         self.last_active = -math.inf
         self.last_breathing = -math.inf  # the floor's latest breathing second
-        self.shown: str | None = None
+        self.shown: str | None = None  # the room shown: held, and at least `show` sure
+        self.held: str | None = None  # the person's room, once shown, while it stays the likeliest
 
     def _transitions(self, quiet: bool) -> list[list[tuple[int, float]]]:
         """Per state, where its probability comes from: (previous state, probability). quiet:
@@ -244,7 +248,7 @@ class RoomTracker:
         """Forget who is where (a restart: the first seconds decide again)."""
         self.alpha = None
         self.last_active = self.last_breathing = -math.inf
-        self.shown = None
+        self.shown = self.held = None
 
     def pin(self, room: str | None, walking: bool, now: float) -> Estimate:
         """While a calibration records, its instructions say where everyone is: walking or still
@@ -253,12 +257,12 @@ class RoomTracker:
         n = len(self.states)
         if room is None:
             self.alpha = [1.0] + [0.0] * (n - 1)
-            self.shown = None
+            self.shown = self.held = None
         elif room in self.classes.walking:
             self.alpha = [0.0] * n
             self.alpha[self.index[(WALK if walking else BUSY, room)]] = 1.0
             self.last_active = now
-            self.shown = room
+            self.shown = self.held = room
         else:
             self.reset()
         return recorded(room, walking)
@@ -275,6 +279,7 @@ class RoomTracker:
         self.alpha = [q / total for q in alpha] if total > 0 else None
         self.last_active, self.last_breathing = old.last_active, old.last_breathing
         self.shown = old.shown if old.shown in self.classes.walking else None
+        self.held = old.held if old.held in self.classes.walking else None
 
     # Each second
 
@@ -304,7 +309,8 @@ class RoomTracker:
             prior = self._prior
         else:
             alpha = self.alpha
-            incoming = self._incoming[now - self.last_active > self.params.quiet_hold]
+            quiet = now - max(self.last_active, self.last_breathing) > self.params.quiet_hold
+            incoming = self._incoming[quiet]
             prior = [sum(alpha[i] * q for i, q in row) for row in incoming]
         post = [a * b for a, b in zip(prior, like, strict=True)]
         total = sum(post)
@@ -335,7 +341,7 @@ class RoomTracker:
                     out[k + 2 * r] += w * fe
         if breathing_second(breathing):
             self.last_breathing = now
-            room = self.shown
+            room = self.held
             if room is not None and self.classes.own.get(room, frozenset()) & set(breathing):
                 k = self.rooms.index(room) + 1
                 out[k + 2 * r] += self._breath[0]
@@ -351,10 +357,11 @@ class RoomTracker:
             walking += walk
             rooms[room] = walk + alpha[k + r] + alpha[k + 2 * r]
         best = max(rooms, key=rooms.__getitem__)
-        if self.shown not in rooms or rooms[best] > rooms[self.shown] + self.params.switch:
-            self.shown = best
-        if self.shown is not None and rooms[self.shown] < self.params.show:
-            self.shown = None  # someone, maybe, but where is unclear
+        p = self.params
+        if best != self.held and (self.held not in rooms or rooms[best] > rooms[self.held] + p.switch):
+            # The person's room: shown once sure, kept while the likeliest (breathing counts for it)
+            self.held = best if best is not None and rooms[best] >= p.show else None
+        self.shown = self.held if self.held is not None and rooms[self.held] >= p.show else None
         return Estimate(self.shown, walking > 0.5, rooms, walking)
 
 
