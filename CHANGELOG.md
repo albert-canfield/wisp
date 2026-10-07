@@ -1,7 +1,7 @@
 # Changelog
 
-## 0.1.20 (unreleased)
-Versions count up with each round of changes until the first release.
+## 0.1.20 (2026-10-06)
+The first release. Nodes and integration share one version from here on: firmware 0.1.20 is the nodes' 0.1.8 renumbered, with no other change.
 
 First working version: the grid, the hive and motion per link, with the Home Assistant integration and the map card.
 

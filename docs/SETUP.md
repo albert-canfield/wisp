@@ -10,7 +10,9 @@ A practical guide: boards, flashing, Home Assistant, where to put the nodes, and
 
 ## 2. Flashing
 
-Until the web flasher is online (first release), build with ESPHome:
+The easiest way is the **[Wisp web flasher](https://albert-canfield.github.io/wisp/)**: open it in Chrome or Edge, plug the board in by USB, click Install and enter your WiFi details. It picks the right build for your chip.
+
+To build it yourself instead, use ESPHome:
 
 ```bash
 python3.13 -m venv .venv && .venv/bin/pip install esphome
@@ -25,7 +27,7 @@ python3.13 -m venv .venv && .venv/bin/pip install esphome
 
 1. A new node opens a hotspot named `wisp-xxxxxx` (the last six digits of its MAC). Join it from a phone, pick your network and enter its password.
 2. Home Assistant discovers the node under ESPHome. Add it: restart, updates, settings and health appear there.
-3. Install the Wisp integration: copy `custom_components/wisp` to Home Assistant's `config/custom_components` (or add this repository to HACS as a custom integration repository) and restart Home Assistant. Wisp discovers the nodes by itself; confirm the first one, the others are added automatically.
+3. Install the Wisp integration with HACS: [add the repository](https://my.home-assistant.io/redirect/hacs_repository/?owner=albert-canfield&repository=wisp&category=integration) (or in HACS, menu, Custom repositories: `https://github.com/albert-canfield/wisp`, type Integration), download Wisp and restart Home Assistant. Without HACS, copy `custom_components/wisp` from the latest release to Home Assistant's `config/custom_components` and restart. Wisp discovers the nodes by itself; confirm the first one, the others are added automatically.
 4. Open the **Wisp** panel: in the sidebar, or with Open on the Wisp hub device (Settings > Devices & services > Wisp). Floor plans, node placement and room calibration are all there. The hub device also has Nodes online and Hive in sync, to see at a glance (or automate on) whether every node reports.
 5. Add the map to a dashboard if you like: a card of type `custom:wisp-map-card`.
 

@@ -1,152 +1,163 @@
 <p align="center">
-  <img src="https://raw.githubusercontent.com/albert-canfield/wisp/main/custom_components/wisp/brand/icon@2x.png" alt="Wisp: footprints walking across a parchment floor plan" width="160">
+  <img src="https://raw.githubusercontent.com/albert-canfield/wisp/main/docs/images/hero.png" alt="Wisp: a parchment floor plan with ESP32 nodes, WiFi links and a trail of footprints walking from one room into the next" width="100%">
 </p>
-
-<h1 align="center">Wisp</h1>
-<p align="center"><b>WiFi Spatial Presence for Home Assistant</b></p>
 
 <p align="center">
-See who is where in your home, room by room and as footprints moving across your floor plan, using only the WiFi signals between small ESP32 nodes. No cameras, no wearables, no phone to carry.
+  <a href="https://github.com/albert-canfield/wisp/releases"><img src="https://img.shields.io/github/v/release/albert-canfield/wisp?style=flat-square&color=8b5a2b" alt="Latest release"></a>
+  <a href="https://hacs.xyz/docs/faq/custom_repositories/"><img src="https://img.shields.io/badge/HACS-custom%20repository-41BDF5?style=flat-square" alt="HACS custom repository"></a>
+  <img src="https://img.shields.io/badge/Home%20Assistant-2026.3%2B-18BCF2?style=flat-square&logo=homeassistant&logoColor=white" alt="Home Assistant 2026.3 or newer">
+  <a href="https://github.com/albert-canfield/wisp/actions/workflows/validate.yml"><img src="https://img.shields.io/github/actions/workflow/status/albert-canfield/wisp/validate.yml?branch=main&style=flat-square&label=HACS%20%26%20hassfest" alt="HACS and hassfest validation"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/github/license/albert-canfield/wisp?style=flat-square&color=6b4f2a" alt="MIT licence"></a>
 </p>
 
-> **Status: early development, phase 1 working.** Nodes form their grid, measure every link and report motion per link to Home Assistant. Rooms and positions come next. The design is in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md), the wire format in [docs/PROTOCOL.md](docs/PROTOCOL.md).
+<p align="center">
+  <a href="https://my.home-assistant.io/redirect/hacs_repository/?owner=albert-canfield&repository=wisp&category=integration"><img src="https://my.home-assistant.io/badges/hacs_repository.svg" alt="Open your Home Assistant instance and add Wisp to HACS"></a>
+</p>
+
+**Wisp** (WiFi Spatial Presence) is a Marauder's Map for your home, with physics instead of magic. A handful of cheap ESP32 boards listen to the WiFi between each other and your router, and Home Assistant draws a living parchment map: who is in which room, and footprints where someone walks. No cameras, no wearables, no phone to carry, and nothing leaves your network.
+
+> **Early release.** Wisp runs every day in its author's home (4 nodes, one floor, one access point). It works, it is measured, and it is still young: expect rough edges, and please [open an issue](https://github.com/albert-canfield/wisp/issues) when something looks wrong.
+
+## Contents
+
+[See it](#see-it) · [How it works](#how-it-works) · [How well it works](#how-well-it-works) · [What you need](#what-you-need) · [Install](#install) · [Set up your home](#set-up-your-home) · [What you get](#what-you-get) · [Tips](#tips-for-the-best-results) · [Limits and roadmap](#limits-and-roadmap) · [Documentation](#documentation)
 
 ## See it
 
-<p align="center"><img src="https://raw.githubusercontent.com/albert-canfield/wisp/main/docs/images/map-card.png" alt="The Wisp map card in light and dark: nodes, an access point, links that redden with motion and a trail of footprints where someone walks" width="100%"></p>
+<p align="center"><img src="https://raw.githubusercontent.com/albert-canfield/wisp/main/docs/images/map-card.png" alt="The Wisp map card in light and dark: a floor plan with rooms, nodes, the access point, links that redden with motion and a trail of footprints" width="100%"></p>
 
 <table>
   <tr>
-    <td width="70%"><img src="https://raw.githubusercontent.com/albert-canfield/wisp/main/docs/images/panel.png" alt="The Wisp panel: recording banners with countdowns, the map, and rooms per floor with Calibrate and Clear"></td>
-    <td width="30%"><img src="https://raw.githubusercontent.com/albert-canfield/wisp/main/docs/images/panel-phone.png" alt="The Wisp panel on a phone in dark mode"></td>
+    <td width="68%"><img src="https://raw.githubusercontent.com/albert-canfield/wisp/main/docs/images/panel.png" alt="The Wisp panel: the map, rooms per floor with presence and calibration, nodes and the hive"></td>
+    <td width="32%"><img src="https://raw.githubusercontent.com/albert-canfield/wisp/main/docs/images/panel-phone.png" alt="The Wisp panel on a phone in dark mode"></td>
   </tr>
   <tr>
-    <td><b>The Wisp panel.</b> Teach it your rooms: tap Calibrate and walk around until the countdown ends.</td>
-    <td><b>On a phone,</b> light or dark.</td>
+    <td><b>The Wisp panel.</b> Draw your floor plan, place the nodes, and teach Wisp your rooms with a short walk in each.</td>
+    <td><b>On a phone,</b> light or dark: take it along on the calibration walk.</td>
   </tr>
 </table>
 
-<p align="center"><i>Rendered from the real card and panel code with sample data.</i></p>
+<p align="center"><sub>Rendered from the real card and panel code with sample data.</sub></p>
 
 ## How it works
 
-People absorb and reflect WiFi. Wisp places three or four cheap ESP32 nodes around each floor. They find each other and form a grid on their own, take turns sending short pings to each other and to your WiFi access point, and every node measures how the signal on each link changes (its channel state information, or CSI). The access point is a fixed point on your floor plan, so it adds links and precision. When someone walks between two nodes, that link reacts.
+<p align="center"><img src="https://raw.githubusercontent.com/albert-canfield/wisp/main/docs/images/how-it-works.png" alt="Three steps: nodes on each floor measure every WiFi link; the hive confirms motion; Home Assistant follows one person per floor and draws footprints on the plan" width="100%"></p>
 
-- **Nodes** (`wisp-node` firmware, built on ESPHome) are the core: a lean, self-healing ESP-NOW grid that measures every link and sends a small disturbance score per link to Home Assistant over UDP several times a second. Nodes can be added or removed at any time; the grid adapts on its own.
-- **The Wisp integration** is the brain. It combines every link on a floor, learns your rooms from a short calibration walk, and turns it all into presence per room and a position on the floor.
-- **The map card** (`wisp-map-card`) shows the footprints moving across your own floor plan.
+People absorb and reflect WiFi. When you walk between two radios, the signal between them changes in a way a radio can measure: its channel state information (CSI): how strongly each of the dozens of subcarriers in a WiFi frame arrives.
 
-Everything stays on your local network.
+1. **Nodes measure every link.** Three to six ESP32 boards per floor find each other and form a grid over ESP-NOW, with no leader and no setup. They take turns sending short beacons, ping your access point 20 times a second, and score how much each link moves against its own quiet baseline. Each link learns its own threshold from its quiet minutes (CFAR, as in radar), so a noisy link flags as rarely as a calm one.
+2. **The hive confirms.** Every node keeps the same picture of the whole grid. A link counts as motion only when it moves both ways and a nearby node agrees: a body changes a link in both directions and the links around it, while one node's own noise does not. Nodes also look for breathing, the slow rise and fall of a chest, so someone sitting perfectly still is not lost.
+3. **Home Assistant follows you.** The Wisp integration learns each room from a minute of walking in it, and follows one person per floor with a hidden Markov model: walking, busy or resting in a room, or off the floor. Nobody changes room without walking, nobody leaves the floor without walking out, and a room is shown only once Wisp is sure. On your floor plan, footprints follow the walker at walking speed.
 
-## What works today
+Nodes are ESPHome devices running Wisp's own component (`wisp-node`), so updates, settings and health come from ESPHome as usual. Link data goes to Home Assistant over UDP on your local network. Your WiFi access point is part of the sensing and a fixed point on the map.
 
-- **Self-forming grid.** Nodes find each other over ESP-NOW, take time slots without a leader, and heal by themselves when a node reboots, leaves or joins.
-- **Homes with several access points.** Nodes agree on one channel and join the best access point on it, so the grid stays together.
-- **The hive.** Every node keeps the same picture of the whole grid and works out the same layout of the nodes.
-- **Motion per link.** Each link from an access point or another node gets a motion score (1 means as quiet as usual) and a motion on/off state, at a threshold of its own: a noisy link raises its threshold from its quiet scores, so every link flags about as rarely with nobody there.
-- **Home Assistant.** Nodes are ESPHome devices (restart, updates, settings, health); the Wisp integration adds the link sensors.
+## How well it works
 
-## Entities
+Measured in the author's home: 4 nodes and one access point on one floor, replayed second by second through the same code Home Assistant runs (`firmware/tools/study/`).
 
-| From | What | Example |
-|---|---|---|
-| Each node (ESPHome) | Motion on the link to its access point, grid size, hive in sync, AP CSI rate, motion threshold, breathing detection (experimental, off), restart, safe mode, identify, firmware update | `binary_sensor.wisp_a8c77c_ap_motion` |
-| Wisp integration | Motion score and motion per link, signal and spread (disabled by default) | `sensor.hall_ap_58_04_4f_1d_12_f9_motion_score` |
-| Wisp integration, once calibrated | Room per floor, presence per room, calibration progress per floor | `sensor.wisp_floor_2_room`, `binary_sensor.wisp_office_presence` |
-| Wisp integration, on a floor with a plan | Position x and y of someone moving, in the plan's metres, with the fit's quality | `sensor.wisp_floor_2_position_x` |
-
-## Try it
-
-The full guide, including where to put the nodes and recommended access point settings, is in [docs/SETUP.md](docs/SETUP.md); the measurements behind the motion defaults are in [docs/TUNING.md](docs/TUNING.md). In short, until the first release puts the web flasher online, nodes are built with ESPHome:
-
-```bash
-python3.13 -m venv .venv && .venv/bin/pip install esphome
-.venv/bin/esphome run firmware/wisp-node-esp32s3.yaml   # or wisp-node-esp32c3.yaml, wisp-node-esp32.yaml
-```
-
-1. Join the node's hotspot `wisp-xxxxxx` from a phone and pick your WiFi.
-2. Add the node in Home Assistant under ESPHome when it is discovered.
-3. Copy `custom_components/wisp` into Home Assistant's `config/custom_components` (or add this repository to HACS as a custom integration repository) and restart. Wisp finds the nodes by itself.
-
-Tools are in [firmware/tools](firmware/tools): a guided walk test that reports how well each link sees you (`walk_test.py`), a live recorder with a plot, an overnight logger, and replays of the motion score (`replay.py`) and of positions (`replay_floor.py`) from its recordings.
-
-## Hardware
-
-- At least 3 cheap ESP32 boards per floor, powered by USB. More boards give better precision. ESP32-S3, ESP32-C3 and the original ESP32 are supported; the original ESP32 cannot range with Wi-Fi FTM.
-- Your existing WiFi router or access point, which also takes part in the sensing.
-- Home Assistant 2026.3 or newer.
-
-## Access point settings
-
-Each node pings the access point it joins and measures the replies, so its motion score is only as steady as that access point. Nodes reach each other on one 2.4 GHz channel, which they agree on by themselves. Recommended 2.4 GHz settings, none required:
-
-| Setting | Why |
+| What | Result |
 |---|---|
-| The same channel on every access point: 1, 6 or 11, the quietest | Each node then joins its nearest access point; nodes follow the channel by themselves |
-| 20 MHz width | 40 MHz overlaps the other 2.4 GHz channels and can fall back to 20 MHz on its own |
-| Fixed transmit power, the same on every access point, never Auto (lower it if access points are close) | Power changes look like motion; with equal power the strongest access point is the nearest |
-| No automatic channel or power optimisation | A channel change moves the whole grid, a power change looks like motion |
-| No minimum RSSI kick, load balancing or client limit on the nodes' network | Nodes choose their own access point; a kicked node stops sensing until it reconnects |
-| Optional: disable 802.11b (CCK) rates | Beacons then carry usable CSI too; ping replies already do |
+| Room right, over a labelled evening (desk, play room, empty floor, walks) | **100%** of the seconds someone was there; 0.0% of all labelled seconds wrong (the rules it replaced: 12.5%) |
+| Empty floor, 8 hours overnight | **Nobody shown** in any second |
+| Sitting and working at a desk for 52 minutes | Held in the right room throughout |
+| Walking recognised as walking | 84% of walking seconds (57% before the tracker) |
+| Cost in Home Assistant | About 50 µs per floor per second |
 
-OFDMA, band steering and the wireless mode do not matter for the nodes, as long as their network keeps 2.4 GHz with 802.11n. The trade-off: access points on one 2.4 GHz channel share its airtime, but most phones and laptops use 5 or 6 GHz anyway. Where each setting is on TP-Link Omada, Ubiquiti UniFi and consumer routers: [docs/SETUP.md](docs/SETUP.md#5-access-points).
+One house and a few evenings of labels: treat these as a direction, not a promise. Your rooms, walls and node placement will differ, and the calibration walk is what makes Wisp fit your home.
 
-## Web flasher
+## What you need
 
-Nodes are flashed from the browser, with nothing to install. Open the Wisp web flasher in Chrome or Edge, plug the board in by USB, click Install and enter your WiFi details. Home Assistant then discovers the node by itself. The flasher goes live with the first firmware release at [albert-canfield.github.io/wisp](https://albert-canfield.github.io/wisp).
+| | |
+|---|---|
+| **Nodes** | 3 or more ESP32 boards per floor, 4 to 6 for the best results, all the same model: ESP32-S3, ESP32-C3 or the original ESP32 (a few euros each). USB power. |
+| **WiFi** | Your existing router or access points, on 2.4 GHz. Nothing to install on them. |
+| **Home Assistant** | 2026.3 or newer, with [HACS](https://hacs.xyz) for the easiest install. |
+| **A browser** | Chrome or Edge, to flash the nodes over USB from the web flasher. |
 
-## Map card
+## Install
 
-The integration brings its own dashboard card and loads it by itself. Add it from the card picker ("Wisp map") or in YAML:
+### 1. Flash the nodes
+
+Open the **[Wisp web flasher](https://albert-canfield.github.io/wisp/)** in Chrome or Edge, plug a board in by USB, click Install and enter your WiFi details. Repeat for each node. (Prefer the command line? Build with ESPHome: see [docs/SETUP.md](docs/SETUP.md#2-flashing).)
+
+Home Assistant then discovers each node under **ESPHome**. Add them: that gives you restarts, firmware updates and health for every node.
+
+### 2. Install the integration
+
+**With HACS (recommended):**
+
+[![Open your Home Assistant instance and add Wisp to HACS](https://my.home-assistant.io/badges/hacs_repository.svg)](https://my.home-assistant.io/redirect/hacs_repository/?owner=albert-canfield&repository=wisp&category=integration)
+
+Or by hand in HACS: open the menu (⋮) and choose **Custom repositories**, add `https://github.com/albert-canfield/wisp` with the type **Integration**, then find **Wisp**, download it and restart Home Assistant.
+
+**Manually:** download the source of the [latest release](https://github.com/albert-canfield/wisp/releases/latest), copy `custom_components/wisp` into your Home Assistant `config/custom_components` folder and restart.
+
+Wisp finds your nodes by itself: confirm the first one under **Settings > Devices & services**, and the others join automatically.
+
+## Set up your home
+
+Everything happens in the **Wisp** panel in the sidebar, and works on a phone too.
+
+1. **Give each node its room.** Nodes take their floor from the Home Assistant area you put them in.
+2. **Add a floor plan.** Draw it on a grid in metres (rooms as rectangles), or upload an image of your plan. Then drag each node, and your access point, to where it stands.
+3. **Mark the ways out.** Tick the rooms with stairs or a door outside (**Way off the floor**). Rooms you leave undrawn count as the hallway.
+4. **Teach Wisp your rooms.** Tap **Calibrate** in a room and walk around in it until the countdown ends (about a minute). For rooms where people sit, add a **still** calibration at the desk or sofa. Then **Calibrate empty floor** with nobody on the floor: Wisp gives you 30 seconds to leave first.
+5. **Add the map to a dashboard:** the card **Wisp map** is in the card picker.
+
+## What you get
+
+| Entity | What it tells you | Example |
+|---|---|---|
+| Room, per floor | The room the floor's person is in, or `none`; with its confidence and whether they walk | `sensor.wisp_ground_floor_room` |
+| Presence, per room | Occupancy for automations, with `still` while someone sits there | `binary_sensor.wisp_office_presence` |
+| Position, per floor with a plan | x and y in metres on your plan, while someone moves | `sensor.wisp_ground_floor_position_x` |
+| Motion, per link | A motion score and on/off for every link (disabled by default) | `sensor.hall_ap_..._motion_score` |
+| Each node (ESPHome) | Motion confirmed by the hive, breathing (experimental), grid size, hive in sync, motion threshold, firmware update | `binary_sensor.wisp_a8c77c_motion` |
+| The hub | Nodes online, hive in sync, calibration progress | `sensor.wisp_nodes_online` |
+
+The map card in YAML:
 
 ```yaml
 type: custom:wisp-map-card
-title: Wisp     # optional
-floor: Upstairs # optional, floor id or name; the first floor with nodes by default
-rotate: 0       # optional, degrees clockwise: 0, 90, 180 or 270
-flip: false     # optional, mirror left to right
-plan_photo: false # optional, the floor plan is a photo: dimmed, not inverted, in dark mode
+floor: Ground floor  # optional: floor id or name; the first floor with nodes by default
+rotate: 0            # optional: 0, 90, 180 or 270 degrees
+flip: false          # optional: mirror left to right
+labels: true         # optional: names of nodes and access points
+lines: true          # optional: the links
+plan_photo: false    # optional: the plan is a photo (dimmed, not inverted in dark mode)
 ```
 
-Nodes sit where the grid's own layout puts them, access points where the nodes' signal puts them, and a link reddens while it sees motion. Where someone moves, a trail of footprints follows the best guess of the spot, with a wider halo when Wisp is less sure (it needs three or more nodes on the floor to be meaningful). With several floors, a card shows one floor; add a card per floor.
+A home without floors in Home Assistant is one floor, shown as **Areas**: a flat with one router works as well as a house with several floors and access points.
 
-Without a floor plan the layout is relative, so turn and mirror it to match your home. With one (set in the Wisp panel, below), the card draws the plan's image inked onto the parchment, at its size in metres, with a scale bar, and the nodes, access points, links and footprints where they are on it; turn and mirror apply to the plan too. Nodes you have not placed follow the placed ones and are drawn dashed. With rooms drawn on the plan, someone moving is kept inside the house, and inside the room room presence is sure of.
+## Tips for the best results
 
-## Room presence (first version)
+- **Spread the nodes out** near walls and corners, about 1 to 1.5 m high, so the lines between them cross the places you care about: doorways, the desk, the sofa. Two nodes side by side see almost nothing.
+- **Calibrate the hallway walk with the first steps of the stairs** and the space by the front door, so leaving looks like leaving.
+- **Keep your access point steady:** one fixed 2.4 GHz channel (1, 6 or 11), 20 MHz width, fixed transmit power, no automatic channel or power optimisation. Settings for TP-Link Omada, Ubiquiti UniFi and consumer routers are in [docs/SETUP.md](docs/SETUP.md#5-access-points).
+- **Breathing detection** is a switch on each node (experimental, off by default). Turned on, it keeps someone reading or watching TV without moving in their room.
+- **Recalibrate after moving or adding a node:** new links count once the rooms have samples of them.
 
-Rooms are your Home Assistant areas and floors are your Home Assistant floors. Give each node the area it stands in (Wisp, the node, Change node): its floor is the node's floor, and nodes without one share a floor named after the hub. Then teach Wisp your rooms, one at a time, with the actions under Developer tools:
+## Limits and roadmap
 
-1. `wisp.calibrate_room` with the area, standing in that room: walk around in it until the floor's calibration sensor is idle again (60 seconds by default). A room needs 20 seconds of movement before it counts.
-2. `wisp.calibrate_room` with `mode: still`: sit still where you usually are in that room (desk, sofa). Moments with motion are left out.
-3. `wisp.calibrate_empty` with nobody on the floor: the reference a quiet room is told apart from, needed to follow anyone. Seconds with someone moving (people on the floor above can cause them) are left out.
-4. `wisp.clear_calibration` forgets a room, or everything.
+- **One person per floor.** Two people on one floor are followed as one. More than one person is the next big step.
+- **A walk is what places you.** After a restart, Wisp remembers who was where for 10 minutes; beyond that, someone already sitting is found once they move.
+- **Breathing is experimental,** measured on a handful of sittings so far.
 
-Each floor then gets a room sensor (the room its person is in, `none` while nobody is on the floor, with a confidence and whether they walk) and each calibrated room an occupancy sensor (attribute `still` while someone sits there). Wisp follows one person per floor: someone who walks into a room and sits down stays there until they walk out, nobody changes room without walking, and the floor empties when they walk off it. Someone sitting perfectly still is kept for some minutes, as long as they breathe with the nodes' Breathing detection on. A room is shown only once Wisp is fairly sure; after a restart of Home Assistant it starts from where people were, if it was back within 10 minutes.
+Next: several people per floor, walls and doors in the tracking, and calibration from everyday walks. The design and every decision behind it are in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
-Draw the rooms on the floor plan and, in the panel, tick the rooms with stairs or a door outside (Way off the floor): people leave the floor only through those and the rooms you leave undrawn (the hallway). Without a plan any room can be the way out. Calibrate the hallway walk with the first steps of the stairs and the area by the front door, so leaving looks like leaving. Calibrate again after adding nodes: new links only count once the rooms have samples of them.
+## Privacy
 
-## Wisp panel
+Wisp sees disturbances in radio links, not images or sound. It cannot tell who someone is. Link data stays on your local network between the nodes and Home Assistant, and nothing is sent to any cloud.
 
-The integration adds a Wisp page to the sidebar for administrators, so calibration needs no Developer tools. It shows, live:
+## Documentation
 
-- **The map**, the same as the card, a button per floor when there are several, and buttons to turn and mirror it (remembered per browser).
-- **Rooms per floor:** every area with a node or a calibration, its samples and whether it is occupied, and the room someone moves in now. Calibrate starts `wisp.calibrate_room` (60 seconds by default), walking around or sitting still, and counts down with what to do; Calibrate empty floor gives 30 seconds to leave the floor before it records (`wisp.calibrate_empty` with `delay`); Clear asks first. Areas on a floor without a node can be picked and calibrated too.
-- **A floor plan per floor:** Add floor plan offers Draw it (a grid of the floor's width and height in metres, then Draw rooms opens to draw each room as rectangles) or Use an image (upload one or give its address, with the floor's width; the height follows the image's proportions, or give it). Removing the Wisp integration deletes its plans, rooms and calibration. Place nodes then shows the plan: drag each node, and the access points you know, to where it stands (by touch too, or with the arrow keys), then Save. Nodes you leave are fitted to the placed ones: from two placed nodes Wisp turns, scales and if needed mirrors its own layout to match, and a third one away from the line between the first two settles the mirror. Change sets another image or size and keeps the positions; Remove asks first.
-- **Nodes:** name, area, floor, online, its access point, channel and signal, whether the hive has placed it, whether it is placed on its floor's plan, and a link to its ESPHome device.
-- **WiFi channel per floor:** Automatic, or the channel of the floor's access point, set on every node of the floor at once (see [one channel per floor](docs/SETUP.md#one-channel-per-floor)).
-- **The hive:** hash, in sync, nodes and when it was last heard.
+- [Setup guide](docs/SETUP.md): boards, flashing, node placement, access point settings, checking that it works, troubleshooting.
+- [Architecture](docs/ARCHITECTURE.md): the firmware, the hive, the tracker and the map, with the measurements behind each choice.
+- [Protocol](docs/PROTOCOL.md): the UDP wire format between nodes and Home Assistant.
+- [Tuning](docs/TUNING.md): how the motion and breathing defaults were chosen.
+- [Changelog](CHANGELOG.md).
+- [Tools](firmware/tools): a guided walk test per link, live CSI recorder, overnight logger, and replays of the motion score, positions and room presence.
 
-It works on a phone: take it along on the calibration walk, the screen stays on while a recording counts down. Nodes without a floor share one named after the hub, and `wisp.calibrate_empty` takes that name as its floor.
+## Licence
 
-Floor plan images are best kept in Home Assistant's `www` folder: `config/www/wisp/ground.png` is `/local/wisp/ground.png`. A plain drawing with a white background looks best: white turns to parchment, and in dark mode the drawing is inverted. Once a floor has a plan, every position on it, including where someone moves, is in the plan's metres from its top left corner.
-
-## Roadmap
-
-1. **Prove the signal (done).** Node firmware with the self-forming grid, the hive and per-link motion, the integration with link sensors, CI and the release pipeline.
-2. **Room presence (first version in).** Floor plans and node placement, calibration per room, presence per room. Next: a confidence score per room and calibration from a walk.
-3. **Position and map (first version in).** A best fit per floor on the plan, a tracking filter, the map card and position sensors. Next: tomographic imaging on more nodes, walls in the tracking filter, more than one person.
-4. **Ready for HACS.** The first release (web flasher and node updates from GitHub Pages), measured accuracy and full documentation.
-
-## License
-
-MIT, see [LICENSE](LICENSE).
+MIT, see [LICENSE](LICENSE). Made by [Albert Canfield](https://github.com/albert-canfield).
